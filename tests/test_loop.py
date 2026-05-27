@@ -289,6 +289,42 @@ class TestAgentLoop:
         exit_reason = _exhaust(gen)
         assert exit_reason["result"] == "CURRENT_TASK_DONE"
 
+    def test_loop_sends_system_once_and_tool_results_as_tool_messages(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """下一轮消息使用标准 role=tool，不再携带自定义 tool_results 字段."""
+        client = _make_recording_client([
+            MockResponse(
+                content="",
+                tool_calls=[
+                    MockToolCall(
+                        function=MockFunction(
+                            name="echo", arguments='{"message": "hello"}',
+                        ),
+                        id="",
+                    ),
+                ],
+            ),
+            MockResponse(content="Done."),
+        ])
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=5,
+            verbose=False,
+        )
+
+        exit_reason = _exhaust(loop.run("system prompt", "task"))
+
+        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        assert client.system == "system prompt"
+        assert client.calls[0] == [{"role": "user", "content": "task"}]
+        assert [m["role"] for m in client.calls[1][:2]] == ["tool", "user"]
+        assert client.calls[1][0]["tool_call_id"] == "call_0"
+        assert "tool_results" not in client.calls[1][1]
+
     def test_done_hook_extends_loop(self, mock_handler: BaseHandler) -> None:
         """_done_hooks 在任务声明完成时追加额外轮次."""
         mock_handler._done_hooks.append("Do one more thing: verify the result.")
@@ -318,3 +354,31 @@ def _exhaust(gen: Generator) -> Any:
             next(gen)
     except StopIteration as e:
         return e.value
+
+
+def _make_recording_client(responses: List[MockResponse]):
+    """创建记录每次 chat(messages=...) 的 mock LLM client."""
+    class RecordingClient:
+        def __init__(self):
+            self.system = ""
+            self.last_tools = ""
+            self._responses = list(responses)
+            self._call_count = 0
+            self.calls: list[list[dict]] = []
+
+        def chat(
+            self,
+            messages: List[Dict[str, Any]],
+            tools: Optional[List[Dict[str, Any]]] = None,
+        ) -> Generator[str, None, MockResponse]:
+            self.calls.append([dict(m) for m in messages])
+            if self._call_count >= len(self._responses):
+                yield "done"
+                return MockResponse(content="Task complete.")
+            resp = self._responses[self._call_count]
+            self._call_count += 1
+            if resp.content:
+                yield resp.content
+            return resp
+
+    return RecordingClient()

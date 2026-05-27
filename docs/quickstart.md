@@ -69,6 +69,9 @@ zero-agent -c config.yaml -i "帮我分析 data.csv"
 pip install -e ".[ui]"
 streamlit run zero_agent/frontends/stapp.py
 
+# 浏览器控制功能
+pip install -e ".[browser]"
+
 # OCR 功能
 pip install -e ".[memory]"
 

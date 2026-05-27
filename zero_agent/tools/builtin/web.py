@@ -25,6 +25,44 @@ def _t(zh: str, en: str, lang: str) -> str:
 
 # 模块级 driver 引用（懒加载）
 _driver: Any = None
+_driver_error: Optional[str] = None
+
+_BROWSER_EXTRA_HINT = (
+    "浏览器运行时不可用。请安装浏览器扩展依赖: "
+    "pip install 'zero-agent[browser]'"
+)
+
+
+def _load_tm_webdriver() -> Any:
+    """Load TMWebDriver from external GA install or vendored compatibility copy."""
+    try:
+        from TMWebDriver import TMWebDriver
+        return TMWebDriver
+    except ImportError:
+        pass
+
+    try:
+        from zero_agent.vendor.genericagent.tm_webdriver import TMWebDriver
+        return TMWebDriver
+    except ImportError as exc:
+        raise ImportError(f"{_BROWSER_EXTRA_HINT} ({exc})") from exc
+
+
+def _load_simphtml() -> Any:
+    """Load simphtml from external GA install or vendored compatibility copy."""
+    try:
+        import simphtml
+    except ImportError:
+        try:
+            from zero_agent.vendor.genericagent import simphtml
+        except ImportError as exc:
+            raise ImportError(f"{_BROWSER_EXTRA_HINT} ({exc})") from exc
+
+    if not hasattr(simphtml, "BeautifulSoup"):
+        raise ImportError(f"{_BROWSER_EXTRA_HINT} (beautifulsoup4 missing)")
+
+    importlib.reload(simphtml)
+    return simphtml
 
 
 def _init_driver() -> Any:
@@ -33,13 +71,14 @@ def _init_driver() -> Any:
     Returns:
         TMWebDriver 实例，或 None（初始化失败时）.
     """
-    global _driver
+    global _driver, _driver_error
     if _driver is not None:
         return _driver
 
     try:
-        from TMWebDriver import TMWebDriver
-    except ImportError:
+        TMWebDriver = _load_tm_webdriver()
+    except ImportError as exc:
+        _driver_error = str(exc)
         return None
 
     _driver = TMWebDriver()
@@ -99,7 +138,7 @@ def web_scan(
         if driver is None:
             return {
                 "status": "error",
-                "msg": "TMWebDriver 未安装或初始化失败，无法使用浏览器功能",
+                "msg": _driver_error or "TMWebDriver 初始化失败，无法使用浏览器功能",
             }
 
         sessions = driver.get_all_sessions()
@@ -131,11 +170,10 @@ def web_scan(
 
         if not tabs_only:
             try:
-                import simphtml
-                importlib.reload(simphtml)
+                simphtml = _load_simphtml()
             except ImportError:
                 result["status"] = "error"
-                result["msg"] = "simphtml 库未安装"
+                result["msg"] = _BROWSER_EXTRA_HINT
                 return result
 
             content = simphtml.get_html(
@@ -177,7 +215,7 @@ def web_execute_js(
         if driver is None:
             return {
                 "status": "error",
-                "msg": "TMWebDriver 未安装或初始化失败，无法使用浏览器功能",
+                "msg": _driver_error or "TMWebDriver 初始化失败，无法使用浏览器功能",
             }
 
         sessions = driver.get_all_sessions()
@@ -191,9 +229,9 @@ def web_execute_js(
             driver.default_session_id = switch_tab_id
 
         try:
-            import simphtml
+            simphtml = _load_simphtml()
         except ImportError:
-            return {"status": "error", "msg": "simphtml 库未安装"}
+            return {"status": "error", "msg": _BROWSER_EXTRA_HINT}
 
         result = simphtml.execute_js_rich(script, driver, no_monitor=no_monitor)
         return result

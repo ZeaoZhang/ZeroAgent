@@ -86,10 +86,10 @@ class AgentLoop:
             initial_user_content if initial_user_content is not None else user_input
         )
         messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": system_prompt},
             {"role": "user", "content": initial_content},
         ]
-        # 将 system prompt 写入 session，使其在历史裁剪时持久保留
+        # System prompt belongs to the session, not the message history. Keeping
+        # it out of messages prevents duplicate system prompts in LiteLLMSession.
         self.client.system = system_prompt
 
         turn = 0
@@ -152,9 +152,9 @@ class AgentLoop:
                     {
                         "tool_name": tc.function.name,
                         "args": json.loads(tc.function.arguments),
-                        "id": tc.id,
+                        "id": tc.id or f"call_{i}",
                     }
-                    for tc in response.tool_calls
+                    for i, tc in enumerate(response.tool_calls)
                 ]
 
             self._trigger_hook("llm_after", {
@@ -252,14 +252,8 @@ class AgentLoop:
                 next_prompt, exit_reason,
             )
 
-            # 下一轮只发新的 user message（session 内部维护完整历史）
-            messages = [
-                {
-                    "role": "user",
-                    "content": next_prompt,
-                    "tool_results": tool_results,
-                }
-            ]
+            # 下一轮只发工具结果和新的 user message（session 内部维护完整历史）
+            messages = self._build_next_messages(next_prompt, tool_results)
 
             self._trigger_hook("turn_after", {
                 "turn": turn,
@@ -282,6 +276,42 @@ class AgentLoop:
         return final_reason
 
     # ---- dispatch 消费 ----
+
+    @staticmethod
+    def _build_next_messages(
+        next_prompt: str,
+        tool_results: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Build provider-compatible messages for the next LLM turn.
+
+        GenericAgent carried tool results on a custom ``tool_results`` field.
+        LiteLLM expects standard chat messages, so each tool result becomes a
+        ``role=tool`` message before the user continuation.
+        """
+        messages: List[Dict[str, Any]] = []
+        fallback_results: List[str] = []
+
+        for result in tool_results:
+            tool_use_id = str(result.get("tool_use_id") or "")
+            content = result.get("content", "")
+            if not isinstance(content, str):
+                content = str(content)
+            if tool_use_id:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_use_id,
+                    "content": content,
+                })
+            else:
+                fallback_results.append(f"<tool_result>{content}</tool_result>")
+
+        continuation = next_prompt or ""
+        if fallback_results:
+            continuation = "\n".join(fallback_results + [continuation])
+        if continuation.strip() or not messages:
+            messages.append({"role": "user", "content": continuation})
+
+        return messages
 
     def _consume_dispatch(self, gen: Generator) -> Generator[Any, None, StepOutcome]:
         """消费 dispatch() 返回的 generator，获取 StepOutcome.

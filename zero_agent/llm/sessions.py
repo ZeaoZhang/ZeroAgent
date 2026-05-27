@@ -92,8 +92,10 @@ class LiteLLMSession:
             MockResponse 包含 content / tool_calls / thinking / stop_reason.
         """
         with self.lock:
-            # 追加用户消息到历史
-            self.history.extend(messages)
+            # 追加标准化后的消息到历史。AgentLoop may pass GenericAgent-style
+            # tool_results; normalize them before they hit provider payloads.
+            normalized_messages = self._normalize_incoming_messages(messages)
+            self.history.extend(normalized_messages)
             self._trim_history()
             full_messages = self._build_messages()
 
@@ -102,7 +104,10 @@ class LiteLLMSession:
         tools = self._sanitize_tools(tools)
 
         # 记录 prompt 日志
-        self._write_llm_log("Prompt", json.dumps(messages, ensure_ascii=False, indent=2))
+        self._write_llm_log(
+            "Prompt",
+            json.dumps(normalized_messages, ensure_ascii=False, indent=2),
+        )
 
         try:
             if self.config.stream:
@@ -366,7 +371,7 @@ class LiteLLMSession:
         messages: List[Dict[str, Any]] = []
         if self.system:
             messages.append({"role": "system", "content": self.system})
-        messages.extend(self.history)
+        messages.extend(self._history_without_session_system())
 
         # 修复 Anthropic/OpenAI 消息格式问题
         messages = self._fix_messages(messages)
@@ -377,6 +382,64 @@ class LiteLLMSession:
         )
 
         return messages
+
+    def _normalize_incoming_messages(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Normalize loop messages before storing them in session history."""
+        normalized: List[Dict[str, Any]] = []
+
+        for raw_msg in messages:
+            msg = dict(raw_msg)
+            role = str(msg.get("role", "user")).lower()
+
+            if role == "system":
+                content = msg.get("content", "")
+                if content:
+                    self.system = str(content)
+                continue
+
+            tool_results = msg.pop("tool_results", None) or []
+            if tool_results:
+                fallback_texts: List[str] = []
+                for result in tool_results:
+                    tool_use_id = str(result.get("tool_use_id") or "")
+                    content = result.get("content", "")
+                    if not isinstance(content, str):
+                        content = str(content)
+                    if tool_use_id:
+                        normalized.append({
+                            "role": "tool",
+                            "tool_call_id": tool_use_id,
+                            "content": content,
+                        })
+                    else:
+                        fallback_texts.append(
+                            f"<tool_result>{content}</tool_result>"
+                        )
+
+                content = msg.get("content", "")
+                if fallback_texts:
+                    msg["content"] = "\n".join(
+                        fallback_texts + ([str(content)] if content else [])
+                    )
+                if str(msg.get("content", "")).strip():
+                    normalized.append(msg)
+                continue
+
+            normalized.append(msg)
+
+        return normalized
+
+    def _history_without_session_system(self) -> List[Dict[str, Any]]:
+        """Return history entries, excluding system prompts owned by session."""
+        result: List[Dict[str, Any]] = []
+        for msg in self.history:
+            if msg.get("role") == "system":
+                continue
+            result.append(msg)
+        return result
 
     def _trim_history(self) -> None:
         """裁剪历史消息，防止超出上下文窗口.

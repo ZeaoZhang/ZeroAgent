@@ -8,6 +8,7 @@ import pytest
 
 from zero_agent.core.config import LLMBackendConfig
 from zero_agent.llm.failover import AutoFailoverSession
+from zero_agent.llm.base import MockResponse
 from zero_agent.llm.sessions import LiteLLMSession
 
 
@@ -163,6 +164,36 @@ class TestAutoFailoverSessionFallback:
         assert len(backup.history) == 1
         assert backup.history[0]["content"] == "test"
         assert backup.system == "test system"
+
+    def test_chat_returns_backup_response_after_fallback(self) -> None:
+        """fallback generator must return the backup MockResponse to AgentLoop."""
+        primary = _make_session("primary")
+        backup = _make_session("backup1")
+        session = AutoFailoverSession(primary, backups=[backup])
+
+        def failing_chat(*_args, **_kwargs):
+            if False:
+                yield ""
+            raise RuntimeError("primary down")
+
+        def backup_chat(*_args, **_kwargs):
+            yield "backup ok"
+            return MockResponse(content="backup ok")
+
+        primary.chat = failing_chat
+        backup.chat = backup_chat
+
+        chunks = []
+        gen = session.chat(messages=[{"role": "user", "content": "hi"}], tools=[])
+        try:
+            while True:
+                chunks.append(next(gen))
+        except StopIteration as e:
+            response = e.value
+
+        assert any("backup1" in chunk for chunk in chunks)
+        assert response.content == "backup ok"
+        assert session.is_fallback_active is True
 
 
 class TestHealthProbe:

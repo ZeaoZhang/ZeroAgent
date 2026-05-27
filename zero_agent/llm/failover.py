@@ -133,7 +133,7 @@ class AutoFailoverSession:
         except Exception as primary_error:
             if not self.backups:
                 raise
-            yield from self._fallback(messages, tools, primary_error)
+            return (yield from self._fallback(messages, tools, primary_error))
 
     def _fallback(
         self,

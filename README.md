@@ -38,6 +38,9 @@ pip install -e .
 # Streamlit / pywebview UI
 pip install -e ".[ui]"
 
+# Browser control runtime (web_scan / web_execute_js)
+pip install -e ".[browser]"
+
 # OCR 与图像记忆
 pip install -e ".[memory]"
 
