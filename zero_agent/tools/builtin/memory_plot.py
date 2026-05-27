@@ -104,6 +104,13 @@ def register_memory_plot_tool(registry: Any) -> None:
     Args:
         registry: ToolRegistry 实例.
     """
+    def _handler(args: Dict[str, Any], _response: Any, _handler_self: Any):
+        yield "Generating memory plot ...\n"
+        return memory_plot(
+            output_path=args.get("output_path"),
+            stats_path=args.get("stats_path"),
+        )
+
     tool_def = ToolDefinition(
         name="memory_plot",
         description="生成记忆文件访问统计图表。/ Generate memory access statistics chart.",
@@ -121,10 +128,7 @@ def register_memory_plot_tool(registry: Any) -> None:
             },
             "required": [],
         },
-        handler=lambda args, resp, hs: memory_plot(
-            output_path=args.get("output_path"),
-            stats_path=args.get("stats_path"),
-        ),
+        handler=_handler,
         category="memory",
     )
     registry.register(tool_def)

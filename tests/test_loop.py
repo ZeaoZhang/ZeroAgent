@@ -148,6 +148,41 @@ class TestAgentLoop:
         exit_reason = _exhaust(gen)
         assert exit_reason["result"] == "EXITED"
 
+    def test_real_registry_ask_user_exits_loop(self, mock_config) -> None:
+        """ask_user 通过真实 registry 分发时让 AgentLoop 返回 EXITED."""
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(
+            registry=registry,
+            cwd=mock_config.workspace_dir,
+        )
+        client = _make_mock_client([
+            MockResponse(
+                content="",
+                tool_calls=[
+                    MockToolCall(
+                        function=MockFunction(
+                            name="ask_user",
+                            arguments='{"question": "proceed?"}',
+                        ),
+                        id="call_1",
+                    ),
+                ],
+            ),
+        ])
+        loop = AgentLoop(
+            client=client,
+            handler=handler,
+            tools_schema=registry.generate_openai_schema(),
+            max_turns=5,
+            verbose=False,
+        )
+
+        exit_reason = _exhaust(loop.run("sp", "task"))
+
+        assert exit_reason["result"] == "EXITED"
+        assert exit_reason["data"]["status"] == "INTERRUPT"
+        assert exit_reason["data"]["data"]["question"] == "proceed?"
+
     def test_max_turns_exceeded(self, mock_handler: BaseHandler) -> None:
         """超出最大轮次限制.
 

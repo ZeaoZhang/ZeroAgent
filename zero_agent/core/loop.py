@@ -53,6 +53,7 @@ class AgentLoop:
         self.max_turns = max_turns
         self.verbose = verbose
         self.hooks = hooks
+        self.handler.loop = self
 
     def run(
         self,
@@ -94,9 +95,14 @@ class AgentLoop:
         turn = 0
         self.handler.max_turns = self.max_turns
 
-        # agent_before 钩子
-        if self.hooks:
-            self.hooks.trigger("agent_before", locals())
+        self._trigger_hook("agent_before", {
+            "task": user_input,
+            "user_input": user_input,
+            "model": self._model_name(),
+            "messages": messages,
+            "tools": self.tools_schema,
+            "max_turns": self.handler.max_turns,
+        })
 
         while turn < self.handler.max_turns:
             turn += 1
@@ -111,13 +117,20 @@ class AgentLoop:
             if turn % 10 == 0:
                 self.client.last_tools = ""
 
-            # turn_before 钩子
-            if self.hooks:
-                self.hooks.trigger("turn_before", locals())
+            self._trigger_hook("turn_before", {
+                "turn": turn,
+                "messages": messages,
+                "tools": self.tools_schema,
+                "model": self._model_name(),
+            })
 
             # ——— LLM 调用 ———
-            if self.hooks:
-                self.hooks.trigger("llm_before", locals())
+            self._trigger_hook("llm_before", {
+                "turn": turn,
+                "messages": messages,
+                "tools": self.tools_schema,
+                "model": self._model_name(),
+            })
             response_gen = self.client.chat(
                 messages=messages, tools=self.tools_schema,
             )
@@ -132,9 +145,6 @@ class AgentLoop:
                     yield cleaned + "\n"
 
             # ——— 解析工具调用 ———
-            if self.hooks:
-                self.hooks.trigger("llm_after", locals())
-
             if not response.tool_calls:
                 tool_calls = [{"tool_name": "no_tool", "args": {}}]
             else:
@@ -146,6 +156,15 @@ class AgentLoop:
                     }
                     for tc in response.tool_calls
                 ]
+
+            self._trigger_hook("llm_after", {
+                "turn": turn,
+                "response": response,
+                "tool_calls": tool_calls,
+                "usage": self._usage_from_response(response),
+                "stop_reason": getattr(response, "stop_reason", ""),
+                "model": self._model_name(),
+            })
 
             # ——— 分发工具 ———
             tool_results: List[Dict[str, Any]] = []
@@ -210,6 +229,20 @@ class AgentLoop:
                 ):
                     next_prompts.add(self.handler._done_hooks.pop(0))
                 else:
+                    if exit_reason:
+                        self.handler.turn_end_callback(
+                            response, tool_calls, tool_results, turn,
+                            "", exit_reason,
+                        )
+                    self._trigger_hook("turn_after", {
+                        "turn": turn,
+                        "response": response,
+                        "tool_calls": tool_calls,
+                        "tool_results": tool_results,
+                        "next_prompt": "",
+                        "exit_reason": exit_reason,
+                        "model": self._model_name(),
+                    })
                     break
 
             # ——— 构建下一轮 prompt ———
@@ -228,21 +261,25 @@ class AgentLoop:
                 }
             ]
 
-            # turn_after 钩子
-            if self.hooks:
-                self.hooks.trigger("turn_after", locals())
-
-        # 最终回调（退出时）
-        if exit_reason:
-            self.handler.turn_end_callback(
-                response, tool_calls, tool_results, turn, "", exit_reason,
-            )
+            self._trigger_hook("turn_after", {
+                "turn": turn,
+                "response": response,
+                "tool_calls": tool_calls,
+                "tool_results": tool_results,
+                "next_prompt": next_prompt,
+                "exit_reason": exit_reason,
+                "model": self._model_name(),
+            })
 
         # agent_after 钩子
-        if self.hooks:
-            self.hooks.trigger("agent_after", locals())
+        final_reason = exit_reason or {"result": "MAX_TURNS_EXCEEDED"}
+        self._trigger_hook("agent_after", {
+            "turns": turn,
+            "exit_reason": final_reason,
+            "model": self._model_name(),
+        })
 
-        return exit_reason or {"result": "MAX_TURNS_EXCEEDED"}
+        return final_reason
 
     # ---- dispatch 消费 ----
 
@@ -275,6 +312,50 @@ class AgentLoop:
             return outcome
         else:
             return self._exhaust(gen)
+
+    # ---- hook 辅助 ----
+
+    def _trigger_hook(self, event: str, context: dict) -> None:
+        """触发 hook 并隔离 hook 失败."""
+        if self.hooks:
+            self.hooks.trigger(event, context)
+
+    def _model_name(self) -> str:
+        """获取当前 LLM model 名称."""
+        config = getattr(self.client, "config", None)
+        if config is not None and getattr(config, "model", None):
+            return config.model
+        return getattr(self.client, "name", "unknown")
+
+    @staticmethod
+    def _usage_from_response(response: Any) -> dict:
+        """从响应对象中提取 token usage，缺失时返回空字典."""
+        raw = getattr(response, "raw", None)
+        usage = getattr(raw, "usage", None) if raw is not None else None
+        if usage is None:
+            usage = getattr(response, "usage", None)
+        if usage is None:
+            return {}
+        if isinstance(usage, dict):
+            return {
+                "input_tokens": usage.get("input_tokens", usage.get("prompt_tokens", 0)),
+                "output_tokens": usage.get("output_tokens", usage.get("completion_tokens", 0)),
+                **usage,
+            }
+        input_tokens = getattr(
+            usage,
+            "input_tokens",
+            getattr(usage, "prompt_tokens", 0),
+        )
+        output_tokens = getattr(
+            usage,
+            "output_tokens",
+            getattr(usage, "completion_tokens", 0),
+        )
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
 
     # ---- 静态工具方法 ----
 

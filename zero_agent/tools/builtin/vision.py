@@ -43,6 +43,13 @@ def register_vision_tool(registry: Any) -> None:
     Args:
         registry: ToolRegistry 实例.
     """
+    def _handler(args: Dict[str, Any], _response: Any, _handler_self: Any):
+        yield "Analyzing image ...\n"
+        return vision_tool(
+            image_path=args.get("image_path", ""),
+            prompt=args.get("prompt", ""),
+        )
+
     tool_def = ToolDefinition(
         name="vision",
         description="分析图片内容，返回图片的详细描述。/ Analyze image content and return description.",
@@ -60,10 +67,7 @@ def register_vision_tool(registry: Any) -> None:
             },
             "required": ["image_path"],
         },
-        handler=lambda args, resp, hs: vision_tool(
-            image_path=args.get("image_path", ""),
-            prompt=args.get("prompt", ""),
-        ),
+        handler=_handler,
         category="vision",
     )
     registry.register(tool_def)

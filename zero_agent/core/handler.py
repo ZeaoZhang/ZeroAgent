@@ -141,7 +141,9 @@ class BaseHandler:
         """
         # 通过 parent.loop 访问 HookSystem
         try:
-            loop = self.parent.loop
+            loop = getattr(getattr(self, "parent", None), "loop", None)
+            if loop is None:
+                loop = getattr(self, "loop", None)
             if loop and hasattr(loop, "hooks") and loop.hooks:
                 loop.hooks.trigger(event, context)
         except Exception:
@@ -188,7 +190,10 @@ class BaseHandler:
             method = getattr(self, method_name)
             ret = yield from self._try_call_generator(method, args, response)
             self._trigger_hook("tool_after", {
-                "tool_name": tool_name, "args": args, "outcome": ret,
+                "tool_name": tool_name,
+                "args": args,
+                "outcome": ret,
+                "result": ret.data if isinstance(ret, StepOutcome) else ret,
             })
             return ret
 
@@ -196,12 +201,22 @@ class BaseHandler:
         tool_def = self.registry.get(tool_name)
         if tool_def is not None:
             data = yield from tool_def.handler(args, response, self)
-            next_prompt = data.pop("_za_next_prompt", None) if isinstance(data, dict) else None
-            if next_prompt is None:
-                next_prompt = self._default_next_prompt(args)
-            ret = StepOutcome(data, next_prompt=next_prompt)
+            if isinstance(data, StepOutcome):
+                ret = data
+            else:
+                next_prompt = (
+                    data.pop("_za_next_prompt", None)
+                    if isinstance(data, dict)
+                    else None
+                )
+                if next_prompt is None:
+                    next_prompt = self._default_next_prompt(args)
+                ret = StepOutcome(data, next_prompt=next_prompt)
             self._trigger_hook("tool_after", {
-                "tool_name": tool_name, "args": args, "outcome": ret,
+                "tool_name": tool_name,
+                "args": args,
+                "outcome": ret,
+                "result": ret.data,
             })
             return ret
 
@@ -218,7 +233,10 @@ class BaseHandler:
             ),
         )
         self._trigger_hook("tool_after", {
-            "tool_name": tool_name, "args": args, "outcome": ret,
+            "tool_name": tool_name,
+            "args": args,
+            "outcome": ret,
+            "result": ret.data,
         })
         return ret
 
@@ -735,8 +753,5 @@ class BaseHandler:
                             self.parent.abort()
                         except Exception:
                             pass
-
-        # ——— 5. Turn-end hooks ———
-        self._trigger_hook("turn_after", locals())
 
         return next_prompt

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Dict, Generator, List, Optional
 
 from zero_agent.core.config import AgentConfig
+from zero_agent.core.types import StepOutcome
 from zero_agent.tools.registry import ToolRegistry
 
 
@@ -95,9 +96,13 @@ def _make_ask_user_handler(config: AgentConfig):
         args: Dict[str, Any],
         _response: Any,
         handler: Any,
-    ) -> Generator[str, None, dict]:
+    ) -> Generator[str, None, StepOutcome]:
         question = args.get("question", "请提供输入：")
         candidates = args.get("candidates", [])
         yield f"Waiting for your answer ...\n"
-        return ask_user(question, candidates)
+        return StepOutcome(
+            ask_user(question, candidates),
+            next_prompt="",
+            should_exit=True,
+        )
     return _handler

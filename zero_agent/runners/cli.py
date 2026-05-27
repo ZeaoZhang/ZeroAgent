@@ -30,7 +30,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # 创建 agent
     agent = ZeroAgent(config=config)
-    agent.handler.max_turns = args.max_turns
+    agent.handler.max_turns = agent.config.max_turns
 
     if args.reflect:
         # Reflect 反射模式
@@ -130,6 +130,8 @@ def _load_config(args: argparse.Namespace) -> AgentConfig:
             backend.model = args.model
     if args.workspace:
         config.workspace_dir = args.workspace
+    if args.max_turns is not None:
+        config.max_turns = args.max_turns
     if args.verbose:
         config.verbose = True
     elif args.quiet:

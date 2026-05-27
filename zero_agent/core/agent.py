@@ -11,6 +11,7 @@ from typing import Any, Dict, Generator, List, Optional
 
 from zero_agent.core.config import AgentConfig
 from zero_agent.core.handler import BaseHandler
+from zero_agent.core.hooks import HookSystem
 from zero_agent.core.loop import AgentLoop
 from zero_agent.memory.manager import MemoryManager
 from zero_agent.tools.registry import ToolRegistry
@@ -71,6 +72,7 @@ class ZeroAgent:
         config: Optional[AgentConfig] = None,
         handler: Optional[BaseHandler] = None,
         registry: Optional[ToolRegistry] = None,
+        hooks: Optional[HookSystem] = None,
     ) -> None:
         """初始化 ZeroAgent.
 
@@ -78,22 +80,21 @@ class ZeroAgent:
             config: Agent 配置，None 时从环境变量构建.
             handler: 自定义工具分发器，None 时创建 BaseHandler.
             registry: 自定义工具注册中心，None 时自动加载内置工具.
+            hooks: 自定义 HookSystem，None 时创建默认 HookSystem.
         """
         self.config = config or AgentConfig.from_env()
+        self.hooks = hooks or HookSystem()
+        self._register_builtin_plugins()
 
         # 1. 工具注册中心
         self.registry = registry or ToolRegistry.with_builtins(self.config)
 
         # 2. LLM 会话：创建所有独立 session + 当前活跃 client
         self._sessions = LLMFactory.create_all_sessions(self.config)
-        initial_client = LLMFactory.create_from_config(self.config)
-        # 将 create_from_config 返回的 session 匹配到 _sessions 中的引用
-        for session in self._sessions.values():
-            if session.config.model == initial_client.config.model:
-                self.client = session
-                break
-        else:
-            self.client = initial_client
+        default_name = self.config.default_backend
+        self.client = self._sessions.get(default_name)
+        if self.client is None:
+            self.client = next(iter(self._sessions.values()))
 
         # 3. 工具分发器
         self.handler = handler or BaseHandler(
@@ -111,6 +112,7 @@ class ZeroAgent:
         # 5. 运行时状态
         self.task_dir: Optional[str] = None
         self._turn_end_hooks: Dict[str, Any] = {}
+        self.loop: Optional[AgentLoop] = None
 
     def run(
         self,
@@ -153,7 +155,9 @@ class ZeroAgent:
             tools_schema=tools_schema,
             max_turns=self.config.max_turns,
             verbose=self.config.verbose,
+            hooks=self.hooks,
         )
+        self.loop = loop
 
         return (yield from loop.run(
             system_prompt=prompt,
@@ -201,6 +205,14 @@ class ZeroAgent:
         target.last_tools = ""
 
         self.client = target
+
+    def _register_builtin_plugins(self) -> None:
+        """注册内置插件；缺依赖或缺配置时静默跳过."""
+        try:
+            from zero_agent.plugins.langfuse_tracing import register
+            register(self.hooks)
+        except Exception:
+            pass
 
     def list_backends(self) -> list[tuple[str, str, bool]]:
         """列出所有可用的 LLM 后端.

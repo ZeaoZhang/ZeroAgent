@@ -5,6 +5,7 @@ import pytest
 from zero_agent.core.handler import BaseHandler
 from zero_agent.core.types import StepOutcome
 from zero_agent.llm.base import MockResponse
+from zero_agent.tools.registry import ToolDefinition, ToolRegistry
 
 
 class TestBaseHandlerDispatch:
@@ -61,8 +62,6 @@ class TestBaseHandlerDispatch:
 
     def test_dispatch_registry_za_next_prompt(self, mock_handler: BaseHandler) -> None:
         """registry tool handler 通过 _za_next_prompt 设置自定义 next_prompt."""
-        from zero_agent.tools.registry import ToolDefinition
-
         def custom_handler(args, _response, _handler):
             yield "done\n"
             return {"result": "ok", "_za_next_prompt": "custom prompt"}
@@ -77,6 +76,50 @@ class TestBaseHandlerDispatch:
         gen = mock_handler.dispatch("custom", {}, MockResponse())
         result = _exhaust(gen)
         assert result.next_prompt == "custom prompt"
+
+    def test_dispatch_preserves_registry_step_outcome(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """registry handler 可直接返回 StepOutcome 并保留 should_exit."""
+        def custom_handler(args, _response, _handler):
+            yield "done\n"
+            return StepOutcome(
+                {"result": "interrupt"},
+                next_prompt="",
+                should_exit=True,
+            )
+
+        mock_handler.registry.register(ToolDefinition(
+            name="custom_exit",
+            description="",
+            parameters={"type": "object", "properties": {}},
+            handler=custom_handler,
+        ))
+
+        result = _exhaust(mock_handler.dispatch(
+            "custom_exit", {}, MockResponse(),
+        ))
+
+        assert result.data == {"result": "interrupt"}
+        assert result.next_prompt == ""
+        assert result.should_exit is True
+
+    def test_real_registry_ask_user_exits(self, mock_config) -> None:
+        """真实 ToolRegistry 分发 ask_user 时必须让 loop 退出."""
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
+
+        result = _exhaust(handler.dispatch(
+            "ask_user",
+            {"question": "继续吗？", "candidates": ["yes", "no"]},
+            MockResponse(),
+        ))
+
+        assert result.should_exit is True
+        assert result.next_prompt == ""
+        assert result.data["status"] == "INTERRUPT"
+        assert result.data["data"]["question"] == "继续吗？"
 
 
 class TestBaseHandlerDoNoTool:

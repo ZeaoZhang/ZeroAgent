@@ -2,6 +2,7 @@
 
 import pytest
 
+from zero_agent.core.config import AgentConfig, LLMBackendConfig
 from zero_agent.tools.registry import ToolDefinition, ToolRegistry
 
 
@@ -136,3 +137,36 @@ class TestToolRegistry:
     def test_generate_openai_schema_empty(self) -> None:
         registry = ToolRegistry()
         assert registry.generate_openai_schema() == []
+
+    def test_with_builtins_registers_only_ga_core_tools(self) -> None:
+        """默认内置工具严格对齐 GenericAgent 的 9 个核心原子工具."""
+        config = AgentConfig(
+            llm_backends={
+                "default": LLMBackendConfig(
+                    name="default",
+                    provider="openai",
+                    api_key="test-key",
+                    api_base="https://api.openai.com/v1",
+                    model="test-model",
+                ),
+            },
+        )
+
+        registry = ToolRegistry.with_builtins(config)
+        names = {tool.name for tool in registry.list_all()}
+
+        assert names == {
+            "code_run",
+            "file_read",
+            "file_patch",
+            "file_write",
+            "web_scan",
+            "web_execute_js",
+            "update_working_checkpoint",
+            "ask_user",
+            "start_long_term_update",
+        }
+        assert "search_web" not in names
+        assert "vision" not in names
+        assert "memory_plot" not in names
+        assert "send_im" not in names

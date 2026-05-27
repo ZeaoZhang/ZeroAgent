@@ -142,6 +142,13 @@ def register_search_tool(registry: Any) -> None:
     Args:
         registry: ToolRegistry 实例.
     """
+    def _handler(args: Dict[str, Any], _response: Any, _handler_self: Any):
+        yield "Searching web ...\n"
+        return search_web(
+            query=args.get("query", ""),
+            num_results=args.get("num_results", 5),
+        )
+
     tool_def = ToolDefinition(
         name="search_web",
         description="在互联网上搜索信息。/ Search the web for information.",
@@ -159,10 +166,7 @@ def register_search_tool(registry: Any) -> None:
             },
             "required": ["query"],
         },
-        handler=lambda args, resp, hs: search_web(
-            query=args.get("query", ""),
-            num_results=args.get("num_results", 5),
-        ),
+        handler=_handler,
         category="web",
     )
     registry.register(tool_def)

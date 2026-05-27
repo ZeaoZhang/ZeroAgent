@@ -27,11 +27,13 @@ class LLMFactory:
     @staticmethod
     def create_session(
         backend_config: LLMBackendConfig,
+        log_dir: str | None = None,
     ) -> LiteLLMSession:
         """创建 LiteLLMSession.
 
         Args:
             backend_config: 单个 LLM 后端的配置.
+            log_dir: LLM 调用日志目录.
 
         Returns:
             LiteLLMSession 实例.
@@ -47,7 +49,7 @@ class LLMFactory:
             raise ConfigError(
                 f"LLM 后端 '{backend_config.name}' 缺少 model"
             )
-        return LiteLLMSession(backend_config)
+        return LiteLLMSession(backend_config, log_dir=log_dir)
 
     @staticmethod
     def create_from_config(
@@ -99,7 +101,10 @@ class LLMFactory:
 
         sessions: Dict[str, Union[LiteLLMSession, AutoFailoverSession]] = {}
         for name, backend_cfg in config.llm_backends.items():
-            session = LLMFactory.create_session(backend_cfg)
+            session = LLMFactory.create_session(
+                backend_cfg,
+                log_dir=config.log_dir,
+            )
             sessions[name] = session
 
         if config.failover_backends:
@@ -143,7 +148,7 @@ class LLMFactory:
         backend_cfg = config.llm_backends.get(config.default_backend)
         if backend_cfg is None:
             backend_cfg = next(iter(config.llm_backends.values()))
-        return LLMFactory.create_session(backend_cfg)
+        return LLMFactory.create_session(backend_cfg, log_dir=config.log_dir)
 
     @staticmethod
     def _wrap_failover(
@@ -166,7 +171,10 @@ class LLMFactory:
             backend_cfg = config.llm_backends.get(name)
             if backend_cfg is None:
                 continue
-            backups.append(LLMFactory.create_session(backend_cfg))
+            backups.append(LLMFactory.create_session(
+                backend_cfg,
+                log_dir=config.log_dir,
+            ))
 
         health_interval = LLMFactory._get_health_interval(config, primary.name)
 

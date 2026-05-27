@@ -61,10 +61,11 @@ def send_im(
         }
 
 
-def _make_send_im_handler(tool_def: ToolDefinition):
+def _make_send_im_handler():
     """创建 send_im 工具的 handler 工厂函数."""
 
     def handler(args: Dict[str, Any], response: Any, handler_self: Any):
+        yield "Sending instant message ...\n"
         result = send_im(
             webhook_url=args.get("webhook_url", ""),
             message=args.get("message", ""),
@@ -108,9 +109,7 @@ def register_im_tool(registry: Any) -> None:
             },
             "required": ["webhook_url", "message"],
         },
-        handler=_make_send_im_handler(ToolDefinition(
-            name="send_im", description="", parameters={}, handler=lambda *a: {}
-        )),
+        handler=_make_send_im_handler(),
         category="communication",
     )
     registry.register(tool_def)

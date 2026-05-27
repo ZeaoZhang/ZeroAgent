@@ -78,7 +78,14 @@ def _render_sidebar(agent: Any) -> None:
             pass
 
         # Max turns
-        max_turns = st.slider("Max Turns", 10, 200, 80)
+        current_max_turns = int(getattr(agent.config, "max_turns", 80))
+        max_turns = st.slider(
+            "Max Turns",
+            10,
+            200,
+            min(max(current_max_turns, 10), 200),
+        )
+        agent.config.max_turns = max_turns
         agent.handler.max_turns = max_turns
 
         st.divider()

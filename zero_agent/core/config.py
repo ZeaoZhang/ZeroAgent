@@ -31,6 +31,8 @@ class LLMBackendConfig:
         max_tokens: 单次响应最大 token 数.
         temperature: 采样温度 0-2.
         reasoning_effort: 推理力度 (none/minimal/low/medium/high/xhigh).
+        thinking_type: Claude thinking 类型，如 "enabled".
+        thinking_budget_tokens: Claude thinking token 预算.
         max_retries: HTTP 请求失败最大重试次数.
         connect_timeout: TCP 连接超时秒数.
         read_timeout: 读取超时秒数.
@@ -49,6 +51,8 @@ class LLMBackendConfig:
     max_tokens: Optional[int] = None
     temperature: float = 1.0
     reasoning_effort: Optional[str] = None
+    thinking_type: Optional[str] = None
+    thinking_budget_tokens: Optional[int] = None
     max_retries: int = 4
     connect_timeout: int = 5
     read_timeout: int = 30
@@ -212,6 +216,7 @@ class AgentConfig:
         Returns:
             AgentConfig 实例.
         """
+        data = data or {}
         backends: dict[str, LLMBackendConfig] = {}
         for name, cfg in data.get("llm_backends", {}).items():
             backends[name] = LLMBackendConfig(name=name, **cfg)
@@ -225,4 +230,6 @@ class AgentConfig:
             verbose=data.get("verbose", True),
             language=data.get("language", "auto"),
             incremental_output=data.get("incremental_output", False),
+            failover_backends=data.get("failover_backends", []),
+            log_dir=data.get("log_dir"),
         )

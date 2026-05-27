@@ -6,7 +6,7 @@ ZeroAgent 是一个基于 `litellm` 的可复用自主 Agent 框架。从 Generi
 
 - **Generator-based Agent Loop**: LLM 调用和工具执行以 Python generator 流式产出状态，最终返回结构化结果。
 - **多后端与容错**: 支持多个 LLM backend、运行时切换、failover 和 spring-back。
-- **工具注册表**: 内置文件、代码执行、Web、搜索、记忆、用户交互、视觉和绘图工具，并支持自定义工具注册。
+- **工具注册表**: `ToolRegistry.with_builtins()` 默认注册对齐 GenericAgent 的 9 个核心原子工具，并支持自定义工具注册。
 - **双语自适应**: 系统提示、工具描述和 handler 消息支持中文、英文和自动语言选择。
 - **文本工具调用回退**: 对不支持原生 tool calling 的模型，可从 XML/JSON 文本中解析工具调用。
 - **记忆与压缩**: 分层记忆管理、历史标签压缩、消息裁剪和 OCR/视觉记忆扩展。
@@ -47,6 +47,22 @@ pip install -e ".[plot]"
 # 安装全部可选功能
 pip install -e ".[all-extras]"
 ```
+
+## 工具清单
+
+默认工具清单对齐 GenericAgent 核心原子工具，`ToolRegistry.with_builtins()` 只注册以下 9 个工具:
+
+- `code_run`
+- `file_read`
+- `file_write`
+- `file_patch`
+- `web_scan`
+- `web_execute_js`
+- `update_working_checkpoint`
+- `start_long_term_update`
+- `ask_user`
+
+`search_web`、`vision`、`memory_plot`、`send_im` 是 ZeroAgent 的可选/实验性扩展模块，不作为 GenericAgent 核心能力声明，也不会默认注册进 `with_builtins()`。
 
 ## 配置
 
@@ -173,7 +189,7 @@ streamlit run zero_agent/frontends/stapp.py
 zero_agent/
   core/        # Agent 编排、配置、handler、loop、hooks、异常和类型
   llm/         # LiteLLM session、failover、factory、SSE parser、格式转换
-  tools/       # 工具注册表和内置工具
+  tools/       # 工具注册表；默认核心工具和可选扩展工具模块
   memory/      # 分层记忆、OCR、视觉 API、会话压缩
   reflect/     # 反射式运行、目标模式、调度、subagent/team worker
   frontends/   # Streamlit UI 和 launcher

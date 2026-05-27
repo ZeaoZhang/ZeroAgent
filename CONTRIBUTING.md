@@ -41,13 +41,20 @@ pytest tests/ -v
 - Mock 外部依赖（LLM API、文件系统等）
 - 目标: >80% 行覆盖率
 
+## 工具边界
+
+`ToolRegistry.with_builtins()` 的默认注册范围必须保持为 GenericAgent 对齐的 9 个核心原子工具:
+`code_run`、`file_read`、`file_write`、`file_patch`、`web_scan`、`web_execute_js`、`update_working_checkpoint`、`start_long_term_update`、`ask_user`。
+
+`search_web`、`vision`、`memory_plot`、`send_im` 属于 ZeroAgent 可选/实验性扩展模块。不要把这些扩展工具写成 GenericAgent 原有核心能力，也不要默认放进 `with_builtins()`。
+
 ## 项目结构
 
 ```
 zero_agent/
   core/        — 编排层: exceptions, types, config, handler, loop, agent, hooks
   llm/         — LLM 后端: base, sessions, failover, factory, converters, sse_parsers
-  tools/       — 工具系统: registry, builtin/(code, file, memory, user, web, im, search, vision, memory_plot)
+  tools/       — 工具系统: registry, builtin/(code, file, memory, user, web) 默认核心; im/search/vision/memory_plot 可选扩展
   memory/      — 记忆管理: manager, ocr_utils, vision_api, compress_session
   reflect/     — 反射式唤醒: runner, autonomous, goal_mode, scheduler, agent_team_worker
   frontends/   — 用户界面: stapp (Streamlit)
