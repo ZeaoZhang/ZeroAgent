@@ -1,0 +1,61 @@
+"""Tests for utils/memory_stats.py — memory file access statistics."""
+
+import json
+import os
+import tempfile
+
+from zero_agent.utils.memory_stats import log_memory_access
+
+
+class TestLogMemoryAccess:
+    """log_memory_access() tests."""
+
+    def test_records_when_memory_in_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stats_dir = os.path.join(tmpdir, "memory")
+            path = os.path.join(tmpdir, "memory", "global_mem.txt")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+
+            log_memory_access(path, stats_dir=stats_dir)
+
+            stats_file = os.path.join(stats_dir, "file_access_stats.json")
+            assert os.path.isfile(stats_file)
+            with open(stats_file, "r", encoding="utf-8") as f:
+                stats = json.load(f)
+            assert "global_mem.txt" in stats
+            assert stats["global_mem.txt"]["count"] == 1
+            assert "last" in stats["global_mem.txt"]
+
+    def test_noop_when_memory_not_in_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stats_dir = os.path.join(tmpdir, "memory")
+            path = os.path.join(tmpdir, "other", "file.txt")
+
+            log_memory_access(path, stats_dir=stats_dir)
+
+            stats_file = os.path.join(stats_dir, "file_access_stats.json")
+            assert not os.path.isfile(stats_file)
+
+    def test_creates_stats_file_on_first_access(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stats_dir = os.path.join(tmpdir, "memory")
+            path = os.path.join(tmpdir, "memory", "sop.md")
+
+            stats_file = os.path.join(stats_dir, "file_access_stats.json")
+            assert not os.path.isfile(stats_file)
+
+            log_memory_access(path, stats_dir=stats_dir)
+            assert os.path.isfile(stats_file)
+
+    def test_increments_count_on_repeated_access(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stats_dir = os.path.join(tmpdir, "memory")
+            path = os.path.join(tmpdir, "memory", "frequent.md")
+
+            for _ in range(3):
+                log_memory_access(path, stats_dir=stats_dir)
+
+            stats_file = os.path.join(stats_dir, "file_access_stats.json")
+            with open(stats_file, "r", encoding="utf-8") as f:
+                stats = json.load(f)
+            assert stats["frequent.md"]["count"] == 3
