@@ -359,7 +359,7 @@ class AgentLoop:
 
     @staticmethod
     def _usage_from_response(response: Any) -> dict:
-        """从响应对象中提取 token usage，缺失时返回空字典."""
+        """从响应对象中提取 token usage(含 cache), 缺失时返回空字典."""
         raw = getattr(response, "raw", None)
         usage = getattr(raw, "usage", None) if raw is not None else None
         if usage is None:
@@ -370,6 +370,8 @@ class AgentLoop:
             return {
                 "input_tokens": usage.get("input_tokens", usage.get("prompt_tokens", 0)),
                 "output_tokens": usage.get("output_tokens", usage.get("completion_tokens", 0)),
+                "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
+                "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
                 **usage,
             }
         input_tokens = getattr(
@@ -382,9 +384,13 @@ class AgentLoop:
             "output_tokens",
             getattr(usage, "completion_tokens", 0),
         )
+        cache_create = getattr(usage, "cache_creation_input_tokens", 0)
+        cache_read = getattr(usage, "cache_read_input_tokens", 0)
         return {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "cache_creation_input_tokens": cache_create,
+            "cache_read_input_tokens": cache_read,
         }
 
     # ---- 静态工具方法 ----

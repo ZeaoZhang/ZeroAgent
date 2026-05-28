@@ -326,6 +326,12 @@ class LiteLLMSession:
         if self.config.max_tokens:
             kwargs["max_tokens"] = self.config.max_tokens
 
+        # Tool schema 缓存：最后一个 tool 标记 ephemeral cache（与 GenericAgent NativeClaudeSession 对齐）
+        if tools and "claude" in self.config.provider.lower():
+            tools = list(tools)
+            if tools:
+                tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+
         if tools:
             kwargs["tools"] = tools
 
@@ -718,14 +724,15 @@ class LiteLLMSession:
         """
         import re as _re
 
-        TAIL = 200
+        TAIL = 400
         TAG_TRUNC = " ... [TRUNCATED] "
 
         def _compress(text: str) -> str:
             if not text or len(text) <= 1000:
                 return text
 
-            for tag in ("thinking", "tool_use", "tool_result"):
+            for tag in ("thinking", "think", "tool_use", "tool_result",
+                        "history", "key_info", "earlier_context"):
                 pattern = _re.compile(
                     rf"<{tag}>(.*?)</{tag}>", _re.DOTALL
                 )
@@ -843,16 +850,18 @@ class LiteLLMSession:
         messages: list[dict],
         provider: str = "",
     ) -> list[dict]:
-        """在最后 2 条 user 消息上设置 cache_control 标记.
+        """在消息上设置 cache_control 标记，与 GenericAgent 的缓存策略对齐.
 
-        对 Anthropic 模型启用 prompt caching，减少重复处理成本.
+        对 Anthropic 模型启用 prompt caching:
+            - System prompt → "persistent" 缓存（跨请求复用）
+            - 最后 2 条 user 消息 → "ephemeral" 缓存
 
         Args:
             messages: 消息列表.
             provider: 后端提供商类型 ("claude" 等).
 
         Returns:
-            标记后的消息列表（浅拷贝，仅修改目标消息）.
+            标记后的消息列表.
         """
         if "claude" not in provider.lower():
             return messages
@@ -865,8 +874,21 @@ class LiteLLMSession:
 
         result = []
         for i, msg in enumerate(messages):
-            if i in stamp_indices:
-                content = msg.get("content", "")
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+
+            # System prompt → persistent cache（与 GenericAgent ClaudeSession 对齐）
+            if role == "system" and isinstance(content, str) and content:
+                msg = {
+                    **msg,
+                    "content": [{
+                        "type": "text",
+                        "text": content,
+                        "cache_control": {"type": "persistent"},
+                    }],
+                }
+            # 最后 2 条 user 消息 → ephemeral cache
+            elif i in stamp_indices:
                 if isinstance(content, str):
                     msg = {
                         **msg,

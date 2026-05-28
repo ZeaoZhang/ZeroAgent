@@ -230,6 +230,43 @@ class ZeroAgent:
             result.append((name, model, name == active_name))
         return result
 
+    def list_llms(self) -> list[tuple[int, str, bool]]:
+        """列出所有可用 LLM 后端 (兼容 GenericAgent 接口).
+
+        Returns:
+            [(index, display_name, is_active), ...] 列表.
+        """
+        result: list[tuple[int, str, bool]] = []
+        backends = self.list_backends()
+        for i, (name, model, active) in enumerate(backends):
+            result.append((i, f"{name}/{model}", active))
+        return result
+
+    def next_llm(self, n: int = -1) -> None:
+        """切换到下一个或指定 LLM 后端 (兼容 GenericAgent 接口).
+
+        Args:
+            n: 目标索引, -1 表示顺序切换到下一个.
+        """
+        backends = self.list_backends()
+        if not backends:
+            return
+        active_idx = next((i for i, (_, _, a) in enumerate(backends) if a), 0)
+        if n < 0:
+            n = (active_idx + 1) % len(backends)
+        else:
+            n = n % len(backends)
+        target_name = backends[n][0]
+        self.switch_backend(target_name)
+
+    def get_llm_name(self) -> str:
+        """返回当前活跃 LLM 的 display 名称 (兼容 GenericAgent 接口)."""
+        backends = self.list_backends()
+        for name, model, active in backends:
+            if active:
+                return f"{name}/{model}"
+        return "unknown"
+
     def _get_active_backend_name(self) -> str:
         """获取当前活跃后端的名称.
 

@@ -276,7 +276,10 @@ def _make_code_run_handler(config: AgentConfig):
         code_type = args.get("type", "python")
         code = args.get("code") or args.get("script", "")
         if not code:
-            raise ToolError("缺少 code 或 script 参数")
+            # 回退：从 LLM 响应代码块中提取（与 GenericAgent do_code_run 对齐）
+            code = handler._extract_code_block(_response, code_type)
+            if not code:
+                raise ToolError("缺少 code 或 script 参数，且回复中未找到代码块")
 
         # inline_eval: 在进程内执行 Python 代码（用于自省/调试）
         if code_type == "inline_eval":

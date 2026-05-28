@@ -129,6 +129,21 @@ class AutoFailoverSession:
 
         try:
             mock = yield from self._active.chat(messages=messages, tools=tools)
+            # 流中断/错误检测：即使未抛异常，content 中也可能包含流中断标记
+            # 与 GenericAgent MixinSession 对齐：检测到部分失败时主动切换
+            content = getattr(mock, "content", "") or ""
+            if ("[!!! 流异常中断" in content or "!!!Error:" in content):
+                if self.backups:
+                    yield (
+                        f"\n[Fallback] 检测到流中断 ({self._active.name})，"
+                        f"切换到备用后端...\n"
+                    )
+                    return (
+                        yield from self._fallback(
+                            messages, tools,
+                            RuntimeError(f"stream_interrupted: {content[-200:]}")
+                        )
+                    )
             return mock
         except Exception as primary_error:
             if not self.backups:

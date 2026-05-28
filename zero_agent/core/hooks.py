@@ -123,6 +123,57 @@ class HookSystem:
 
         return loaded
 
+    def unregister(self, event: str, callback: Callable[[dict], None]) -> bool:
+        """移除指定事件的回调函数.
+
+        Args:
+            event: 事件名.
+            callback: 要移除的回调函数.
+
+        Returns:
+            True 如果找到并移除了回调，False 如果回调未注册.
+        """
+        if event not in self._handlers:
+            return False
+        try:
+            self._handlers[event].remove(callback)
+            return True
+        except ValueError:
+            return False
+
+    def clear(self, event: Optional[str] = None) -> None:
+        """清空指定事件（或全部事件）的回调.
+
+        Args:
+            event: 事件名. None 时清空所有事件的回调.
+        """
+        if event:
+            if event in self._handlers:
+                self._handlers[event].clear()
+        else:
+            for handlers in self._handlers.values():
+                handlers.clear()
+
+    def has(
+        self,
+        event: str,
+        callback: Optional[Callable[[dict], None]] = None,
+    ) -> bool:
+        """检查钩子是否存在.
+
+        Args:
+            event: 事件名.
+            callback: 若提供，检查该具体回调是否已注册. 若不提供，检查事件是否有至少一个回调.
+
+        Returns:
+            True 如果事件/回调存在.
+        """
+        if event not in self._handlers:
+            return False
+        if callback is None:
+            return len(self._handlers[event]) > 0
+        return callback in self._handlers[event]
+
     @property
     def registered_events(self) -> Dict[str, int]:
         """返回每个已注册事件的回调数量.

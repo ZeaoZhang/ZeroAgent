@@ -16,7 +16,10 @@ ui = ["streamlit>=1.28", "pywebview>=4.0"]
 browser = ["beautifulsoup4>=4.12", "bottle>=0.12", "simple-websocket-server>=0.4"]
 memory = ["rapidocr-onnxruntime>=1.3", "Pillow>=10.0"]
 plot = ["matplotlib>=3.7"]
-all-extras = ["zero-agent[ui,browser,memory,plot]"]
+telegram = ["python-telegram-bot>=20.0"]
+discord = ["discord.py>=2.3"]
+bots = ["zero-agent[telegram,discord]"]
+all-extras = ["zero-agent[ui,browser,memory,plot,bots]"]
 
 [project.scripts]
 zero-agent = "zero_agent.runners.cli:main"
@@ -30,11 +33,14 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = [
     "zero_agent",
+    "zero_agent.adapters",
+    "zero_agent.bots",
     "zero_agent.core",
     "zero_agent.llm",
     "zero_agent.tools",
     "zero_agent.tools.builtin",
     "zero_agent.memory",
+    "zero_agent.memory.sops",
     "zero_agent.runners",
     "zero_agent.utils",
     "zero_agent.reflect",
@@ -47,6 +53,7 @@ packages = [
 
 [tool.setuptools.package-data]
 "zero_agent.assets" = ["code_run_header.py", "tmwd_cdp_bridge/*"]
+"zero_agent.memory.sops" = ["*.md", "*.py", "**/*.md", "**/*.py", "**/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

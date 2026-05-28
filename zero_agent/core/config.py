@@ -16,6 +16,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+# 配置文件 mtime 缓存，用于热加载检测
+_config_mtime: dict[str, int] = {}
+
 
 @dataclass
 class LLMBackendConfig:
@@ -233,3 +236,27 @@ class AgentConfig:
             failover_backends=data.get("failover_backends", []),
             log_dir=data.get("log_dir"),
         )
+
+
+def reload_config_if_changed(config_path: str) -> Optional[AgentConfig]:
+    """若配置文件自上次读取以来已更改，则重新加载并返回新配置.
+
+    与 GenericAgent 的 reload_mykeys() 对齐：通过比较文件 mtime 检测变更，
+    仅在文件内容变化时重新读取，避免不必要的 I/O.
+
+    Args:
+        config_path: YAML 配置文件路径.
+
+    Returns:
+        新的 AgentConfig 如果文件已变更，否则 None.
+    """
+    try:
+        mtime = os.stat(config_path).st_mtime_ns
+    except OSError:
+        return None
+
+    if config_path in _config_mtime and _config_mtime[config_path] == mtime:
+        return None
+
+    _config_mtime[config_path] = mtime
+    return AgentConfig.from_yaml(config_path)

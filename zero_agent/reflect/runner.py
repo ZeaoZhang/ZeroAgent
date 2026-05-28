@@ -60,7 +60,9 @@ class ReflectRunner:
         if not os.path.isfile(self.module_path):
             raise FileNotFoundError(f"Reflect 模块不存在: {self.module_path}")
 
-        # 将模块所在目录加入 sys.path 以支持相对导入
+        # 将模块所在目录加入 sys.path 以支持用户自定义模块的相对导入.
+        # 注意: 这不是为了导入 zero_agent 自身 (zero_agent 已通过 pyproject.toml 安装),
+        # 而是为了让用户 reflect 脚本能 import 同目录下的其他模块.
         mod_dir = os.path.dirname(self.module_path)
         if mod_dir not in sys.path:
             sys.path.insert(0, mod_dir)

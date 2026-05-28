@@ -51,12 +51,17 @@ class MemoryManager:
         """
         self.memory_dir = os.path.abspath(memory_dir)
         self.workspace_dir = os.path.abspath(workspace_dir)
+        # package 内置 SOP 目录
+        self._pkg_sops_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "sops"
+        )
 
     def init_memory(self) -> None:
         """初始化记忆目录和默认文件.
 
         创建 memory_dir 及 L1/L2 默认文件（仅当文件不存在时）。
         已有文件不会被覆盖。
+        同时将 package 内置 SOP 文件复制到用户 memory 目录 (仅当不存在时)。
         """
         os.makedirs(self.memory_dir, exist_ok=True)
 
@@ -82,6 +87,9 @@ class MemoryManager:
         # L4: 历史会话存档目录
         l4_dir = os.path.join(self.memory_dir, "L4_raw_sessions")
         os.makedirs(l4_dir, exist_ok=True)
+
+        # 从 package 复制默认 SOP 文件 (L3 及 L0)
+        self._copy_default_sops()
 
     def get_global_memory_context(self) -> str:
         """构建系统提示词中的记忆上下文部分.
@@ -119,7 +127,8 @@ class MemoryManager:
     def get_sop_path(self, sop_name: str) -> Optional[str]:
         """查找 SOP 文件的完整路径.
 
-        先在 memory_dir 下查找，支持 .md 和 .py 扩展名。
+        先在 memory_dir 下查找，然后回退到 package 内置 sops 目录。
+        支持 .md 和 .py 扩展名。
 
         Args:
             sop_name: SOP 名称（不含扩展名或含扩展名）.
@@ -127,17 +136,14 @@ class MemoryManager:
         Returns:
             文件路径，未找到时返回 None.
         """
-        # 如果已经包含扩展名且文件存在
-        direct = os.path.join(self.memory_dir, sop_name)
-        if os.path.isfile(direct):
-            return direct
-
-        # 尝试 .md 和 .py 扩展名
-        for ext in (".md", ".py"):
-            candidate = os.path.join(self.memory_dir, f"{sop_name}{ext}")
-            if os.path.isfile(candidate):
-                return candidate
-
+        for search_dir in (self.memory_dir, self._pkg_sops_dir):
+            direct = os.path.join(search_dir, sop_name)
+            if os.path.isfile(direct):
+                return direct
+            for ext in (".md", ".py"):
+                candidate = os.path.join(search_dir, f"{sop_name}{ext}")
+                if os.path.isfile(candidate):
+                    return candidate
         return None
 
     def list_sops(self) -> list[str]:
@@ -150,6 +156,28 @@ class MemoryManager:
         if not os.path.isdir(self.memory_dir):
             return sops
         for entry in os.listdir(self.memory_dir):
-            if entry.endswith((".md", ".py")):
+            if entry.endswith((".md", ".py")) or os.path.isdir(
+                os.path.join(self.memory_dir, entry)
+            ):
                 sops.append(entry)
         return sorted(sops)
+
+    def _copy_default_sops(self) -> None:
+        """从 package 内置 sops 目录复制默认 SOP 文件到用户 memory 目录.
+
+        仅复制用户目录中不存在的文件，已有文件不会被覆盖。
+        同时递归复制子目录。
+        """
+        import shutil
+
+        if not os.path.isdir(self._pkg_sops_dir):
+            return
+        for name in os.listdir(self._pkg_sops_dir):
+            src = os.path.join(self._pkg_sops_dir, name)
+            dst = os.path.join(self.memory_dir, name)
+            if os.path.isdir(src):
+                if not os.path.exists(dst):
+                    shutil.copytree(src, dst)
+            else:
+                if not os.path.exists(dst):
+                    shutil.copy2(src, dst)
