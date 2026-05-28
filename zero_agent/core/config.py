@@ -60,10 +60,13 @@ class LLMBackendConfig:
     connect_timeout: int = 5
     read_timeout: int = 30
     proxy: Optional[str] = None
+    extra_headers: Optional[dict] = None
     stream: bool = True
     verify: bool = True
     service_tier: Optional[str] = None
     health_check_interval: int = 60
+    spring_back_multiplier: float = 1.0  # spring-back 定时器乘数
+    api_mode: str = "chat_completions"  # "chat_completions" | "responses"
 
 
 @dataclass

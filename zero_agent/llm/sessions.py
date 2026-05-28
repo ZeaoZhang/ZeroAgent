@@ -7,6 +7,7 @@ LiteLLMSession 封装 litellm.completion()，用一套代码处理所有 LLM 提
 from __future__ import annotations
 
 import json
+import os
 import threading
 from typing import Any, Dict, Generator, List, Optional
 
@@ -342,8 +343,13 @@ class LiteLLMSession:
             kwargs["timeout"] = self.config.connect_timeout
 
         if self.config.proxy:
-            # litellm 通过环境变量处理 proxy，也可以直接传
-            pass
+            # 设置环境变量供 litellm httpx 客户端使用（trust_env=True）
+            os.environ["HTTP_PROXY"] = self.config.proxy
+            os.environ["HTTPS_PROXY"] = self.config.proxy
+
+        # 自定义 HTTP 标头（CC relay 等场景）
+        if self.config.extra_headers:
+            kwargs["extra_headers"] = self.config.extra_headers
 
         # service_tier (OpenAI)
         if self.config.service_tier:
@@ -363,6 +369,10 @@ class LiteLLMSession:
         # reasoning_effort (OpenAI o-series, Claude 等)
         if self.config.reasoning_effort:
             kwargs["reasoning_effort"] = self.config.reasoning_effort
+
+        # Responses API 模式
+        if self.config.api_mode and self.config.api_mode != "chat_completions":
+            kwargs["api_mode"] = self.config.api_mode
 
         return kwargs
 
@@ -901,6 +911,115 @@ class LiteLLMSession:
             result.append(msg)
 
         return result
+
+    # ---- Thinking block 边界处理 ----
+
+    @staticmethod
+    def _keep_claude_block(block: dict) -> bool:
+        """判断 Claude content block 是否应保留.
+
+        过滤掉无签名（signature）的 thinking block，
+        与 GenericAgent 的 _keep_claude_block 对齐.
+
+        Args:
+            block: 单个 content block 字典.
+
+        Returns:
+            True 表示保留，False 表示丢弃.
+        """
+        if not isinstance(block, dict):
+            return True
+        if block.get("type") != "thinking":
+            return True
+        return bool(block.get("signature"))
+
+    @staticmethod
+    def _drop_unsigned_thinking(messages: list[dict]) -> list[dict]:
+        """删除消息中无签名的 thinking blocks.
+
+        某些 API 版本要求 thinking block 必须带有签名，
+        否则会拒绝请求.
+
+        Args:
+            messages: 消息列表.
+
+        Returns:
+            过滤后的消息列表.
+        """
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                msg["content"] = [
+                    b for b in content
+                    if LiteLLMSession._keep_claude_block(b)
+                ]
+        return messages
+
+    @staticmethod
+    def _ensure_thinking_blocks(messages: list[dict], model: str) -> list[dict]:
+        """DeepSeek 模型需要在历史中保留 thinking blocks.
+
+        DeepSeek 要求 assistant 消息中至少有一个 thinking block，
+        否则会报错。此函数为缺失 thinking 的历史消息注入占位符.
+
+        Args:
+            messages: 消息列表.
+            model: 模型名称（用于判断是否需要处理）.
+
+        Returns:
+            补充后的消息列表.
+        """
+        if "deepseek" not in model.lower():
+            return messages
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            has_thinking = any(
+                isinstance(b, dict) and b.get("type") == "thinking"
+                for b in content
+            )
+            if not has_thinking:
+                msg["content"] = [
+                    {
+                        "type": "thinking",
+                        "thinking": "...",
+                        "signature": "placeholder",
+                    },
+                    *content,
+                ]
+        return messages
+
+    @staticmethod
+    def _ensure_text_block(blocks: list[dict]) -> Optional[str]:
+        """若响应有 thinking 但无 text block，注入合成摘要.
+
+        某些模型返回的响应可能只有 thinking 没有 text，
+        这会导致后续轮次出现空 content 错误.
+        从 thinking 第一行提取摘要注入为 text block.
+
+        Args:
+            blocks: 响应的 content blocks 列表.
+
+        Returns:
+            注入的摘要文本，若无需注入则返回 None.
+        """
+        if any(b.get("type") == "text" for b in blocks):
+            return None
+        thinking = next(
+            (b.get("thinking", "") for b in blocks if b.get("type") == "thinking"),
+            "",
+        )
+        if not thinking:
+            return None
+        line = thinking.strip().split("\n", 1)[0]
+        summary = (
+            "<summary>" + (line[:60] + "..." if len(line) > 60 else line) + "</summary>"
+        )
+        blocks.insert(1, {"type": "text", "text": summary})
+        return summary
 
     # ---- LLM 调用日志 ----
 

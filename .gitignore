@@ -45,3 +45,4 @@ task_*/
 
 # OMC
 .omc/
+.omx/

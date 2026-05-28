@@ -289,8 +289,18 @@ def _make_code_run_handler(config: AgentConfig):
                     "handler": handler,
                     "history": getattr(handler, "history_info", []),
                 }
-                exec(code, {}, local_ns)
-                result = str(local_ns.get("result", local_ns.get("_", "")))
+                # 如果可通过 handler 获取，则添加 parent 引用（兼容 GenericAgent 行为）
+                try:
+                    local_ns["parent"] = handler.parent
+                except Exception:
+                    pass
+                # eval() 优先：表达式直接返回值，无需 LLM 写赋值语句
+                # SyntaxError 时 fallback 到 exec() 处理语句类代码
+                try:
+                    result = repr(eval(code, {}, local_ns))
+                except SyntaxError:
+                    exec(code, {}, local_ns)
+                    result = str(local_ns.get("result", local_ns.get("_", "")))
                 yield f"[Status] OK inline_eval\n[Stdout]\n{result[:5000]}\n"
                 return {"status": "success", "stdout": result[:10000], "exit_code": 0}
             except Exception as e:

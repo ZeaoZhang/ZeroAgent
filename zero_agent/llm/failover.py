@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any, Dict, Generator, List, Optional
@@ -17,6 +18,8 @@ from zero_agent.core.config import LLMBackendConfig
 from zero_agent.core.exceptions import LLMError
 from zero_agent.llm.base import MockResponse
 from zero_agent.llm.sessions import LiteLLMSession
+
+_logger = logging.getLogger("zero_agent.failover")
 
 
 class AutoFailoverSession:
@@ -156,7 +159,7 @@ class AutoFailoverSession:
         tools: Optional[List[Dict[str, Any]]],
         original_error: Exception,
     ) -> Generator[str, None, MockResponse]:
-        """执行故障转移，依次尝试备用 session.
+        """执行故障转移，依次尝试备用 session（含指数退避）.
 
         Args:
             messages: 原始消息列表.
@@ -176,10 +179,16 @@ class AutoFailoverSession:
             self._fallback_count += 1
             self._is_fallback_active = True
 
+        _logger.warning(
+            "主后端 (%s) 不可用，启动故障转移: %s",
+            self.primary.name, original_error,
+        )
         yield f"\n[Fallback] 主后端 ({self.primary.name}) 不可用，切换到备用后端...\n"
 
         last_error = original_error
-        for backup in self.backups:
+        base_delay = 1.0  # 初始退避 1 秒
+
+        for i, backup in enumerate(self.backups):
             try:
                 with self._lock:
                     self._migrate_history(self._active, backup)
@@ -187,14 +196,22 @@ class AutoFailoverSession:
                     self._active = backup
                     self._active_name = backup.name
 
+                _logger.info("故障转移至备用后端: %s (第 %d 次尝试)", backup.name, i + 1)
                 yield f"[Fallback] 使用备用后端: {backup.name}\n"
                 mock = yield from backup.chat(messages=messages, tools=tools)
                 return mock
             except Exception as e:
                 last_error = e
+                _logger.warning("备用后端 %s 失败: %s", backup.name, e)
                 yield f"[Fallback] 备用后端 {backup.name} 也失败了\n"
+                # 指数退避：重试前等待 base_delay * 2^i，上限 30s
+                delay = min(base_delay * (2 ** i), 30.0)
+                if i < len(self.backups) - 1:
+                    _logger.debug("退避 %.1fs 后尝试下一个备用...", delay)
+                    time.sleep(delay)
                 continue
 
+        _logger.error("所有 %d 个 LLM 后端均不可用", 1 + len(self.backups))
         raise LLMError(
             f"所有 LLM 后端均不可用（共 {1 + len(self.backups)} 个）"
         ) from last_error
@@ -203,12 +220,16 @@ class AutoFailoverSession:
         """如果已 fallback 且超过健康检查间隔，探测主 session.
 
         若主 session 恢复，自动 spring-back 切回.
+        使用 primary config 的 spring_back_multiplier 调节检查频率.
         """
         if not self._is_fallback_active:
             return
 
         now = time.time()
-        if now - self._last_health_check < self._health_check_interval:
+        interval = self._health_check_interval * getattr(
+            self.primary.config, "spring_back_multiplier", 1.0
+        )
+        if now - self._last_health_check < interval:
             return
 
         self._last_health_check = now
@@ -220,6 +241,10 @@ class AutoFailoverSession:
                 self._active_name = self.primary.name
                 self._is_fallback_active = False
 
+            _logger.info(
+                "主后端 (%s) 已恢复，自动切回（累计 fallback %d 次）",
+                self.primary.name, self._fallback_count,
+            )
             print(
                 f"[Info] 主后端 ({self.primary.name}) 已恢复，"
                 f"已自动切回。累计 fallback {self._fallback_count} 次."

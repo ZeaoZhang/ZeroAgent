@@ -13,6 +13,8 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
+import litellm
+
 from zero_agent.core.hooks import (
     EVENT_AGENT_AFTER,
     EVENT_AGENT_BEFORE,
@@ -208,6 +210,9 @@ def register(hook_system: Any) -> bool:
     仅当 langfuse 包可用且配置存在时才注册。
     注册失败时静默跳过，不影响 agent 正常运行。
 
+    同时激活 litellm 内置 Langfuse 回调（litellm.success_callback），
+    与自定义钩子共存：litellm 回调追踪 token/span，自定义钩子追踪 agent 生命周期。
+
     Args:
         hook_system: HookSystem 实例.
 
@@ -221,5 +226,11 @@ def register(hook_system: Any) -> bool:
 
     for event, callback in _HANDLERS.items():
         hook_system.register(event, callback)
+
+    # 激活 litellm 内置 Langfuse 回调（自动 token 追踪 + span 嵌套）
+    try:
+        litellm.success_callback = ["langfuse"]
+    except Exception:
+        pass
 
     return True

@@ -17,9 +17,9 @@ core/agent.py           ←── ZeroAgent: 组装所有组件
         │
         ├── llm/               ←── LLM 后端
         │   ├── sessions.py    ←── LiteLLMSession (主力)
-        │   ├── native.py      ←── NativeClaudeSession (直连 API)
-        │   ├── mixin.py       ←── MixinSession (多后端容错)
+        │   ├── failover.py    ←── AutoFailoverSession (多后端容错)
         │   ├── factory.py     ←── LLMFactory (统一创建入口)
+        │   ├── base.py        ←── MockResponse 等基类
         │   ├── sse_parsers.py ←── SSE 流解析器
         │   └── converters.py  ←── 消息格式转换器
         │
@@ -79,7 +79,6 @@ LLM 返回 tool_calls → ToolRegistry.dispatch()
 
 ```
 AgentConfig.llm_backends:
-  provider: litellm        → LiteLLMSession  (默认，兼容最广)
-  provider: native_claude  → NativeClaudeSession (直连 Anthropic)
-  provider: native_openai  → NativeOAISession    (直连 OpenAI)
+  provider: anthropic 等    → LiteLLMSession  (通过 litellm 统一调用)
+  failover_backends: [...]  → AutoFailoverSession (多后端链路容错)
 ```

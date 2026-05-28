@@ -32,6 +32,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     agent = ZeroAgent(config=config)
     agent.handler.max_turns = agent.config.max_turns
 
+    # 记录配置路径以支持热重载
+    if args.config:
+        agent.set_config_path(args.config)
+
     if args.reflect:
         # Reflect 反射模式
         _run_reflect(agent, args.reflect)

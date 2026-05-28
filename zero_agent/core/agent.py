@@ -113,6 +113,67 @@ class ZeroAgent:
         self.task_dir: Optional[str] = None
         self._turn_end_hooks: Dict[str, Any] = {}
         self.loop: Optional[AgentLoop] = None
+        self._config_path: Optional[str] = None
+
+    def set_config_path(self, path: Optional[str]) -> None:
+        """设置配置文件的路径，用于热重载检测."""
+        self._config_path = path
+
+    def reload_config(self) -> bool:
+        """若配置文件已变更则热重载配置并重建 LLM session.
+
+        与 GenericAgent 的 reload_mykeys() 对齐：
+        检测 YAML 文件 mtime，变更时重新加载并重建 client.
+
+        Returns:
+            True 表示配置已重载，False 表示无变更.
+        """
+        if not self._config_path:
+            return False
+
+        from zero_agent.core.config import reload_config_if_changed, _config_mtime
+
+        new_config = reload_config_if_changed(self._config_path)
+        if new_config is None:
+            return False
+
+        old_backend = self.config.default_backend
+        self.config = new_config
+
+        # 重建所有 LLM session
+        from zero_agent.llm.factory import LLMFactory
+
+        try:
+            new_sessions = LLMFactory.create_all_sessions(new_config)
+        except Exception as e:
+            import logging
+            logging.getLogger("zero_agent").warning(
+                "reload_config: 重建 LLM 会话失败，将保留旧会话: %s", e
+            )
+            return False
+
+        self._sessions = new_sessions
+        new_default = new_config.default_backend
+
+        # 保持当前活跃的后端名称不变（如果该后端还存在）
+        target_name = old_backend
+        if target_name not in self._sessions:
+            target_name = new_default
+
+        self.client = self._sessions.get(target_name)
+        if self.client is None:
+            self.client = next(iter(self._sessions.values()))
+
+        # 更新 handler 引用
+        self.handler.client = self.client
+
+        import logging
+        logging.getLogger("zero_agent").info(
+            "Config reloaded from %s, active backend: %s",
+            self._config_path,
+            target_name,
+        )
+        return True
 
     def run(
         self,
@@ -156,6 +217,7 @@ class ZeroAgent:
             max_turns=self.config.max_turns,
             verbose=self.config.verbose,
             hooks=self.hooks,
+            agent=self,
         )
         self.loop = loop
 
@@ -282,6 +344,11 @@ class ZeroAgent:
     def _build_system_prompt(self) -> str:
         """从配置和已注册工具构建默认系统提示词.
 
+        优先级:
+            1. config.prompt_file 指定的文件路径
+            2. zero_agent/assets/sys_prompt.txt（自动检测）
+            3. 代码中硬编码的默认常量（fallback）
+
         根据 config.resolved_language 选择中英文模板.
         包含日期、工作目录、可用工具列表、记忆上下文.
 
@@ -292,7 +359,12 @@ class ZeroAgent:
 
         lang = self.config.resolved_language
         tool_lang = self.config.resolved_tool_language
-        template = _SYSTEM_PROMPT_ZH if lang == "zh" else _SYSTEM_PROMPT_EN
+
+        # 尝试从外部文件加载模板
+        template = self._load_prompt_template(lang)
+        if template is None:
+            # 回退到代码中的默认常量
+            template = _SYSTEM_PROMPT_ZH if lang == "zh" else _SYSTEM_PROMPT_EN
 
         tools_desc = self._generate_tools_description(tool_lang)
         prompt = template.format(
@@ -313,6 +385,39 @@ class ZeroAgent:
             prompt += f"\n{extra_sys}"
 
         return prompt
+
+    @staticmethod
+    def _load_prompt_template(lang: str) -> Optional[str]:
+        """从外部文件加载系统提示词模板.
+
+        查找顺序:
+            1. zero_agent/assets/sys_prompt.txt (zh) 或 sys_prompt_en.txt (en)
+            2. 返回 None 表示使用代码中的默认常量.
+
+        Args:
+            lang: 语言代码 ("zh" 或 "en").
+
+        Returns:
+            模板字符串，未找到时返回 None.
+        """
+        import os
+
+        suffix = "" if lang == "zh" else "_en"
+        filename = f"sys_prompt{suffix}.txt"
+
+        try:
+            assets_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "assets",
+            )
+            prompt_path = os.path.join(assets_dir, filename)
+            if os.path.isfile(prompt_path):
+                with open(prompt_path, encoding="utf-8") as f:
+                    return f.read()
+        except Exception:
+            pass
+
+        return None
 
     def _generate_tools_description(self, lang: str = "zh") -> str:
         """从注册中心生成工具描述文本.

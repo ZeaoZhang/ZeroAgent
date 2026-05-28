@@ -9,9 +9,14 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Dict, Generator, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Generator, List, Optional
 
+from zero_agent.core.hooks import HookSystem
+from zero_agent.core.interfaces import LLMClient, ToolDispatcher
 from zero_agent.core.types import StepOutcome
+
+if TYPE_CHECKING:
+    from zero_agent.core.agent import ZeroAgent
 
 
 class AgentLoop:
@@ -30,12 +35,13 @@ class AgentLoop:
 
     def __init__(
         self,
-        client: Any,
-        handler: Any,
+        client: LLMClient,
+        handler: ToolDispatcher,
         tools_schema: List[Dict[str, Any]],
         max_turns: int = 80,
         verbose: bool = True,
-        hooks: Any = None,
+        hooks: Optional[HookSystem] = None,
+        agent: Optional[ZeroAgent] = None,  # type: ignore[name-defined]  # TYPE_CHECKING
     ) -> None:
         """初始化 AgentLoop.
 
@@ -46,6 +52,7 @@ class AgentLoop:
             max_turns: 最大轮次限制.
             verbose: True 时输出详细工具调用信息.
             hooks: 可选的 HookSystem 实例，用于事件钩子.
+            agent: 可选的 ZeroAgent 引用，用于配置热重载.
         """
         self.client = client
         self.handler = handler
@@ -54,6 +61,7 @@ class AgentLoop:
         self.verbose = verbose
         self.hooks = hooks
         self.handler.loop = self
+        self._agent = agent
 
     def run(
         self,
@@ -107,6 +115,14 @@ class AgentLoop:
         while turn < self.handler.max_turns:
             turn += 1
             yield {"turn": turn}
+
+            # 配置热重载：与 GenericAgent reload_mykeys() 对齐
+            if self._agent is not None and turn % 5 == 0:
+                if self._agent.reload_config():
+                    self.client = self._agent.client
+                    self.handler = self._agent.handler
+                    self.handler.loop = self
+                    self.tools_schema = self._agent.registry.generate_openai_schema()
 
             if self.verbose:
                 yield f"\n\n**LLM Running (Turn {turn}) ...**\n\n"

@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Generator, Optional
+from typing import TYPE_CHECKING, Any, Dict, Generator, Optional
 
 from zero_agent.core.types import StepOutcome
 from zero_agent.tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from zero_agent.core.agent import ZeroAgent
 
 
 class BaseHandler:
@@ -49,7 +52,7 @@ class BaseHandler:
         self.working: Dict[str, Any] = {}
         self.code_stop_signal: list = []
         self.cwd = cwd
-        self.parent: Any = None
+        self.parent: Optional[ZeroAgent] = None  # type: ignore[name-defined]  # TYPE_CHECKING
         self.max_turns: int = 80
         self.current_turn: int = 0
         self._done_hooks: list = []
