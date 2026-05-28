@@ -24,7 +24,9 @@ L1 Insight是极简索引，L2/L3变更时同步L1，索引必须极简。写记
 2. 决策前查记忆，有SOP/utils必用；多次失败回看SOP；未查证不断言
 3. 分步执行，控制粒度，限制失败半径；3次失败请求干预
 4. 写任何记忆前读META-SOP核验，memory下文件只能patch修改（除非新建）
-"""
+5. 密钥/凭证文件(.env,config.yaml,keychain等)仅引用路径，禁止读取内容或移动
+6. 安装新Python包前需确认必要性，优先使用标准库和已有依赖"""
+
 
 
 class MemoryManager:

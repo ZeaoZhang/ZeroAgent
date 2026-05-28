@@ -340,7 +340,7 @@ class LiteLLMSession:
             kwargs["num_retries"] = self.config.max_retries
 
         if self.config.connect_timeout:
-            kwargs["timeout"] = self.config.connect_timeout
+            kwargs["timeout"] = (self.config.connect_timeout, self.config.read_timeout)
 
         if self.config.proxy:
             # 设置环境变量供 litellm httpx 客户端使用（trust_env=True）
@@ -896,14 +896,22 @@ class LiteLLMSession:
             - System prompt → "persistent" 缓存（跨请求复用）
             - 最后 2 条 user 消息 → "ephemeral" 缓存
 
+        也支持 OAI 兼容端点（OpenRouter 等）通过 Claude 模型时的缓存标记.
+
         Args:
             messages: 消息列表.
-            provider: 后端提供商类型 ("claude" 等).
+            provider: 后端提供商类型 ("claude", "openai" 等).
 
         Returns:
             标记后的消息列表.
         """
-        if "claude" not in provider.lower():
+        if not messages:
+            return messages
+
+        is_claude_provider = "claude" in provider.lower()
+        is_oai_claude_relay = not is_claude_provider and LiteLLMSession._has_claude_model_in_messages(messages)
+
+        if not is_claude_provider and not is_oai_claude_relay:
             return messages
 
         user_indices = [
@@ -917,16 +925,27 @@ class LiteLLMSession:
             role = msg.get("role", "")
             content = msg.get("content", "")
 
-            # System prompt → persistent cache（与 GenericAgent ClaudeSession 对齐）
+            # System prompt → persistent cache
             if role == "system" and isinstance(content, str) and content:
-                msg = {
-                    **msg,
-                    "content": [{
-                        "type": "text",
-                        "text": content,
-                        "cache_control": {"type": "persistent"},
-                    }],
-                }
+                if is_claude_provider:
+                    msg = {
+                        **msg,
+                        "content": [{
+                            "type": "text",
+                            "text": content,
+                            "cache_control": {"type": "persistent"},
+                        }],
+                    }
+                # OAI relay: system 也用 ephemeral（OAI 不区分 persistent）
+                elif is_oai_claude_relay:
+                    msg = {
+                        **msg,
+                        "content": [{
+                            "type": "text",
+                            "text": content,
+                            "cache_control": {"type": "ephemeral"},
+                        }],
+                    }
             # 最后 2 条 user 消息 → ephemeral cache
             elif i in stamp_indices:
                 if isinstance(content, str):
@@ -938,9 +957,33 @@ class LiteLLMSession:
                             "cache_control": {"type": "ephemeral"},
                         }],
                     }
+                elif isinstance(content, list):
+                    # OAI relay: 为 content list 中最后一个 text block 标记
+                    content_list = list(content)
+                    for j in range(len(content_list) - 1, -1, -1):
+                        if isinstance(content_list[j], dict) and content_list[j].get("type") == "text":
+                            content_list[j] = {**content_list[j], "cache_control": {"type": "ephemeral"}}
+                            break
+                    msg = {**msg, "content": content_list}
             result.append(msg)
 
         return result
+
+    @staticmethod
+    def _has_claude_model_in_messages(messages: list[dict]) -> bool:
+        """检测消息历史中是否包含 Claude 模型的 tool_use 标记.
+
+        用于判断 OAI 兼容中继场景是否需要缓存标记.
+        """
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        block_type = block.get("type", "")
+                        if block_type in ("tool_use", "tool_result"):
+                            return True
+        return False
 
     # ---- Thinking block 边界处理 ----
 
