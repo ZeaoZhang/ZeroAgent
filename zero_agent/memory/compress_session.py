@@ -161,10 +161,14 @@ def batch_process(
         "processed": 0,
         "skipped": 0,
         "archived": 0,
+        "deleted_raw": 0,
         "errors": [],
     }
 
     os.makedirs(l4_dir, exist_ok=True)
+
+    # 读取已归档会话，避免重复处理
+    existing = _existing_sessions(l4_dir)
 
     log_pattern = os.path.join(src_dir, "*.log")
     log_files = sorted(glob.glob(log_pattern))
@@ -173,6 +177,12 @@ def batch_process(
         # 跳过 2 小时内修改的文件
         mtime = os.path.getmtime(log_file)
         if datetime.now().timestamp() - mtime < 7200:
+            results["skipped"] += 1
+            continue
+
+        # 跳过已归档会话
+        basename = os.path.basename(log_file)
+        if basename in existing:
             results["skipped"] += 1
             continue
 
@@ -194,6 +204,14 @@ def batch_process(
             # 月归档
             _archive_to_monthly(log_file, l4_dir)
             results["archived"] += 1
+            existing.add(basename)
+
+            # 删除已处理的原始文件
+            try:
+                os.remove(log_file)
+                results["deleted_raw"] += 1
+            except OSError:
+                pass
         else:
             results["skipped"] += 1
             if "error" in stats:
@@ -202,6 +220,27 @@ def batch_process(
         results["processed"] += 1
 
     return results
+
+
+def _existing_sessions(l4_dir: str) -> set:
+    """从 all_histories.txt 读取已归档的会话名称.
+
+    Args:
+        l4_dir: L4 归档根目录.
+
+    Returns:
+        已归档会话文件名的集合.
+    """
+    hist_path = os.path.join(l4_dir, "all_histories.txt")
+    if not os.path.isfile(hist_path):
+        return set()
+    result: set = set()
+    with open(hist_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("=== "):
+                result.add(line.replace("===", "").strip())
+    return result
 
 
 def _strip_system_and_echo(content: str) -> str:
@@ -235,20 +274,46 @@ def _strip_system_and_echo(content: str) -> str:
 
 
 def _deduplicate_history(lines: List[str]) -> List[str]:
-    """去重历史行（基于内容完全匹配）.
+    """通过后缀-前缀重叠检测合并滑动窗口中的历史块.
+
+    与 GenericAgent 的 _merge_history_blocks 对齐:
+    当连续块之间存在重叠行时（前一块尾部和后一块头部匹配），
+    将块拼接在一起而非产生重复条目。
 
     Args:
-        lines: 历史行列表.
+        lines: 历史行列表 (可能包含多个滑动窗口块).
 
     Returns:
-        去重后的列表.
+        合并后的无重复列表.
     """
-    seen: set[str] = set()
-    result: list[str] = []
-    for line in lines:
-        if line not in seen:
-            seen.add(line)
-            result.append(line)
+    if not lines:
+        return []
+    result: list[str] = [lines[0]]
+    i = 1
+    while i < len(lines):
+        # 查找后缀-前缀最长重叠 (最多检查最后 10 行)
+        best = 0
+        for k in range(1, min(len(result), 10) + 1):
+            if result[-k:] == lines[i:i + k]:
+                best = k
+        if best > 0:
+            i += best
+            continue
+        # 回退: 在 result 中查找当前行，从匹配位置继续合并
+        line = lines[i]
+        if line in result:
+            idx = len(result) - 1 - result[::-1].index(line)
+            match_len = 0
+            for j in range(min(len(lines) - i, len(result) - idx)):
+                if result[idx + j] == lines[i + j]:
+                    match_len = j + 1
+                else:
+                    break
+            if match_len > 0:
+                result.extend(lines[i + match_len:])
+                break
+        result.append(line)
+        i += 1
     return result
 
 

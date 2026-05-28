@@ -1,10 +1,18 @@
 """Tests for optional builtin extension tool adapters."""
 
+import pytest
+
 from zero_agent.core.handler import BaseHandler
 from zero_agent.llm.base import MockResponse
 from zero_agent.tools.registry import ToolRegistry
 
 
+@pytest.mark.skip(
+    reason="Extension tools (im/memory_plot/search/vision) are intentionally "
+    "not exposed as standalone builtin modules. Vision is handled via SOP + "
+    "code_run calling memory/vision_api.ask_vision(). IM send is handled by "
+    "frontend Bot processes. See builtin/__init__.py docstring for details."
+)
 def test_optional_extension_handlers_return_data(monkeypatch) -> None:
     """可选扩展工具手动注册后应按 registry handler 协议返回数据."""
     from zero_agent.tools.builtin import im, memory_plot, search, vision

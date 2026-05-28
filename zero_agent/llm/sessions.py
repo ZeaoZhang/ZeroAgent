@@ -636,6 +636,36 @@ class LiteLLMSession:
                 "id": f"text_fallback_{len(results)}",
             })
 
+        # 模式 4: 裸 JSON 对象（无 XML 包装）
+        # 检测 {"name": ..., "arguments": ...} 格式
+        if '"name":' in text and '"arguments":' in text:
+            json_match = _re.search(
+                r'\{[^{}]*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[^{}]*\}[^{}]*\}',
+                text, _re.DOTALL,
+            )
+            if json_match:
+                try:
+                    data = _json.loads(json_match.group(0))
+                    func_name = (
+                        data.get('name') or data.get('function')
+                        or data.get('tool')
+                    )
+                    args = (
+                        data.get('arguments') or data.get('args')
+                        or data.get('params') or data.get('parameters') or {}
+                    )
+                    if func_name:
+                        results.append({
+                            "tool_name": func_name,
+                            "args": args if isinstance(args, dict)
+                                    else {"raw": str(args)},
+                            "id": data.get(
+                                "id", f"text_fallback_{len(results)}"
+                            ),
+                        })
+                except _json.JSONDecodeError:
+                    pass
+
         return results
 
     # ---- 粘连 JSON 解析 ----

@@ -713,16 +713,26 @@ class BaseHandler:
                 if memory_ctx:
                     next_prompt += f"\n\n[Memory Refresh]\n{memory_ctx}"
 
-        # ——— 3.5 Plan Mode 提示 ———
+        # ─── 3.5 Plan Mode 提示 ───
         if self._in_plan_mode():
+            _plan = self.working.get("in_plan_mode", "")
             remaining = self._check_plan_completion()
             if remaining is not None and remaining > 0:
-                next_prompt += self._tl(
-                    f"\n[Plan Mode] plan.md 剩余 {remaining} 个 [ ] 未完成项。"
-                    "继续按计划执行，完成后调用 [VERIFY] 验证。",
-                    f"\n[Plan Mode] {remaining} unchecked items remaining in plan.md. "
-                    "Continue executing the plan, then run [VERIFY].",
-                )
+                # 每 5 轮（从第 10 轮起）注入计划文件路径，强制 agent 重读
+                if turn >= 10 and turn % 5 == 0:
+                    next_prompt = self._tl(
+                        f"[Plan Hint] 正在计划模式。必须 file_read({_plan}) "
+                        "确认当前步骤，回复开头引用：📌 当前步骤：...\n\n",
+                        f"[Plan Hint] In plan mode. Must file_read({_plan}) "
+                        "to confirm current step, start reply with: 📌 Current step: ...\n\n",
+                    ) + next_prompt
+                else:
+                    next_prompt += self._tl(
+                        f"\n[Plan Mode] plan.md 剩余 {remaining} 个 [ ] 未完成项。"
+                        "继续按计划执行，完成后调用 [VERIFY] 验证。",
+                        f"\n[Plan Mode] {remaining} unchecked items in plan.md. "
+                        "Continue executing, then run [VERIFY].",
+                    )
 
         # ——— 4. 文件干预 ———
         if self.parent is not None:
@@ -756,5 +766,14 @@ class BaseHandler:
                             self.parent.abort()
                         except Exception:
                             pass
+
+        # ─── 5. Execute _turn_end_hooks ───
+        if self.parent is not None:
+            hooks_dict = getattr(self.parent, '_turn_end_hooks', {})
+            for hook in list(hooks_dict.values()):
+                try:
+                    hook(locals())
+                except Exception:
+                    pass
 
         return next_prompt
