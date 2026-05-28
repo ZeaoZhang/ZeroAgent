@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import json
 import time
+from importlib import resources
 from typing import Any, Dict, Generator, Optional
 
 from zero_agent.core.config import AgentConfig
@@ -29,8 +30,17 @@ _driver_error: Optional[str] = None
 
 _BROWSER_EXTRA_HINT = (
     "浏览器运行时不可用。请安装浏览器扩展依赖: "
-    "pip install 'zero-agent[browser]'"
+    "pip install 'zero-agent[browser]'，并加载 bundled extension: "
+    "zero_agent/assets/tmwd_cdp_bridge"
 )
+
+
+def browser_extension_dir() -> str:
+    """Return the bundled browser extension resource path when available."""
+    try:
+        return str(resources.files("zero_agent.assets").joinpath("tmwd_cdp_bridge"))
+    except Exception:
+        return "zero_agent/assets/tmwd_cdp_bridge"
 
 
 def _load_tm_webdriver() -> Any:

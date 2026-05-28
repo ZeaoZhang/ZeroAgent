@@ -56,8 +56,9 @@ State JSON 格式:
 
 ### scheduler.py — 定时任务
 
-`INTERVAL = 120`。扫描 `sche_tasks/` 目录下的 JSON 任务文件，
-按 schedule 时间触发。支持 repeat: `once/daily/weekday/weekly/monthly/every_Nh/every_Nm`。
+`INTERVAL = 120`。默认扫描当前工作目录下 `./sche_tasks/` 的 JSON 任务文件，
+也可通过 `ZA_SCHED_TASKS_DIR` 指定可写运行目录。按 schedule 时间触发。
+支持 repeat: `once/daily/weekday/weekly/monthly/every_Nh/every_Nm`。
 
 任务 JSON 格式:
 ```json

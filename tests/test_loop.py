@@ -325,6 +325,50 @@ class TestAgentLoop:
         assert client.calls[1][0]["tool_call_id"] == "call_0"
         assert "tool_results" not in client.calls[1][1]
 
+    def test_multi_tool_results_are_sent_as_separate_messages(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """多工具调用后的 provider payload 保留多个独立 tool result."""
+        client = _make_recording_client([
+            MockResponse(
+                content="",
+                tool_calls=[
+                    MockToolCall(
+                        function=MockFunction(
+                            name="echo", arguments='{"message": "a"}',
+                        ),
+                        id="call_1",
+                    ),
+                    MockToolCall(
+                        function=MockFunction(
+                            name="echo", arguments='{"message": "b"}',
+                        ),
+                        id="call_2",
+                    ),
+                ],
+            ),
+            MockResponse(content="Both done."),
+        ])
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=5,
+            verbose=False,
+        )
+
+        exit_reason = _exhaust(loop.run("system prompt", "task"))
+
+        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        assert [m["role"] for m in client.calls[1][:3]] == [
+            "tool",
+            "tool",
+            "user",
+        ]
+        assert client.calls[1][0]["tool_call_id"] == "call_1"
+        assert client.calls[1][1]["tool_call_id"] == "call_2"
+
     def test_done_hook_extends_loop(self, mock_handler: BaseHandler) -> None:
         """_done_hooks 在任务声明完成时追加额外轮次."""
         mock_handler._done_hooks.append("Do one more thing: verify the result.")

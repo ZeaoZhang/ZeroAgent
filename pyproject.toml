@@ -42,7 +42,11 @@ packages = [
     "zero_agent.frontends",
     "zero_agent.vendor",
     "zero_agent.vendor.genericagent",
+    "zero_agent.assets",
 ]
+
+[tool.setuptools.package-data]
+"zero_agent.assets" = ["code_run_header.py", "tmwd_cdp_bridge/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -40,6 +40,8 @@ pip install -e ".[ui]"
 
 # Browser control runtime (web_scan / web_execute_js)
 pip install -e ".[browser]"
+# Then load/connect the bundled browser extension from:
+# zero_agent/assets/tmwd_cdp_bridge
 
 # OCR 与图像记忆
 pip install -e ".[memory]"

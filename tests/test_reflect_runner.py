@@ -1,5 +1,6 @@
 """Tests for reflect/runner.py — ReflectRunner harness."""
 
+import importlib
 import os
 import sys
 import tempfile
@@ -79,6 +80,49 @@ class TestReflectRunnerLoadModule:
             )
             runner._maybe_reload()
             assert runner._module.INTERVAL == 99
+
+    def test_scheduler_import_creates_runtime_dirs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        tasks_dir = tmp_path / "sche_tasks"
+        monkeypatch.setenv("ZA_SCHED_TASKS_DIR", str(tasks_dir))
+        monkeypatch.setenv("ZA_SCHED_LOCK_PORT", "0")
+
+        sys.modules.pop("zero_agent.reflect.scheduler", None)
+        scheduler = importlib.import_module("zero_agent.reflect.scheduler")
+
+        assert scheduler.TASKS == str(tasks_dir)
+        assert tasks_dir.is_dir()
+        assert (tasks_dir / "done").is_dir()
+
+    def test_scheduler_l4_uses_package_compressor_signature(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        tasks_dir = tmp_path / "sche_tasks"
+        raw_dir = tmp_path / "responses"
+        l4_dir = tmp_path / "l4"
+        calls = []
+
+        monkeypatch.setenv("ZA_SCHED_TASKS_DIR", str(tasks_dir))
+        monkeypatch.setenv("ZA_SCHED_LOCK_PORT", "0")
+        monkeypatch.setenv("ZA_MODEL_RESPONSES_DIR", str(raw_dir))
+        monkeypatch.setenv("ZA_L4_DIR", str(l4_dir))
+        monkeypatch.setattr(
+            "zero_agent.memory.compress_session.batch_process",
+            lambda src, dst, dry_run=True: calls.append((src, dst, dry_run)) or {
+                "processed": 0,
+            },
+        )
+
+        sys.modules.pop("zero_agent.reflect.scheduler", None)
+        scheduler = importlib.import_module("zero_agent.reflect.scheduler")
+        scheduler.check()
+
+        assert calls == [(str(raw_dir), str(l4_dir), False)]
 
 
 class TestReflectRunnerCheck:

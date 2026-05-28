@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+from importlib import resources
 from typing import Any, Dict, Generator, List, Optional
 
 from zero_agent.core.config import AgentConfig
@@ -25,6 +26,18 @@ from zero_agent.utils.text import smart_format
 def _t(zh: str, en: str, lang: str) -> str:
     """根据语言选择中文或英文文本."""
     return zh if lang == "zh" else en
+
+
+def _load_code_run_header() -> str:
+    """Return the optional compatibility header bundled with the package."""
+    try:
+        return (
+            resources.files("zero_agent.assets")
+            .joinpath("code_run_header.py")
+            .read_text(encoding="utf-8")
+        )
+    except Exception:
+        return ""
 
 
 def code_run(
@@ -69,17 +82,9 @@ def code_run(
             dir=code_cwd,
         )
         # 注入 code_run_header（若存在）
-        header_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-            "assets", "code_run_header.py",
-        )
-        if os.path.exists(header_path):
-            try:
-                with open(header_path, "r", encoding="utf-8") as hf:
-                    header = hf.read()
-                tmp_file.write(header)
-            except Exception:
-                pass
+        header = _load_code_run_header()
+        if header:
+            tmp_file.write(header)
         tmp_file.write(code)
         tmp_path = tmp_file.name
         tmp_file.close()

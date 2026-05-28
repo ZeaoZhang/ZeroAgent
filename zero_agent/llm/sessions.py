@@ -519,7 +519,13 @@ class LiteLLMSession:
                 props = func.get("parameters", {}).get("properties", {})
                 if "content" in props:
                     t = json.loads(json.dumps(t, ensure_ascii=False))
-                    t["function"]["parameters"]["properties"].pop("content", None)
+                    params = t["function"]["parameters"]
+                    params["properties"].pop("content", None)
+                    required = params.get("required")
+                    if isinstance(required, list):
+                        params["required"] = [
+                            name for name in required if name != "content"
+                        ]
                     extra = ". Content must be placed in <file_content> tags in reply body, not in args"
                     desc = t["function"].get("description", "")
                     if extra not in desc:
@@ -764,11 +770,19 @@ class LiteLLMSession:
         if not messages:
             return messages
 
-        # 1. 合并相同角色的连续消息
+        # 1. 合并相同角色的连续文本消息.
+        # Tool results must stay one message per tool_call_id to preserve
+        # provider protocol continuity after multi-tool assistant turns.
         merged = []
         for msg in messages:
             role = msg.get("role", "")
-            if merged and merged[-1].get("role") == role:
+            if (
+                role != "tool"
+                and merged
+                and merged[-1].get("role") == role
+                and not msg.get("tool_calls")
+                and not merged[-1].get("tool_calls")
+            ):
                 prev_content = merged[-1].get("content", "")
                 curr_content = msg.get("content", "")
                 if isinstance(prev_content, str) and isinstance(curr_content, str):

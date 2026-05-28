@@ -71,6 +71,8 @@ streamlit run zero_agent/frontends/stapp.py
 
 # 浏览器控制功能
 pip install -e ".[browser]"
+# 还需要在浏览器中加载/连接 bundled extension:
+# zero_agent/assets/tmwd_cdp_bridge
 
 # OCR 功能
 pip install -e ".[memory]"

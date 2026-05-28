@@ -6,15 +6,20 @@ from datetime import datetime, timedelta
 try: _lock
 except NameError:
     _lock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-    _lock.bind(('127.0.0.1', 45762)); _lock.listen(1)
+    _lock_port = int(os.environ.get("ZA_SCHED_LOCK_PORT", "45762"))
+    _lock.bind(('127.0.0.1', _lock_port)); _lock.listen(1)
 
 INTERVAL = 120
 ONCE = False
 
 _dir = os.path.dirname(os.path.abspath(__file__))
-TASKS = os.path.join(_dir, '../sche_tasks')
-DONE  = os.path.join(_dir, '../sche_tasks/done')
-_LOG  = os.path.join(_dir, '../sche_tasks/scheduler.log')
+TASKS = os.path.abspath(
+    os.environ.get("ZA_SCHED_TASKS_DIR") or os.path.join(os.getcwd(), "sche_tasks")
+)
+DONE  = os.path.join(TASKS, 'done')
+_LOG  = os.path.join(TASKS, 'scheduler.log')
+
+os.makedirs(DONE, exist_ok=True)
 
 # --- 日志 ---
 _logger = logging.getLogger('scheduler')
@@ -129,10 +134,16 @@ def check():
     if _time.time() - _l4_t > 43200:
         _l4_t = _time.time()
         try:
-            import sys; sys.path.insert(0, os.path.join(_dir, '../memory/L4_raw_sessions'))
-            from compress_session import batch_process
-            raw_dir = os.path.join(_dir, '../temp/model_responses')
-            r = batch_process(raw_dir, dry_run=False)
+            from zero_agent.memory.compress_session import batch_process
+            raw_dir = os.path.abspath(
+                os.environ.get("ZA_MODEL_RESPONSES_DIR")
+                or os.path.join(os.getcwd(), "temp", "model_responses")
+            )
+            l4_dir = os.path.abspath(
+                os.environ.get("ZA_L4_DIR")
+                or os.path.join(os.getcwd(), "memory", "L4_raw_sessions")
+            )
+            r = batch_process(raw_dir, l4_dir, dry_run=False)
             print(f'[L4 cron] {r}')
         except Exception as e:
             _logger.error(f'L4 archive failed: {e}')
