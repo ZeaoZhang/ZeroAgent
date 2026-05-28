@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any, Dict, List, Optional, Union
 
 try:
@@ -102,6 +103,55 @@ def ocr_screen(
         raise ImportError("Pillow not installed. Install with: pip install Pillow")
 
     img = ImageGrab.grab(bbox=bbox)
+    return ocr_image(img, enhance=enhance)
+
+
+def ocr_window(hwnd: int, enhance: bool = False) -> Dict[str, Any]:
+    """截取窗口并执行 OCR（使用 PrintWindow API，支持远程桌面断开场景）.
+
+    ImageGrab.grab() 在 RDP 断开后返回全黑截图，PrintWindow 不受此限制.
+
+    Args:
+        hwnd: 窗口句柄（Windows HWND）.
+        enhance: 是否启用对比度增强.
+
+    Returns:
+        {"text": 全文, "lines": [行文本列表], "details": [{bbox, text, conf}]}
+
+    Raises:
+        NotImplementedError: 非 Windows 平台上调用.
+    """
+    if sys.platform != "win32":
+        raise NotImplementedError("ocr_window() is only available on Windows")
+
+    import win32gui
+    import win32ui
+    from ctypes import windll
+
+    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+    width, height = right - left, bottom - top
+    hwnd_dc = win32gui.GetWindowDC(hwnd)
+    mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+    save_dc = mfc_dc.CreateCompatibleDC()
+    save_bitmap = win32ui.CreateBitmap()
+    save_bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
+    save_dc.SelectObject(save_bitmap)
+    windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 3)
+    bmpinfo = save_bitmap.GetInfo()
+    bmpstr = save_bitmap.GetBitmapBits(True)
+    img = Image.frombuffer(
+        "RGB",
+        (bmpinfo["bmWidth"], bmpinfo["bmHeight"]),
+        bmpstr,
+        "raw",
+        "BGRX",
+        0,
+        1,
+    )
+    win32gui.DeleteObject(save_bitmap.GetHandle())
+    save_dc.DeleteDC()
+    mfc_dc.DeleteDC()
+    win32gui.ReleaseDC(hwnd, hwnd_dc)
     return ocr_image(img, enhance=enhance)
 
 
