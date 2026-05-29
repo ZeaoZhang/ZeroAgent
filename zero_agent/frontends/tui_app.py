@@ -117,7 +117,9 @@ HELP_TEXT = """
 | `/stop` | Stop current generation |
 | `/status` | Show agent status |
 | `/session.<key>=<value>` | Set session parameter |
-| `/resume` | Resume last session |
+| `/resume` | List recoverable sessions |
+| `/continue` | List recoverable sessions |
+| `/continue N` | Restore session N with message replay |
 | `/export` | Export chat history |
 
 ## Key Bindings
@@ -406,11 +408,8 @@ class ZeroAgentTUI(App):
                         self._add_message("system", f"session.{key} = {value}")
                 except Exception as e:
                     self._add_message("system", f"Error: {e}")
-        elif cmd == "/resume":
-            self._add_message(
-                "system",
-                "Session resume requested. Check temp/model_responses/ for recent sessions.",
-            )
+        elif cmd == "/resume" or cmd.startswith("/continue"):
+            self._handle_continue(cmd)
         elif cmd == "/export":
             self._export_chat()
         else:
@@ -429,6 +428,59 @@ class ZeroAgentTUI(App):
         with open(out_path, "w", encoding="utf-8") as f:
             f.write("\n".join(md))
         self._add_message("system", f"Exported to {out_path}")
+
+    def _handle_continue(self, cmd: str) -> None:
+        """处理 /continue 或 /continue N 命令，回放历史会话.
+
+        /continue 列出可恢复会话；/continue N 恢复第 N 个会话，
+        使用 extract_ui_messages 解析原始日志并回放到 TUI 消息区.
+
+        Args:
+            cmd: 原始命令字符串.
+        """
+        from zero_agent.bots.shared.continue_cmd import (
+            list_sessions,
+            handle_frontend_command,
+            extract_ui_messages,
+        )
+        import os as _os
+
+        bridge = self._bridge
+        if not bridge:
+            self._add_message("system", "Agent not available.")
+            return
+
+        runner = bridge.agent
+        cmd_stripped = cmd.strip()
+        m = re.match(r"(/continue|/resume)\s+(\d+)\s*$", cmd_stripped)
+        sessions = list_sessions(exclude_pid=_os.getpid())
+
+        if not m:
+            # /continue 或 /resume — 列出可用会话
+            from zero_agent.bots.shared.continue_cmd import format_list as _fmt
+            formatted = _fmt(sessions)
+            self._add_message("system", formatted)
+            return
+
+        idx = int(m.group(2)) - 1
+        if not (0 <= idx < len(sessions)):
+            self._add_message("system", f"索引越界（有效范围 1-{len(sessions)}）")
+            return
+
+        target = sessions[idx][0]
+        result = handle_frontend_command(runner, cmd_stripped)
+        self._add_message("system", result)
+
+        if result.startswith("✅"):
+            history = extract_ui_messages(target)
+            if history:
+                # 清除当前消息并用历史会话替换
+                self._messages = []
+                for msg in history:
+                    role = msg.get("role", "assistant")
+                    content = msg.get("content", "").strip()
+                    if content:
+                        self._add_message(role, content)
 
     # ── Actions ─────────────────────────────────────────────
 

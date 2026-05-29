@@ -79,6 +79,7 @@ class AgentConfig:
         max_turns: Agent 单次任务最大轮次上限.
         workspace_dir: 工作目录.
         memory_dir: 记忆文件存储目录.
+        sessions_dir: 会话历史日志存储目录.
         verbose: 是否输出详细日志.
         language: 界面语言 "auto" | "zh" | "en".
         incremental_output: 是否增量输出流式内容到 UI.
@@ -89,7 +90,8 @@ class AgentConfig:
     default_backend: str = "default"
     max_turns: int = 80
     workspace_dir: str = "./workspace"
-    memory_dir: str = "./memory"
+    memory_dir: str = "./zero_agent/memory"
+    sessions_dir: str = "./workspace/sessions"
     verbose: bool = True
     language: str = "auto"
     incremental_output: bool = False
@@ -232,7 +234,8 @@ class AgentConfig:
             default_backend=data.get("default_backend", "default"),
             max_turns=data.get("max_turns", 80),
             workspace_dir=data.get("workspace_dir", "./workspace"),
-            memory_dir=data.get("memory_dir", "./memory"),
+            memory_dir=data.get("memory_dir", "./zero_agent/memory"),
+            sessions_dir=data.get("sessions_dir", "./workspace/sessions"),
             verbose=data.get("verbose", True),
             language=data.get("language", "auto"),
             incremental_output=data.get("incremental_output", False),

@@ -236,12 +236,14 @@ def batch_process(src, l4_dir=None, dry_run=True):
     return report
 
 # ── CLI ──
-RAW_DIR = os.path.join(os.path.dirname(os.path.dirname(L4_DIR)), 'temp', 'model_responses')
+def _default_raw_dir() -> str:
+    from zero_agent.bots.shared.continue_cmd import _sessions_dir
+    return _sessions_dir
 
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser(description='L4 session archiver')
-    ap.add_argument('src', nargs='?', default=RAW_DIR, help='raw files dir')
+    ap.add_argument('src', nargs='?', default=_default_raw_dir(), help='raw files dir')
     ap.add_argument('--run', action='store_true', help='actually execute (default: dry run)')
     args = ap.parse_args()
     batch_process(args.src, dry_run=not args.run)

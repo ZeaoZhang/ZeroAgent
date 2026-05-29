@@ -430,6 +430,15 @@ def _make_file_write_handler(config: AgentConfig):
             # 二级回退: 从响应中提取代码块
             content = handler._extract_code_block(_response)
         if not content:
+            # 三级回退: 如果响应有文本但没有工具调用标签，
+            # 可能是 LLM 直接把内容放在了正文中
+            resp_content = getattr(_response, "content", "") or ""
+            resp_thinking = getattr(_response, "thinking", "") or ""
+            if resp_content.strip() and not resp_content.strip().startswith("<"):
+                content = resp_content.strip()
+            elif resp_thinking.strip() and not resp_thinking.strip().startswith("<"):
+                content = resp_thinking.strip()
+        if not content:
             yield "[Status] ERR 失败: 缺少 content 参数\n"
             return {"status": "error", "msg": "缺少 content 参数"}
 

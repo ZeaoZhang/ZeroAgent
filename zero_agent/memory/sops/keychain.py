@@ -1,10 +1,10 @@
 """Keychain: save key to a file, then keys.set("name", file="path"); keys.name.use() to retrieve (use but no print)."""
 import json, os, hashlib, pathlib, getpass
 
-_PATH = pathlib.Path.home() / "ga_keychain.enc"
+_PATH = pathlib.Path.home() / ".zero_agent_keychain.enc"
 try: _user = os.getlogin()
 except OSError: _user = getpass.getuser()
-_MASK = hashlib.sha256(f"{_user}@ga_keychain".encode()).digest()
+_MASK = hashlib.sha256(f"{_user}@zero_agent_keychain".encode()).digest()
 
 def _xor(data: bytes) -> bytes:
     return bytes(b ^ _MASK[i % len(_MASK)] for i, b in enumerate(data))

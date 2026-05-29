@@ -1,6 +1,6 @@
 """Persistent display names for `/continue`-able sessions.
 
-JSON sidecar at ``temp/model_responses/session_names.json`` maps log-file
+JSON sidecar at ``{sessions_dir}/session_names.json`` maps log-file
 basename → user name. Touched only by ``/rename`` and ``/continue <name>``.
 """
 
@@ -12,16 +12,23 @@ import os
 import re
 import threading
 
-_LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                        "temp", "model_responses")
-_REG_PATH = os.path.join(_LOG_DIR, "session_names.json")
+
+def _get_log_dir() -> str:
+    from zero_agent.bots.shared.continue_cmd import _sessions_dir
+    return _sessions_dir
+
+
+def _get_reg_path() -> str:
+    return os.path.join(_get_log_dir(), "session_names.json")
+
+
 _LOG_RE = re.compile(r"^model_responses_(\d+)\.txt$")
 _lock = threading.Lock()
 
 
 def _load() -> dict:
     try:
-        with open(_REG_PATH, encoding="utf-8") as f:
+        with open(_get_reg_path(), encoding="utf-8") as f:
             d = json.load(f)
             return d if isinstance(d, dict) else {}
     except Exception:
@@ -29,20 +36,23 @@ def _load() -> dict:
 
 
 def _save(d: dict) -> None:
-    os.makedirs(_LOG_DIR, exist_ok=True)
-    tmp = _REG_PATH + ".tmp"
+    log_dir = _get_log_dir()
+    os.makedirs(log_dir, exist_ok=True)
+    reg_path = _get_reg_path()
+    tmp = reg_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, _REG_PATH)
+    os.replace(tmp, reg_path)
 
 
 def _resolve_basename(basename: str):
-    p = os.path.join(_LOG_DIR, basename)
+    log_dir = _get_log_dir()
+    p = os.path.join(log_dir, basename)
     if os.path.isfile(p) and os.path.getsize(p) > 0:
         return p
     m = _LOG_RE.match(basename)
     if m:
-        snaps = glob.glob(os.path.join(_LOG_DIR, f"model_responses_snapshot_{m.group(1)}_*.txt"))
+        snaps = glob.glob(os.path.join(log_dir, f"model_responses_snapshot_{m.group(1)}_*.txt"))
         snaps.sort(key=os.path.getmtime, reverse=True)
         for s in snaps:
             if os.path.getsize(s) > 0:

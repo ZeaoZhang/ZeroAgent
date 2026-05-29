@@ -55,10 +55,13 @@ HELP_TEXT = build_help_text()
 FILE_HINT = "If you need to show files to user, use [FILE:filepath] in your response."
 TAG_PATS = [r"<" + t + r">.*?</" + t + r">" for t in ("thinking", "summary", "tool_use", "file_content")]
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RESTORE_GLOBS = (
-    os.path.join(PROJECT_ROOT, "temp", "model_responses", "model_responses_*.txt"),
-    os.path.join(PROJECT_ROOT, "temp", "model_responses_*.txt"),
-)
+
+
+def _restore_globs() -> tuple:
+    """Return glob patterns for session log files from the configured sessions dir."""
+    from zero_agent.bots.shared.continue_cmd import _sessions_dir
+    d = _sessions_dir
+    return (os.path.join(d, "model_responses_*.txt"),)
 RESTORE_BLOCK_RE = re.compile(
     r"^=== (Prompt|Response) ===.*?\n(.*?)(?=^=== (?:Prompt|Response) ===|\Z)",
     re.DOTALL | re.MULTILINE,
@@ -111,7 +114,7 @@ def build_done_text(raw_text: str) -> str:
 
 def _restore_log_files() -> list:
     files = []
-    for pattern in RESTORE_GLOBS:
+    for pattern in _restore_globs():
         files.extend(glob.glob(pattern))
     return sorted(set(files))
 

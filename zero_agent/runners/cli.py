@@ -128,6 +128,9 @@ def _load_config(args: argparse.Namespace) -> AgentConfig:
     else:
         config = AgentConfig.from_env()
 
+    from zero_agent.bots.shared.continue_cmd import set_sessions_dir
+    set_sessions_dir(os.path.abspath(config.sessions_dir))
+
     # 命令行覆盖
     if args.model:
         for backend in config.llm_backends.values():

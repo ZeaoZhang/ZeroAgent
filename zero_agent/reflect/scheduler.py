@@ -135,9 +135,10 @@ def check():
         _l4_t = _time.time()
         try:
             from zero_agent.memory.compress_session import batch_process
+            from zero_agent.bots.shared.continue_cmd import _sessions_dir
             raw_dir = os.path.abspath(
                 os.environ.get("ZA_MODEL_RESPONSES_DIR")
-                or os.path.join(os.getcwd(), "temp", "model_responses")
+                or _sessions_dir
             )
             l4_dir = os.path.abspath(
                 os.environ.get("ZA_L4_DIR")

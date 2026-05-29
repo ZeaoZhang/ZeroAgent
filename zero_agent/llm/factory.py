@@ -28,12 +28,14 @@ class LLMFactory:
     def create_session(
         backend_config: LLMBackendConfig,
         log_dir: str | None = None,
+        sessions_dir: str | None = None,
     ) -> LiteLLMSession:
         """创建 LiteLLMSession.
 
         Args:
             backend_config: 单个 LLM 后端的配置.
             log_dir: LLM 调用日志目录.
+            sessions_dir: 会话历史日志目录.
 
         Returns:
             LiteLLMSession 实例.
@@ -49,7 +51,11 @@ class LLMFactory:
             raise ConfigError(
                 f"LLM 后端 '{backend_config.name}' 缺少 model"
             )
-        return LiteLLMSession(backend_config, log_dir=log_dir)
+        return LiteLLMSession(
+            backend_config,
+            log_dir=log_dir,
+            sessions_dir=sessions_dir,
+        )
 
     @staticmethod
     def create_from_config(
@@ -104,6 +110,7 @@ class LLMFactory:
             session = LLMFactory.create_session(
                 backend_cfg,
                 log_dir=config.log_dir,
+                sessions_dir=config.sessions_dir,
             )
             sessions[name] = session
 
@@ -148,7 +155,11 @@ class LLMFactory:
         backend_cfg = config.llm_backends.get(config.default_backend)
         if backend_cfg is None:
             backend_cfg = next(iter(config.llm_backends.values()))
-        return LLMFactory.create_session(backend_cfg, log_dir=config.log_dir)
+        return LLMFactory.create_session(
+            backend_cfg,
+            log_dir=config.log_dir,
+            sessions_dir=config.sessions_dir,
+        )
 
     @staticmethod
     def _wrap_failover(

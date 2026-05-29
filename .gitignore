@@ -46,3 +46,6 @@ task_*/
 # OMC
 .omc/
 .omx/
+
+config.yaml
+

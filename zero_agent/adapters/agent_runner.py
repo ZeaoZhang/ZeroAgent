@@ -44,6 +44,11 @@ class AgentRunner:
     # —— 兼容 GenericAgent 的公开属性 ——
 
     @property
+    def za(self):
+        """返回底层 ZeroAgent 实例 (兼容前端直接访问)."""
+        return self._agent
+
+    @property
     def is_running(self) -> bool:
         with self._lock:
             return self._running
@@ -115,6 +120,25 @@ class AgentRunner:
             if active:
                 return f"{name}/{model}"
         return "unknown"
+
+    def list_backends(self):
+        """列出所有后端 (兼容前端 stapp)."""
+        return self._agent.list_backends()
+
+    def switch_backend(self, name: str) -> None:
+        """切换后端 (兼容前端 stapp)."""
+        self._agent.switch_backend(name)
+
+    def get_model_name(self) -> str:
+        """返回当前模型名称 (兼容前端 stapp)."""
+        try:
+            return self._agent.client.name
+        except AttributeError:
+            return "unknown"
+
+    def taskloop(self, prompt: str):
+        """执行任务并逐块 yield 结果 (兼容前端 stapp 的 generator 迭代模式)."""
+        return self._agent.run(prompt)
 
     # —— 任务接口 (兼容 GenericAgent.put_task) ——
 
@@ -212,7 +236,7 @@ class AgentRunner:
                     chunk_str = str(chunk)
                     full_resp += chunk_str
                     display_queue.put({
-                        "next": chunk_str,
+                        "next": full_resp,
                         "source": source,
                         "turn": curr_turn,
                     })

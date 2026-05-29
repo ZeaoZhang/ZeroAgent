@@ -275,6 +275,8 @@ class BaseHandler:
     def _extract_file_content(response: Any) -> Optional[str]:
         """从 LLM 响应中提取 <file_content> 标签内容.
 
+        支持大小写变体、标签属性、以及 thinking/reasoning 内容中的标签.
+
         Args:
             response: LLM 响应对象（MockResponse）.
 
@@ -283,13 +285,20 @@ class BaseHandler:
         """
         import re as _re
 
-        content = getattr(response, "content", "") or ""
-        if not content:
+        # 主搜索池：content + thinking
+        sources = [getattr(response, "content", "") or ""]
+        thinking = getattr(response, "thinking", "") or ""
+        if thinking:
+            sources.append(thinking)
+
+        combined = "\n".join(sources)
+        if not combined.strip():
             return None
 
+        # 支持: <file_content>, <FILE_CONTENT>, <file_content attr="v"> 等
         match = _re.search(
-            r"<file_content>(.*?)</file_content>",
-            content, _re.DOTALL,
+            r"<\s*file_content[^>]*>(.*?)<\s*/\s*file_content\s*>",
+            combined, _re.DOTALL | _re.IGNORECASE,
         )
         if match:
             return match.group(1).strip()
@@ -303,6 +312,8 @@ class BaseHandler:
     ) -> Optional[str]:
         """从 LLM 响应中提取代码块内容.
 
+        同时搜索 content 和 thinking 字段.
+
         Args:
             response: LLM 响应对象（MockResponse）.
             lang: 可选的语言标识 (e.g., "javascript", "python").
@@ -312,19 +323,23 @@ class BaseHandler:
         """
         import re as _re
 
-        content = getattr(response, "content", "") or ""
-        if not content:
+        sources = [getattr(response, "content", "") or ""]
+        thinking = getattr(response, "thinking", "") or ""
+        if thinking:
+            sources.append(thinking)
+        combined = "\n".join(sources)
+        if not combined.strip():
             return None
 
         # 优先匹配指定语言的代码块
         if lang:
             pattern = rf"```{lang}\s*\n(.*?)```"
-            match = _re.search(pattern, content, _re.DOTALL)
+            match = _re.search(pattern, combined, _re.DOTALL)
             if match:
                 return match.group(1).strip()
 
         # 回退到任意代码块
-        match = _re.search(r"```(?:\w+)?\s*\n(.*?)```", content, _re.DOTALL)
+        match = _re.search(r"```(?:\w+)?\s*\n(.*?)```", combined, _re.DOTALL)
         if match:
             return match.group(1).strip()
 

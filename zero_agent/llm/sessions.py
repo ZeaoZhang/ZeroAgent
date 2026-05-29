@@ -39,12 +39,14 @@ class LiteLLMSession:
         self,
         config: LLMBackendConfig,
         log_dir: Optional[str] = None,
+        sessions_dir: Optional[str] = None,
     ) -> None:
         """初始化 LLM 会话.
 
         Args:
             config: 单个 LLM 后端的配置.
             log_dir: LLM 调用日志输出目录，None 时不记录.
+            sessions_dir: 会话历史日志目录，None 时不记录.
         """
         self.config = config
         self.history: List[Dict[str, Any]] = []
@@ -55,6 +57,7 @@ class LiteLLMSession:
         self._cut_msg_interval = 25
         self._trim_keep_rate = 0.3
         self._log_dir = log_dir
+        self._sessions_dir = sessions_dir
         self.temperature = config.temperature
         self.max_tokens = config.max_tokens
         self.tools: Optional[List[Dict[str, Any]]] = None
@@ -127,6 +130,9 @@ class LiteLLMSession:
                 "stop_reason": mock.stop_reason,
             }
             self._write_llm_log("Response", json.dumps(resp_log, ensure_ascii=False, indent=2))
+
+            # Write model_responses log (compatible with continue_cmd / session history)
+            self._write_model_response_log(messages, mock)
 
             return mock
         except Exception as e:
@@ -1198,5 +1204,58 @@ class LiteLLMSession:
         try:
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(entry)
+        except Exception:
+            pass
+
+    def _write_model_response_log(
+        self, messages: List[Dict[str, Any]], mock: MockResponse
+    ) -> None:
+        """Write Prompt/Response pair to sessions_dir for session history.
+
+        Format matches GenericAgent's _write_llm_log and is parseable by
+        continue_cmd._pairs():
+            === Prompt === {timestamp}
+            {json of the last user/tool message}
+            === Response === {timestamp}
+            {repr of content blocks}
+
+        Args:
+            messages: The message list sent to the LLM for this turn.
+            mock: The MockResponse from the LLM.
+        """
+        import time as _time
+
+        if not self._sessions_dir:
+            return
+        os.makedirs(self._sessions_dir, exist_ok=True)
+        log_path = os.path.join(self._sessions_dir, f"model_responses_{os.getpid()}.txt")
+
+        # Prompt: last message in the list (user or tool continuation)
+        prompt_msg = messages[-1] if messages else {}
+
+        # Response: content blocks in the format continue_cmd expects
+        blocks: List[Dict[str, Any]] = []
+        if mock.content:
+            blocks.append({"type": "text", "text": mock.content})
+        for tc in (mock.tool_calls or []):
+            try:
+                args = json.loads(tc.function.arguments)
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+            blocks.append({
+                "type": "tool_use",
+                "name": tc.function.name,
+                "input": args,
+                "id": getattr(tc, "id", ""),
+            })
+        if mock.thinking:
+            blocks.append({"type": "thinking", "thinking": mock.thinking})
+
+        ts = _time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"=== Prompt === {ts}\n"
+                        f"{json.dumps(prompt_msg, ensure_ascii=False)}\n")
+                f.write(f"=== Response === {ts}\n{repr(blocks)}\n")
         except Exception:
             pass
