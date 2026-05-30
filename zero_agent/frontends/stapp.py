@@ -104,243 +104,7 @@ def T(key: str) -> str:
 # Anthropic Light Theme CSS
 # ═══════════════════════════════════════════════════════════════
 
-THEME_CSS = """
-<style>
-:root {
-    --za-primary: #D4A27F;
-    --za-primary-hover: #C4895F;
-    --za-bg: #FAF9F6;
-    --za-bg-secondary: #EEECE2;
-    --za-code-bg: #F4F1EB;
-    --za-text: #1A1714;
-    --za-text-secondary: #6B6560;
-    --za-border: #D5CEC5;
-    --za-sidebar-bg: #F0EDE4;
-    --za-accent: #CC785C;
-}
-
-body, [data-testid="stAppViewContainer"] {
-    background-color: var(--za-bg) !important;
-    color: var(--za-text) !important;
-}
-.stApp { background-color: var(--za-bg) !important; }
-
-/* Tight default spacing */
-p, li, div[data-testid="stMarkdownContainer"] p {
-    line-height: 1.45 !important;
-    margin-bottom: 0.35rem !important;
-}
-
-[data-testid="stHeader"], header[data-testid="stHeader"] {
-    background-color: var(--za-bg) !important;
-    border-bottom: 1px solid var(--za-border) !important;
-}
-[data-testid="stToolbar"] { visibility: hidden !important; }
-[data-testid="stDecoration"], #MainMenu { display: none !important; visibility: hidden !important; }
-[data-testid="stExpandSidebarButton"], [data-testid="stExpandSidebarButton"] * {
-    visibility: visible !important;
-}
-[data-testid="stToolbar"] div:has([data-testid="stExpandSidebarButton"]) {
-    visibility: visible !important;
-}
-button[data-testid="stExpandSidebarButton"] {
-    visibility: visible !important;
-    background: #F4F1EA !important; border: none !important;
-    color: #3B2F2A !important; border-radius: 10px !important; box-shadow: none !important;
-}
-button[data-testid="stExpandSidebarButton"]:hover {
-    background: #EAE4D9 !important;
-}
-button[data-testid="stExpandSidebarButton"],
-button[data-testid="stExpandSidebarButton"] *,
-button[data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"] {
-    color: #3B2F2A !important; fill: #3B2F2A !important; stroke: #3B2F2A !important;
-}
-
-[data-testid="stSidebar"], section[data-testid="stSidebar"] {
-    background-color: var(--za-sidebar-bg) !important;
-    border-right: 1px solid var(--za-border) !important;
-}
-[data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] p,
-[data-testid="stSidebar"] span, [data-testid="stSidebar"] label {
-    color: var(--za-text) !important;
-}
-[data-testid="stSidebar"] hr { border-color: var(--za-border) !important; }
-
-h1, .stTitle, [data-testid="stHeading"] h1 {
-    color: var(--za-text) !important; font-weight: 600 !important; letter-spacing: -0.02em !important;
-}
-
-.stButton > button {
-    background-color: var(--za-bg-secondary) !important;
-    color: var(--za-text) !important; border: 1px solid var(--za-border) !important;
-    border-radius: 8px !important; padding: 0.4rem 1rem !important;
-    font-weight: 500 !important; transition: all 0.2s ease !important;
-}
-.stButton > button:hover {
-    background-color: var(--za-primary) !important; color: white !important;
-    border-color: var(--za-primary) !important;
-}
-.stButton > button[kind="primary"] {
-    background-color: var(--za-primary) !important; color: white !important;
-    border-color: var(--za-primary) !important;
-}
-.stButton > button[kind="primary"]:hover {
-    background-color: var(--za-primary-hover) !important;
-    border-color: var(--za-primary-hover) !important;
-}
-
-[data-testid="stChatInput"], [data-testid="stChatInput"] > div {
-    background-color: var(--za-bg) !important; border-color: var(--za-border) !important;
-}
-[data-testid="stChatInput"] { margin-bottom: 12px !important; }
-[data-testid="stChatInput"] textarea, [data-testid="stChatInputTextArea"] {
-    color: var(--za-text) !important; background-color: var(--za-bg) !important;
-    caret-color: #1A1714 !important;
-}
-[data-testid="stChatInput"] textarea::placeholder {
-    color: var(--za-text-secondary) !important; opacity: 0.7 !important;
-}
-[data-testid="stChatInput"] > div {
-    border: 1px solid var(--za-border) !important; border-radius: 12px !important;
-    min-height: 48px !important; padding: 0.25rem 0.4rem 0.25rem 0.7rem !important;
-    align-items: center !important; gap: 0.4rem !important;
-}
-[data-testid="stChatInput"] > div:focus-within {
-    border-color: var(--za-primary) !important;
-    box-shadow: 0 0 0 2px rgba(212, 162, 127, 0.2) !important;
-}
-[data-testid="stChatInput"] textarea, [data-testid="stChatInputTextArea"] {
-    min-height: 1.5rem !important; padding: 0.35rem 0 !important; line-height: 1.5 !important;
-}
-[data-testid="stChatInput"] button, [data-testid="stChatInputSubmitButton"] {
-    background-color: var(--za-primary) !important; color: white !important;
-    border-radius: 10px !important; width: 48px !important; height: 48px !important;
-    min-width: 48px !important; min-height: 48px !important; padding: 0 !important;
-    display: inline-flex !important; align-items: center !important;
-    justify-content: center !important; flex-shrink: 0 !important;
-}
-[data-testid="stChatInput"] button:hover { background-color: var(--za-primary-hover) !important; }
-
-/* ===== Floating stop button ===== */
-.stop-btn-anchor { display: none !important; }
-[data-testid="stElementContainer"]:has(.stop-btn-anchor) {
-    height: 0 !important; min-height: 0 !important; margin: 0 !important;
-    padding: 0 !important; overflow: visible !important;
-}
-[data-testid="stVerticalBlock"]:has(.stop-btn-anchor):not(:has([data-testid="stChatMessage"])) {
-    position: fixed !important; bottom: 5.75rem !important; left: 50% !important;
-    transform: translateX(-50%) !important; z-index: 1000 !important;
-    width: auto !important; background: transparent !important;
-    pointer-events: none !important; gap: 0 !important;
-}
-[data-testid="stVerticalBlock"]:has(.stop-btn-anchor):not(:has([data-testid="stChatMessage"])) > * {
-    pointer-events: auto !important;
-}
-[data-testid="stVerticalBlock"]:has(.stop-btn-anchor):not(:has([data-testid="stChatMessage"])) [data-testid="stButton"] > button {
-    border-radius: 999px !important; padding: 0.35rem 1.1rem !important;
-    min-height: 2rem !important; font-size: 0.84rem !important;
-    font-weight: 500 !important; line-height: 1 !important;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.12) !important; white-space: nowrap !important;
-}
-[data-testid="stVerticalBlock"]:has(.stop-btn-anchor):not(:has([data-testid="stChatMessage"])) [data-testid="stButton"] > button[kind="primary"] {
-    background-color: rgba(212, 162, 127, 0.95) !important;
-    border-color: rgba(212, 162, 127, 0.95) !important;
-}
-[data-testid="stVerticalBlock"]:has(.stop-btn-anchor):not(:has([data-testid="stChatMessage"])) [data-testid="stButton"] > button:hover {
-    transform: translateY(-1px) !important; box-shadow: 0 3px 12px rgba(0,0,0,0.15) !important;
-}
-
-/* ===== Chat messages ===== */
-[data-testid="stChatMessage"] {
-    background-color: var(--za-bg) !important; border: none !important;
-    border-radius: 12px !important; padding: 0.5rem 1rem !important; margin-bottom: 0.3rem !important;
-}
-[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) {
-    background-color: var(--za-bg) !important;
-}
-[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
-    background-color: var(--za-bg) !important; border: 1px solid var(--za-border) !important;
-    border-radius: 12px !important; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04) !important;
-}
-[data-testid="stChatMessage"] p, [data-testid="stChatMessage"] .stMarkdown {
-    color: var(--za-text) !important; line-height: 1.6 !important;
-}
-
-/* ===== Timestamp ===== */
-.msg-timestamp {
-    text-align: left; font-size: 0.73rem; color: var(--za-text-secondary);
-    margin-top: -0.3rem; margin-bottom: 0.2rem; opacity: 0.55;
-    font-family: monospace; letter-spacing: 0.02em;
-}
-
-/* ===== Avatars ===== */
-[data-testid="stChatMessageAvatarContainer"] { width: 36px !important; height: 36px !important; }
-[data-testid="stChatMessageAvatarContainer"] > div,
-[data-testid*="stChatMessageAvatar"],[data-testid*="chatAvatar"] {
-    width: 36px !important; height: 36px !important; border-radius: 50% !important;
-    display: flex !important; align-items: center !important;
-    justify-content: center !important; overflow: hidden !important;
-}
-[data-testid*="stChatMessageAvatar"]:has(svg),
-[data-testid*="chatAvatar"][data-testid*="user"],
-[data-testid*="stChatMessageAvatar"][data-testid*="User"],
-[data-testid*="stChatMessageAvatar"][data-testid*="user"] {
-    background: linear-gradient(145deg, #D8B08A 0%, #B98259 100%) !important;
-    border: 1px solid rgba(150, 102, 67, 0.22) !important;
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.34), 0 2px 6px rgba(104, 76, 54, 0.10) !important;
-}
-[data-testid*="chatAvatar"][data-testid*="assistant"],
-[data-testid*="stChatMessageAvatar"][data-testid*="Assistant"],
-[data-testid*="stChatMessageAvatar"][data-testid*="assistant"],
-[data-testid="stChatMessageAvatarContainer"] > div {
-    background: linear-gradient(145deg, #F6F1E9 0%, #E5D7C7 100%) !important;
-    border: 1px solid rgba(187, 165, 141, 0.50) !important;
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.72), 0 2px 6px rgba(104, 76, 54, 0.08) !important;
-}
-
-:not(pre) > code {
-    background-color: var(--za-code-bg) !important; border: 1px solid var(--za-border) !important;
-    border-radius: 4px !important; padding: 0.15em 0.4em !important;
-    font-size: 0.9em !important; color: var(--za-text) !important;
-}
-pre, .stCodeBlock, .stCodeBlock pre {
-    background-color: var(--za-code-bg) !important; border: 1px solid var(--za-border) !important;
-    border-radius: 8px !important;
-}
-pre code, .stCodeBlock code, [data-testid="stChatMessage"] pre code,
-[data-testid="stChatMessage"] .stCodeBlock code {
-    background-color: transparent !important; border: none !important;
-    padding: 0 !important; font-size: inherit !important; color: var(--za-text) !important;
-}
-
-[data-testid="stToast"] {
-    background-color: var(--za-bg-secondary) !important; border: 1px solid var(--za-border) !important;
-    border-radius: 8px !important; color: var(--za-text) !important;
-    z-index: 999999 !important;
-}
-/* Prevent toast from being clipped by bottom elements */
-[data-testid="stBottomBlockContainer"] {
-    background-color: var(--za-bg) !important;
-    z-index: 1 !important;
-}
-[data-testid="stToastContainer"] {
-    z-index: 999999 !important;
-    bottom: 80px !important;
-}
-[data-testid="stAlert"] { border-radius: 8px !important; }
-.stCaption, [data-testid="stCaptionContainer"] { color: var(--za-text-secondary) !important; }
-hr { border-color: var(--za-border) !important; }
-a { color: var(--za-accent) !important; }
-a:hover { color: var(--za-primary-hover) !important; }
-[data-testid="stBottomBlockContainer"] { background-color: var(--za-bg) !important; }
-
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: var(--za-bg); }
-::-webkit-scrollbar-thumb { background: var(--za-border); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--za-text-secondary); }
-</style>
-"""
+from zero_agent.frontends.themes import load_theme_css, theme_toggle_js
 
 # ═══════════════════════════════════════════════════════════════
 # JS Scripts
@@ -431,6 +195,7 @@ def _init_session() -> None:
         "reply_ts": "",
         "current_prompt": "",
         "font_scale": 100.0,
+        "theme": "light",
         "last_reply_time": 0,
         "autonomous_enabled": False,
     }
@@ -894,6 +659,23 @@ def _render_sidebar(runner: Any) -> None:
                 st.rerun()
             st.caption(T("auto_stopped"))
 
+    st.divider()
+
+    # Theme toggle (at bottom)
+    theme_labels = {"light": "☀️ Light", "dark": "🌙 Dark", "auto": "🔄 Auto"}
+    current_theme = st.session_state.get("theme", "light")
+    theme_keys = list(theme_labels.keys())
+    theme_idx = theme_keys.index(current_theme) if current_theme in theme_keys else 0
+    selected_theme = st.selectbox(
+        "Theme",
+        theme_keys,
+        index=theme_idx,
+        format_func=lambda k: theme_labels[k],
+    )
+    if selected_theme != current_theme:
+        st.session_state.theme = selected_theme
+        st.rerun()
+
 
 def _render_export() -> None:
     """导出聊天历史为 Markdown 下载."""
@@ -924,9 +706,11 @@ def _render_export() -> None:
 def main() -> None:
     _init_session()
 
-    # Inject theme + JS
-    st.markdown(THEME_CSS, unsafe_allow_html=True)
+    # Inject theme CSS + toggle JS
+    _theme = st.session_state.get("theme", "light")
+    st.markdown(load_theme_css(_theme, "stapp"), unsafe_allow_html=True)
     st.markdown(_build_font_css(st.session_state.font_scale), unsafe_allow_html=True)
+    _embed_html(theme_toggle_js(), height=0, width=0)
     _embed_html(AUTOSCROLL_JS, height=0, width=0)
     _embed_html(SCROLL_GHOST_FIX_JS, height=0, width=0)
     _embed_html(IME_FIX_JS, height=0, width=0)

@@ -27,8 +27,21 @@ from PySide6.QtGui import (
     QPen, QPainterPath, QCursor, QFont, QIcon, QPixmap, QRegion,
 )
 
+from zero_agent.frontends.themes.qt_colors import (
+    C_DARK, C_LIGHT,
+    SVG_COPY, SVG_REGEN, SVG_CHAT, SVG_CLOCK, SVG_SEARCH, SVG_BOOK, SVG_GEAR,
+    SVG_PLUS, SVG_STOP, SVG_SAVE, SVG_TRASH, SVG_BOLT, SVG_PLAY, SVG_FILE,
+    SVG_USER, SVG_BOT, SVG_SEND, SVG_CLIP, SVG_RESET,
+    SVG_MOON, SVG_SUN,
+    SVG_MINIMIZE, SVG_MAXIMIZE, SVG_RESTORE, SVG_CLOSE,
+    SCROLLBAR_STYLE,
+    build_action_btn_style, build_tab_button_style, build_model_row_style,
+    build_send_btn_style, build_stop_btn_style, build_titlebar_btn_style,
+)
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from zero_agent.core.agent import ZeroAgent
+from zero_agent.core.config import AgentConfig
 from zero_agent.adapters.agent_runner import AgentRunner
 from zero_agent.bots.common import FILE_HINT, HELP_TEXT, clean_reply, build_done_text, format_restore
 
@@ -295,53 +308,29 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
 AUTO_IDLE_THRESHOLD = 1800  # seconds before autonomous trigger
 AUTO_COOLDOWN = 120         # seconds between triggers
 
-C = {
-    "bg":       QColor(14, 14, 18),
-    "panel":    QColor(20, 20, 24, 248),
-    "border":   QColor(45, 45, 50),
-    "accent":   "#7c3aed",
-    "text":     "#e4e4e7",
-    "muted":    "#71717a",
-    "user_g0":  QColor(79, 70, 229),
-    "user_g1":  QColor(124, 58, 237),
-    "asst_bg":  QColor(39, 39, 42, 210),
-    "asst_bdr": QColor(63, 63, 70),
-    "send_g0":  QColor(220, 38, 38),
-    "send_g1":  QColor(239, 68, 68),
-    "green":    "#22c55e",
-    "hover_bg": "rgba(63,63,70,0.6)",
-    "accent_bg":"rgba(124,58,237,0.25)",
-    "accent_bdr":"rgba(124,58,237,0.5)",
-}
+C = C_DARK  # active palette, reassigned by set_theme()
 
-SCROLLBAR_STYLE = """
-QScrollBar:vertical { width: 5px; background: transparent; border: none; }
-QScrollBar::handle:vertical {
-    background: rgba(255,255,255,0.12); border-radius: 2px; min-height: 20px;
-}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
-"""
+_SVG_COPY = SVG_COPY
+_SVG_REGEN = SVG_REGEN
+_SVG_CHAT = SVG_CHAT
+_SVG_CLOCK = SVG_CLOCK
+_SVG_SEARCH = SVG_SEARCH
+_SVG_BOOK = SVG_BOOK
+_SVG_GEAR = SVG_GEAR
+_SVG_PLUS = SVG_PLUS
+_SVG_CLIP = SVG_CLIP
+_SVG_STOP = SVG_STOP
+_SVG_RESET = SVG_RESET
+_SVG_SAVE = SVG_SAVE
+_SVG_TRASH = SVG_TRASH
+_SVG_BOLT = SVG_BOLT
+_SVG_PLAY = SVG_PLAY
+_SVG_FILE = SVG_FILE
+_SVG_USER = SVG_USER
+_SVG_BOT = SVG_BOT
+_SVG_SEND = SVG_SEND
 
-_SVG_COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>'
-_SVG_REGEN = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>'
-_SVG_CHAT = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>'
-_SVG_CLOCK = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>'
-_SVG_SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>'
-_SVG_BOOK = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg>'
-_SVG_GEAR = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>'
-_SVG_PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>'
-_SVG_CLIP = _SVG_PLUS
-_SVG_STOP = '<svg viewBox="0 0 24 24" fill="{c}" stroke="none"><rect width="10" height="10" x="7" y="7" rx="1.5" ry="1.5"/></svg>'
-_SVG_RESET = _SVG_REGEN
-_SVG_SAVE = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>'
-_SVG_TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>'
-_SVG_BOLT = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>'
-_SVG_PLAY = '<svg viewBox="0 0 24 24" fill="{c}" stroke="none"><polygon points="6 3 20 12 6 21 6 3"/></svg>'
-_SVG_FILE = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><line x1="10" x2="8" y1="9" y2="9"/></svg>'
-_SVG_USER = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>'
-_SVG_BOT = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/><path d="M5 3v4"/><path d="M7 5H3"/></svg>'
-_SVG_SEND = '<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4Z"/></svg>'
+_SCROLLBAR_STYLE = SCROLLBAR_STYLE
 
 _MD_CSS = """
 body { color: #e4e4e7; font-family: "Arial", "Microsoft YaHei", sans-serif; font-size: 13px; line-height: 1.6; font-weight: 400; }
@@ -523,28 +512,37 @@ class _Separator(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(1)
+        self.apply_theme()
+
+    def apply_theme(self):
         self.setStyleSheet(f"background: {C['border'].name()};")
 
 
 class _Badge(QLabel):
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
+        self.apply_theme()
+
+    def apply_theme(self):
         self.setStyleSheet(
-            "QLabel { background: rgba(63,63,70,0.9); color: #a1a1aa;"
-            " border: 1px solid #3f3f46; border-radius: 9px;"
-            " padding: 1px 8px; font-size: 11px; }"
+            f"QLabel {{ background: {C['hover_bg']}; color: {C['muted']};"
+            f" border: 1px solid {C['border']}; border-radius: 9px;"
+            f" padding: 1px 8px; font-size: 11px; }}"
         )
 
 
 class _StreamingBadge(QLabel):
     def __init__(self, parent=None):
         super().__init__("处理中…", parent)
-        self.setStyleSheet(
-            "QLabel { background: rgba(124,58,237,0.18); color: #c4b5fd;"
-            " border: 1px solid rgba(124,58,237,0.35); border-radius: 9px;"
-            " padding: 1px 8px; font-size: 11px; }"
-        )
+        self.apply_theme()
         self.hide()
+
+    def apply_theme(self):
+        self.setStyleSheet(
+            f"QLabel {{ background: {C['accent_bg']}; color: {C['svg_color']};"
+            f" border: 1px solid {C['accent_bdr']}; border-radius: 9px;"
+            f" padding: 1px 8px; font-size: 11px; }}"
+        )
 
 
 class _FoldableTextBrowser(QTextBrowser):
@@ -572,12 +570,58 @@ class _FoldableTextBrowser(QTextBrowser):
 class _MsgRow(QWidget):
     """A single message row – flat layout with avatar, inspired by ChatGPT / Qwen."""
 
-    _ACTION_BTN = """
-        QPushButton {
+    @staticmethod
+    def _action_btn_style() -> str:
+        return f"""
+        QPushButton {{
             background: transparent; border: none; border-radius: 4px; padding: 3px;
-        }
-        QPushButton:hover { background: %s; }
-    """ % C["hover_bg"]
+        }}
+        QPushButton:hover {{ background: {C['hover_bg']}; }}
+        """
+
+    def _apply_avatar_style(self):
+        is_dark = C is C_DARK
+        if is_dark:
+            self._avatar.setStyleSheet(
+                "QLabel { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.10);"
+                " border-radius: 15px; }"
+            )
+        else:
+            self._avatar.setStyleSheet(
+                f"QLabel {{ background: rgba(0,0,0,0.04); border: 1px solid {C['border'].name()};"
+                f" border-radius: 15px; }}"
+            )
+
+    def _apply_role_label_style(self):
+        self._role_lbl.setStyleSheet(
+            f"color: {C['text']}; font-size: 12px; font-weight: 700; background: transparent;"
+        )
+
+    def _apply_bubble_style(self):
+        self._bubble.setStyleSheet(
+            f"background: {C['hover_bg']}; border-radius: 12px;"
+        )
+
+    def _apply_msg_label_style(self):
+        self._msg_label.setStyleSheet(
+            f"QLabel {{ background: transparent; color: {C['text']};"
+            f" padding: 0; font-size: 14px; line-height: 1.6; }}"
+        )
+
+    def apply_theme(self):
+        """Reapply styles after theme change."""
+        if hasattr(self, '_avatar'):
+            self._apply_avatar_style()
+        if hasattr(self, '_role_lbl'):
+            self._apply_role_label_style()
+        if hasattr(self, '_bubble'):
+            self._apply_bubble_style()
+        if hasattr(self, '_msg_label'):
+            self._apply_msg_label_style()
+        # Update action buttons
+        if self._action_row:
+            for btn in self._action_row.findChildren(QPushButton):
+                btn.setStyleSheet(self._action_btn_style())
     def __init__(self, text: str, role: str, parent=None, on_resend=None, on_delete=None, on_rewrite=None, created_at: str = None):
         super().__init__(parent)
         self._text = text
@@ -591,6 +635,7 @@ class _MsgRow(QWidget):
 
         is_user = role == "user"
         self.setStyleSheet("background: transparent;")
+        self._is_user = is_user
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(12, 10, 12, 10)
@@ -611,10 +656,8 @@ class _MsgRow(QWidget):
         renderer.render(p)
         p.end()
         avatar.setPixmap(pm)
-        avatar.setStyleSheet(
-            "QLabel { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.10);"
-            " border-radius: 15px; }"
-        )
+        self._avatar = avatar
+        self._apply_avatar_style()
 
         # ── content column ──
         content_col = QVBoxLayout()
@@ -622,9 +665,8 @@ class _MsgRow(QWidget):
         content_col.setSpacing(2)
 
         role_lbl = QLabel("你" if is_user else "助手")
-        role_lbl.setStyleSheet(
-            "color: #d4d4d8; font-size: 12px; font-weight: 700; background: transparent;"
-        )
+        self._role_lbl = role_lbl
+        self._apply_role_label_style()
         if is_user:
             role_lbl.setAlignment(Qt.AlignRight)
         content_col.addWidget(role_lbl)
@@ -632,9 +674,8 @@ class _MsgRow(QWidget):
         if is_user:
             # ── user: right-aligned bubble ──
             bubble = QWidget()
-            bubble.setStyleSheet(
-                "background: rgba(63,63,70,0.4); border-radius: 12px;"
-            )
+            self._bubble = bubble
+            self._apply_bubble_style()
             bubble_ly = QVBoxLayout(bubble)
             bubble_ly.setContentsMargins(12, 8, 12, 8)
             bubble_ly.setSpacing(0)
@@ -643,10 +684,8 @@ class _MsgRow(QWidget):
             label.setWordWrap(True)
             label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
-            label.setStyleSheet(
-                "QLabel { background: transparent; color: #e4e4e7;"
-                " padding: 0; font-size: 14px; line-height: 1.6; }"
-            )
+            self._msg_label = label
+            self._apply_msg_label_style()
             bubble_ly.addWidget(label)
             self._label = label
 
@@ -671,7 +710,7 @@ class _MsgRow(QWidget):
             copy_btn.setIcon(_svg_icon("copy", _SVG_COPY))
             copy_btn.setIconSize(icon_sz)
             copy_btn.setFixedSize(26, 24)
-            copy_btn.setStyleSheet(self._ACTION_BTN)
+            copy_btn.setStyleSheet(self._action_btn_style())
             copy_btn.setToolTip("复制")
             copy_btn.setCursor(QCursor(Qt.PointingHandCursor))
             copy_btn.clicked.connect(self._copy_text)
@@ -682,7 +721,7 @@ class _MsgRow(QWidget):
                 delete_btn.setIcon(_svg_icon("delete", _SVG_TRASH))
                 delete_btn.setIconSize(icon_sz)
                 delete_btn.setFixedSize(26, 24)
-                delete_btn.setStyleSheet(self._ACTION_BTN)
+                delete_btn.setStyleSheet(self._action_btn_style())
                 delete_btn.setToolTip("删除")
                 delete_btn.setCursor(QCursor(Qt.PointingHandCursor))
                 delete_btn.clicked.connect(self._do_delete)
@@ -693,7 +732,7 @@ class _MsgRow(QWidget):
                 rewrite_btn.setIcon(_svg_icon("rewrite", _SVG_RESET))
                 rewrite_btn.setIconSize(icon_sz)
                 rewrite_btn.setFixedSize(26, 24)
-                rewrite_btn.setStyleSheet(self._ACTION_BTN)
+                rewrite_btn.setStyleSheet(self._action_btn_style())
                 rewrite_btn.setToolTip("重写")
                 rewrite_btn.setCursor(QCursor(Qt.PointingHandCursor))
                 rewrite_btn.clicked.connect(self._do_rewrite)
@@ -706,7 +745,7 @@ class _MsgRow(QWidget):
                 try:
                     dt = datetime.fromisoformat(created_at)
                     time_lbl = QLabel(dt.strftime("%Y-%m-%d %H:%M"))
-                    time_lbl.setStyleSheet("color: #a1a1aa; font-size: 11px; background: transparent;")
+                    time_lbl.setStyleSheet(f"color: {C['muted']}; font-size: 11px; background: transparent;")
                     alayout.addWidget(time_lbl)
                 except:
                     pass
@@ -745,7 +784,7 @@ class _MsgRow(QWidget):
             copy_btn.setIcon(_svg_icon("copy", _SVG_COPY))
             copy_btn.setIconSize(icon_sz)
             copy_btn.setFixedSize(26, 24)
-            copy_btn.setStyleSheet(self._ACTION_BTN)
+            copy_btn.setStyleSheet(self._action_btn_style())
             copy_btn.setToolTip("复制")
             copy_btn.setCursor(QCursor(Qt.PointingHandCursor))
             copy_btn.clicked.connect(self._copy_text)
@@ -756,7 +795,7 @@ class _MsgRow(QWidget):
                 delete_btn.setIcon(_svg_icon("delete", _SVG_TRASH))
                 delete_btn.setIconSize(icon_sz)
                 delete_btn.setFixedSize(26, 24)
-                delete_btn.setStyleSheet(self._ACTION_BTN)
+                delete_btn.setStyleSheet(self._action_btn_style())
                 delete_btn.setToolTip("删除")
                 delete_btn.setCursor(QCursor(Qt.PointingHandCursor))
                 delete_btn.clicked.connect(self._do_delete)
@@ -767,7 +806,7 @@ class _MsgRow(QWidget):
                 regen_btn.setIcon(_svg_icon("regen", _SVG_REGEN))
                 regen_btn.setIconSize(icon_sz)
                 regen_btn.setFixedSize(26, 24)
-                regen_btn.setStyleSheet(self._ACTION_BTN)
+                regen_btn.setStyleSheet(self._action_btn_style())
                 regen_btn.setToolTip("重新生成")
                 regen_btn.setCursor(QCursor(Qt.PointingHandCursor))
                 regen_btn.clicked.connect(self._do_resend)
@@ -777,7 +816,7 @@ class _MsgRow(QWidget):
             export_btn.setIcon(_svg_icon("save", _SVG_SAVE))
             export_btn.setIconSize(icon_sz)
             export_btn.setFixedSize(26, 24)
-            export_btn.setStyleSheet(self._ACTION_BTN)
+            export_btn.setStyleSheet(self._action_btn_style())
             export_btn.setToolTip("导出为md")
             export_btn.setCursor(QCursor(Qt.PointingHandCursor))
             export_btn.clicked.connect(self._export_as_md)
@@ -790,7 +829,7 @@ class _MsgRow(QWidget):
                 try:
                     dt = datetime.fromisoformat(created_at)
                     time_lbl = QLabel(dt.strftime("%Y-%m-%d %H:%M"))
-                    time_lbl.setStyleSheet("color: #a1a1aa; font-size: 11px; background: transparent;")
+                    time_lbl.setStyleSheet(f"color: {C['muted']}; font-size: 11px; background: transparent;")
                     alayout.addWidget(time_lbl)
                 except:
                     pass
@@ -975,12 +1014,12 @@ class _MsgRow(QWidget):
                 if title in self._folded_ids:
                     # 折叠状态：只显示标题 + 展开链接
                     html_parts.append(
-                        f'<div><p><a href="#fold_{safe_title}" style="color: #a1a1aa; text-decoration: none;">▶ {display_title} (点击展开)</a></p></div>'
+                        f'<div><p><a href="#fold_{safe_title}" style="color: {C["muted"]}; text-decoration: none;">▶ {display_title} (点击展开)</a></p></div>'
                     )
                 else:
                     # 展开状态：显示标题 + 折叠链接 + 内容
                     html_parts.append(
-                        f'<div><p><a href="#fold_{safe_title}" style="color: #a1a1aa; text-decoration: none;">▼ {display_title} (点击折叠)</a></p>{_md_to_html(content)}</div>'
+                        f'<div><p><a href="#fold_{safe_title}" style="color: {C["muted"]}; text-decoration: none;">▼ {display_title} (点击折叠)</a></p>{_md_to_html(content)}</div>'
                     )
         return '\n'.join(html_parts)
 
@@ -995,25 +1034,14 @@ class _MsgRow(QWidget):
 
 
 class _TabButton(QPushButton):
-    _STYLE = """
-    QPushButton {{
-        background: transparent; color: {muted};
-        border: none; border-radius: 8px;
-        padding: 0 14px; font-size: 12px; font-weight: 700;
-    }}
-    QPushButton:hover {{
-        background: {hover_bg}; color: {text};
-    }}
-    QPushButton:checked {{
-        background: {accent}; color: white;
-    }}
-    """.format(muted=C["muted"], text=C["text"], hover_bg=C["hover_bg"], accent=C["accent"])
-
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
         self.setCheckable(True)
         self.setFixedHeight(30)
-        self.setStyleSheet(self._STYLE)
+        self.apply_theme()
+
+    def apply_theme(self):
+        self.setStyleSheet(build_tab_button_style(C))
 
 
 def _action_btn(label: str, color: str, icon: QIcon | None = None) -> QPushButton:
@@ -1024,14 +1052,14 @@ def _action_btn(label: str, color: str, icon: QIcon | None = None) -> QPushButto
     btn.setFixedHeight(36)
     btn.setStyleSheet(f"""
         QPushButton {{
-            background: rgba(35,35,40,0.8); color: {C['text']};
+            background: {C['hover_bg']}; color: {C['text']};
             border: 1px solid {C['border'].name()};
             border-left: 3px solid {color};
             border-radius: 8px; padding: 0 14px;
             font-size: 13px; font-weight: 700; text-align: left;
         }}
-        QPushButton:hover {{ background: rgba(55,55,62,0.9); }}
-        QPushButton:checked {{ color: {color}; background: rgba(35,35,40,0.95); }}
+        QPushButton:hover {{ background: {C['hover_bg']}; }}
+        QPushButton:checked {{ color: {color}; background: {C['hover_bg']}; }}
     """)
     return btn
 
@@ -1072,6 +1100,7 @@ class ChatPanel(QWidget):
 
         # drag state (title bar)
         self._drag_pos: Optional[QPoint] = None
+        self._current_theme = "dark"
 
         self._build_ui()
 
@@ -1081,8 +1110,13 @@ class ChatPanel(QWidget):
         path = QPainterPath()
         path.addRect(0.5, 0.5, self.width() - 1.0, self.height() - 1.0)
         grad = QLinearGradient(0, 0, 0, self.height())
-        grad.setColorAt(0.0, QColor(20, 20, 28, 255))
-        grad.setColorAt(1.0, QColor(10, 10, 14, 255))
+        bg = C["bg"]
+        if isinstance(bg, QColor):
+            r, g, b, a = bg.red(), bg.green(), bg.blue(), bg.alpha()
+        else:
+            r, g, b, a = 14, 14, 18, 255
+        grad.setColorAt(0.0, QColor(r, g, b, a))
+        grad.setColorAt(1.0, QColor(max(0, r - 10), max(0, g - 10), max(0, b - 14), a))
         p.fillPath(path, grad)
 
     def resizeEvent(self, event):
@@ -1093,14 +1127,19 @@ class ChatPanel(QWidget):
 
     # ── UI construction ───────────────────────────────────────────────────────
     def _build_ui(self):
+        self._separators: list[_Separator] = []
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         root.addWidget(self._build_titlebar())
-        root.addWidget(_Separator())
+        sep1 = _Separator()
+        self._separators.append(sep1)
+        root.addWidget(sep1)
         root.addWidget(self._build_tabbar())
-        root.addWidget(_Separator())
+        sep2 = _Separator()
+        self._separators.append(sep2)
+        root.addWidget(sep2)
 
         self._stack = QStackedWidget()
         self._stack.setStyleSheet("background: transparent;")
@@ -1178,41 +1217,56 @@ class ChatPanel(QWidget):
 
         ly.addStretch()
 
-        # Minimize button
-        mini = QPushButton("\uE949")
-        mini.setFixedSize(26, 26)
-        mini.setCursor(QCursor(Qt.PointingHandCursor))
-        mini.setStyleSheet("""
+        # Theme toggle button
+        theme_btn = QPushButton()
+        theme_btn.setIcon(_svg_icon("moon", SVG_MOON, C["svg_color"]))
+        theme_btn.setIconSize(QSize(14, 14))
+        theme_btn.setFixedSize(26, 26)
+        theme_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        theme_btn.setToolTip("Toggle light/dark theme")
+        theme_btn.setStyleSheet("""
             QPushButton { background: rgba(63,63,70,0.6); color: #a1a1aa;
-                border: none; border-radius: 13px; font-family: "Segoe MDL2 Assets"; font-size: 9px; }
+                border: none; border-radius: 13px; }
             QPushButton:hover { background: rgba(63,63,70,0.9); color: white; }
         """)
+        theme_btn.clicked.connect(self._toggle_theme)
+        self._theme_btn = theme_btn
+        ly.addWidget(theme_btn)
+
+        # Minimize button
+        mini = QPushButton()
+        mini.setIcon(_svg_icon("minimize", SVG_MINIMIZE, C["svg_color"]))
+        mini.setIconSize(QSize(14, 14))
+        mini.setFixedSize(26, 26)
+        mini.setCursor(QCursor(Qt.PointingHandCursor))
+        mini.setToolTip(self.tr("\u6700\u5C0F\u5316"))
+        mini.setStyleSheet(build_titlebar_btn_style(C))
         mini.clicked.connect(self.hide)
+        self._mini_btn = mini
         ly.addWidget(mini)
 
         # Maximize button
-        maxi = QPushButton("\uE739")
+        maxi = QPushButton()
+        maxi.setIcon(_svg_icon("maximize", SVG_MAXIMIZE, C["svg_color"]))
+        maxi.setIconSize(QSize(14, 14))
         maxi.setFixedSize(26, 26)
         maxi.setCursor(QCursor(Qt.PointingHandCursor))
-        maxi.setStyleSheet("""
-            QPushButton { background: rgba(63,63,70,0.6); color: #a1a1aa;
-                border: none; border-radius: 13px; font-family: "Segoe MDL2 Assets"; font-size: 9px; }
-            QPushButton:hover { background: rgba(63,63,70,0.9); color: white; }
-        """)
+        maxi.setToolTip(self.tr("\u6700\u5927\u5316"))
+        maxi.setStyleSheet(build_titlebar_btn_style(C))
         maxi.clicked.connect(self._toggle_maximize)
         self._maxi_btn = maxi
         ly.addWidget(maxi)
 
         # Close button
-        close = QPushButton("\uE8BB")
+        close = QPushButton()
+        close.setIcon(_svg_icon("close", SVG_CLOSE, C["svg_color"]))
+        close.setIconSize(QSize(14, 14))
         close.setFixedSize(26, 26)
         close.setCursor(QCursor(Qt.PointingHandCursor))
-        close.setStyleSheet("""
-            QPushButton { background: rgba(63,63,70,0.6); color: #a1a1aa;
-                border: none; border-radius: 13px; font-family: "Segoe MDL2 Assets"; font-size: 9px; }
-            QPushButton:hover { background: rgba(220,38,38,0.85); color: white; }
-        """)
+        close.setToolTip(self.tr("\u5173\u95ED"))
+        close.setStyleSheet(build_titlebar_btn_style(C, danger=True))
         close.clicked.connect(lambda: (self.close(), QApplication.instance().quit()))
+        self._close_btn = close
         ly.addWidget(close)
 
         # Drag
@@ -1340,10 +1394,128 @@ class ChatPanel(QWidget):
     def _toggle_maximize(self):
         if self.isMaximized():
             self.showNormal()
-            self._maxi_btn.setText("☐")
+            self._maxi_btn.setIcon(_svg_icon("maximize", SVG_MAXIMIZE, C["svg_color"]))
+            self._maxi_btn.setToolTip(self.tr("最大化"))
         else:
             self.showMaximized()
-            self._maxi_btn.setText("❐")
+            self._maxi_btn.setIcon(_svg_icon("restore", SVG_RESTORE, C["svg_color"]))
+            self._maxi_btn.setToolTip(self.tr("恢复"))
+
+    def _toggle_theme(self):
+        """Switch between dark and light theme."""
+        global C
+        new_theme = "light" if self._current_theme == "dark" else "dark"
+        self._current_theme = new_theme
+        if new_theme == "light":
+            C = C_LIGHT
+        else:
+            C = C_DARK
+        self._apply_theme()
+
+    def _apply_theme(self):
+        """Reapply styles after theme change."""
+        svg_color = C.get("svg_color", "#a78bfa")
+
+        # ── paint event ──
+        self.update()
+
+        # ── titlebar buttons ──
+        self._theme_btn.setIcon(
+            _svg_icon("moon", SVG_MOON, svg_color) if self._current_theme == "dark"
+            else _svg_icon("sun", SVG_SUN, svg_color)
+        )
+        for btn, svg in [
+            (self._mini_btn, SVG_MINIMIZE),
+            (self._maxi_btn, SVG_MAXIMIZE if not self.isMaximized() else SVG_RESTORE),
+            (self._close_btn, SVG_CLOSE),
+        ]:
+            btn.setIcon(_svg_icon("winctl", svg, svg_color))
+            btn.setStyleSheet(build_titlebar_btn_style(C, danger=(btn is self._close_btn)))
+        self._search_btn.setIcon(_svg_icon("search", SVG_SEARCH, C["muted"]))
+        self._search_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; border: none; border-radius: 13px; }}
+            QPushButton:hover {{ background: {C['hover_bg']}; }}
+        """)
+        self._theme_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; border: none; border-radius: 13px; }}
+            QPushButton:hover {{ background: {C['hover_bg']}; }}
+        """)
+
+        # ── tab bar ──
+        self._tabbar_widget.setStyleSheet(f"background: {C['panel'].name()};")
+        for btn in self._tabs:
+            btn.apply_theme()
+        self._new_chat_btn.setStyleSheet(f"""
+            QPushButton {{ background: {C['accent_bg']}; color: {C['svg_color']};
+                border: 1px solid {C['accent_bdr']}; border-radius: 7px;
+                padding: 0 10px; font-size: 12px; font-weight: 700; }}
+            QPushButton:hover {{ background: {C['accent_bg']}; color: {C['text']}; }}
+        """)
+
+        # ── separators ──
+        for sep in self._separators:
+            sep.apply_theme()
+
+        # ── markdown CSS & assistant browsers ──
+        self._rebuild_md_css()
+
+        # ── status bar ──
+        self._status_dot.setStyleSheet(f"color: {C['green']}; font-size: 9px;")
+
+        # ── message rows ──
+        for i in range(self._msg_layout.count()):
+            w = self._msg_layout.itemAt(i).widget()
+            if isinstance(w, _MsgRow):
+                w.apply_theme()
+                # Update assistant browser stylesheet + document CSS
+                if not w._is_user and hasattr(w, '_label') and isinstance(w._label, QTextBrowser):
+                    w._label.setStyleSheet(
+                        f"QTextBrowser {{ background: transparent; color: {C['text']};"
+                        f" border: none; padding: 0; font-size: 14px; }}"
+                    )
+                    w._label.document().setDefaultStyleSheet(_MD_CSS)
+            elif isinstance(w, QLabel):
+                # System notice labels
+                w.setStyleSheet(
+                    f"QLabel {{ background: transparent; color: {C['muted']};"
+                    f" border: none; padding: 6px 20px; font-size: 12px; }}"
+                )
+
+        # ── model rows ──
+        if hasattr(self, '_model_row_widgets'):
+            self._refresh_model_rows_style()
+
+        # ── input area ──
+        self._input.setStyleSheet(
+            f"QTextEdit {{ background: transparent; color: {C['text']};"
+            f" border: none; padding: 10px 12px; font-size: 14px; }}"
+        )
+
+    def _rebuild_md_css(self):
+        """Rebuild _MD_CSS from current C palette."""
+        global _MD_CSS
+        _MD_CSS = f"""
+        body {{ color: {C['text']}; font-family: "Arial", "Microsoft YaHei", sans-serif; font-size: 13px; line-height: 1.6; font-weight: 400; }}
+        h1 {{ color: {C['text']}; font-size: 20px; font-weight: 700; border-bottom: 1px solid {C['border']}; padding-bottom: 4px; margin-top: 16px; }}
+        h2 {{ color: {C['text']}; font-size: 17px; font-weight: 700; border-bottom: 1px solid {C['border']}; padding-bottom: 3px; margin-top: 14px; }}
+        h3 {{ color: {C['text']}; font-size: 15px; font-weight: 600; margin-top: 12px; }}
+        h4,h5,h6 {{ color: {C['muted']}; font-size: 13px; font-weight: 600; margin-top: 10px; }}
+        code {{ background: {C['hover_bg']}; color: {C['svg_color']}; padding: 1px 4px; border-radius: 3px;
+               font-family: Consolas, "Courier New", monospace; font-size: 12px; }}
+        pre  {{ background: rgba(24,24,30,0.95); border: 1px solid {C['border']}; border-radius: 6px;
+               padding: 10px 12px; margin: 8px 0; }}
+        pre code {{ background: transparent; padding: 0; color: {C['text']}; }}
+        a {{ color: {C['svg_color']}; text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+        blockquote {{ border-left: 3px solid {C['accent']}; margin: 8px 0 8px 0; padding: 4px 0 4px 12px; color: {C['muted']}; }}
+        table {{ border-collapse: collapse; margin: 8px 0; }}
+        th, td {{ border: 1px solid {C['border']}; padding: 5px 10px; }}
+        th {{ background: {C['hover_bg']}; color: {C['text']}; font-weight: 700; }}
+        hr {{ border: none; border-top: 1px solid {C['border']}; margin: 12px 0; }}
+        ul, ol {{ padding-left: 22px; margin: 4px 0; }}
+        li {{ margin: 2px 0; }}
+        p {{ margin: 6px 0; }}
+        """
 
     # ── status bar ─────────────────────────────────────────────────────────────
     def _build_statusbar(self) -> QWidget:
@@ -1358,11 +1530,12 @@ class ChatPanel(QWidget):
         dot = QLabel("●")
         dot.setStyleSheet(f"color: {C['green']}; font-size: 9px;")
         dot.setFixedWidth(12)
+        self._status_dot = dot
         ly.addWidget(dot)
 
         # Model name (clickable to show model list)
         self._model_badge = QLabel(self._model_name())
-        self._model_badge.setStyleSheet("color: #a1a1aa; font-size: 11px;")
+        self._model_badge.setStyleSheet(f"color: {C['muted']}; font-size: 11px;")
         self._model_badge.setCursor(QCursor(Qt.PointingHandCursor))
         self._model_badge.mousePressEvent = lambda e: self._show_model_menu(e)
         ly.addWidget(self._model_badge)
@@ -1401,7 +1574,8 @@ class ChatPanel(QWidget):
     def _build_tabbar(self) -> QWidget:
         bar = QWidget()
         bar.setFixedHeight(40)
-        bar.setStyleSheet("background: rgba(10,10,14,0.6);")
+        bar.setStyleSheet(f"background: {C['panel'].name()};")
+        self._tabbar_widget = bar
 
         ly = QHBoxLayout(bar)
         ly.setContentsMargins(12, 5, 12, 5)
@@ -1425,16 +1599,17 @@ class ChatPanel(QWidget):
         ly.addStretch()
 
         new_btn = QPushButton("新对话")
-        new_btn.setIcon(_svg_icon("plus", _SVG_PLUS, "#a78bfa"))
+        new_btn.setIcon(_svg_icon("plus", _SVG_PLUS, C["svg_color"]))
         new_btn.setIconSize(QSize(12, 12))
         new_btn.setFixedHeight(27)
         new_btn.setStyleSheet(f"""
-            QPushButton {{ background: rgba(124,58,237,0.18); color: #a78bfa;
-                border: 1px solid rgba(124,58,237,0.3); border-radius: 7px;
+            QPushButton {{ background: {C['accent_bg']}; color: {C['svg_color']};
+                border: 1px solid {C['accent_bdr']}; border-radius: 7px;
                 padding: 0 10px; font-size: 12px; font-weight: 700; }}
-            QPushButton:hover {{ background: rgba(124,58,237,0.35); color: white; }}
+            QPushButton:hover {{ background: {C['accent_bg']}; color: {C['text']}; }}
         """)
         new_btn.clicked.connect(self._new_session)
+        self._new_chat_btn = new_btn
         ly.addWidget(new_btn)
 
         # NOTE: _switch_tab(0) is called in _build_ui() after _stack is created
@@ -1470,7 +1645,7 @@ class ChatPanel(QWidget):
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._scroll.setStyleSheet(f"QScrollArea {{ background: transparent; border: none; }} {SCROLLBAR_STYLE}")
+        self._scroll.setStyleSheet(f"QScrollArea {{ background: transparent; border: none; }} {_SCROLLBAR_STYLE}")
 
         self._msg_container = QWidget()
         self._msg_container.setStyleSheet("background: transparent;")
@@ -1500,20 +1675,20 @@ class ChatPanel(QWidget):
         self._nav_up = QPushButton("∧")
         self._nav_up.setFixedWidth(26)
         self._nav_up.setCursor(QCursor(Qt.PointingHandCursor))
-        self._nav_up.setStyleSheet("""
-            QPushButton { background: transparent; color: #71717a; border: none; font-size: 14px; }
-            QPushButton:hover { color: #a1a1aa; }
-            QPushButton:disabled { color: #27272a; }
+        self._nav_up.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C['muted']}; border: none; font-size: 14px; }}
+            QPushButton:hover {{ color: {C['text']}; }}
+            QPushButton:disabled {{ color: {C['border'].name()}; }}
         """)
         self._nav_up.clicked.connect(self._scroll_to_top)
 
         self._nav_down = QPushButton("∨")
         self._nav_down.setFixedWidth(26)
         self._nav_down.setCursor(QCursor(Qt.PointingHandCursor))
-        self._nav_down.setStyleSheet("""
-            QPushButton { background: transparent; color: #71717a; border: none; font-size: 14px; }
-            QPushButton:hover { color: #a1a1aa; }
-            QPushButton:disabled { color: #27272a; }
+        self._nav_down.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C['muted']}; border: none; font-size: 14px; }}
+            QPushButton:hover {{ color: {C['text']}; }}
+            QPushButton:disabled {{ color: {C['border'].name()}; }}
         """)
         self._nav_down.clicked.connect(self._scroll_to_bottom)
 
@@ -1634,7 +1809,7 @@ class ChatPanel(QWidget):
 
         header = QHBoxLayout()
         lbl = QLabel("历史记录")
-        lbl.setStyleSheet("color: #f4f4f5; font-weight: 600; font-size: 14px;")
+        lbl.setStyleSheet(f"color: {C['text']}; font-weight: 600; font-size: 14px;")
         header.addWidget(lbl)
         header.addStretch()
 
@@ -1661,7 +1836,7 @@ class ChatPanel(QWidget):
                 border-color: rgba(124,58,237,0.4); }}
             QListWidget::item:selected {{ background: {C["accent_bg"]};
                 border-color: rgba(124,58,237,0.6); }}
-            {SCROLLBAR_STYLE}
+            {_SCROLLBAR_STYLE}
         """)
         self._hist_list.itemDoubleClicked.connect(self._restore_selected)
         ly.addWidget(self._hist_list)
@@ -1685,7 +1860,7 @@ class ChatPanel(QWidget):
                 border-radius: 4px; margin: 1px 4px; }}
             QListWidget::item:hover {{ background: rgba(55,55,65,0.7); color: {C['text']}; }}
             QListWidget::item:selected {{ background: rgba(124,58,237,0.28); color: white; }}
-            {SCROLLBAR_STYLE}
+            {_SCROLLBAR_STYLE}
         """)
         self._sop_list.currentItemChanged.connect(self._load_sop)
         splitter.addWidget(self._sop_list)
@@ -1698,7 +1873,7 @@ class ChatPanel(QWidget):
                 border: none; padding: 10px 14px;
                 font-family: "Arial", "Microsoft YaHei", sans-serif;
                 font-size: 13px; }}
-            {SCROLLBAR_STYLE}
+            {_SCROLLBAR_STYLE}
         """)
         splitter.addWidget(self._sop_viewer)
         splitter.setSizes([165, 340])
@@ -1714,7 +1889,7 @@ class ChatPanel(QWidget):
         ly.setSpacing(8)
 
         lbl = QLabel("控制面板")
-        lbl.setStyleSheet("color: #f4f4f5; font-weight: 600; font-size: 14px;")
+        lbl.setStyleSheet(f"color: {C['text']}; font-weight: 600; font-size: 14px;")
         ly.addWidget(lbl)
 
         self._model_info = QLabel(f"当前模型：{self._model_name()} (#{self.runner.llm_no})")
@@ -1723,7 +1898,7 @@ class ChatPanel(QWidget):
         ly.addSpacing(4)
 
         model_hdr = QLabel("模型列表")
-        model_hdr.setStyleSheet("color: #d4d4d8; font-weight: 600; font-size: 13px;")
+        model_hdr.setStyleSheet(f"color: {C['text']}; font-weight: 600; font-size: 13px;")
         ly.addWidget(model_hdr)
 
         self._model_rows_container = QWidget()
@@ -1750,7 +1925,7 @@ class ChatPanel(QWidget):
 
         ly.addSpacing(10)
         sep = QLabel("自主行动")
-        sep.setStyleSheet("color: #f4f4f5; font-weight: 600; font-size: 13px;")
+        sep.setStyleSheet(f"color: {C['text']}; font-weight: 600; font-size: 13px;")
         ly.addWidget(sep)
 
         self._auto_btn = _action_btn(f"开启自主行动 (idle > {AUTO_IDLE_THRESHOLD // 60} min 自动触发)", "#f59e0b",
@@ -1768,18 +1943,23 @@ class ChatPanel(QWidget):
         return page
 
     # ── model list ────────────────────────────────────────────────────────────
-    _MODEL_ROW_STYLE = (
-        "QPushButton { background: rgba(39,39,42,0.7); color: #e4e4e7;"
-        " border: 1px solid #3f3f46; border-radius: 8px;"
-        " padding: 6px 10px; font-size: 12px; font-weight: 700; text-align: left; }"
-        " QPushButton:hover { background: rgba(63,63,70,0.8); }"
-    )
-    _MODEL_ROW_ACTIVE = (
-        "QPushButton { background: rgba(124,58,237,0.25); color: #c4b5fd;"
-        " border: 1px solid rgba(124,58,237,0.5); border-radius: 8px;"
-        " padding: 6px 10px; font-size: 12px; font-weight: 700; text-align: left; }"
-        " QPushButton:hover { background: rgba(124,58,237,0.35); }"
-    )
+    @staticmethod
+    def _model_row_style() -> str:
+        return (
+            f"QPushButton {{ background: {C['hover_bg']}; color: {C['text']};"
+            f" border: 1px solid {C['border']}; border-radius: 8px;"
+            f" padding: 6px 10px; font-size: 12px; font-weight: 700; text-align: left; }}"
+            f" QPushButton:hover {{ background: {C['hover_bg']}; }}"
+        )
+
+    @staticmethod
+    def _model_row_active_style() -> str:
+        return (
+            f"QPushButton {{ background: {C['accent_bg']}; color: {C['svg_color']};"
+            f" border: 1px solid {C['accent_bdr']}; border-radius: 8px;"
+            f" padding: 6px 10px; font-size: 12px; font-weight: 700; text-align: left; }}"
+            f" QPushButton:hover {{ background: {C['accent_bg']}; }}"
+        )
 
     def _build_model_rows(self):
         while self._model_rows_layout.count():
@@ -1806,7 +1986,7 @@ class ChatPanel(QWidget):
 
             btn = QPushButton(f"  #{idx}  {display}")
             btn.setCursor(QCursor(Qt.PointingHandCursor))
-            btn.setStyleSheet(self._MODEL_ROW_ACTIVE if is_current else self._MODEL_ROW_STYLE)
+            btn.setStyleSheet(self._model_row_active_style() if is_current else self._model_row_style())
             btn.clicked.connect(lambda checked, i=idx: self._do_switch_to(i))
             rlay.addWidget(btn, 1)
 
@@ -1818,7 +1998,7 @@ class ChatPanel(QWidget):
         for entry in self._model_row_widgets:
             is_current = entry["idx"] == active_idx
             entry["btn"].setStyleSheet(
-                self._MODEL_ROW_ACTIVE if is_current else self._MODEL_ROW_STYLE
+                self._model_row_active_style() if is_current else self._model_row_style()
             )
             status = self._health_results.get(entry["idx"])
             if status is True:
@@ -1946,30 +2126,35 @@ class ChatPanel(QWidget):
         self._chips_row.show()
 
     # ── send / streaming ───────────────────────────────────────────────────────
-    _SEND_BTN_STYLE = """
-        QPushButton { background: #e4e4e7; border: none; border-radius: 17px; }
-        QPushButton:hover { background: #f4f4f5; }
-        QPushButton:pressed { background: #d4d4d8; }
-    """
-    _STOP_BTN_STYLE = """
+    @staticmethod
+    def _send_btn_style() -> str:
+        return f"""
+        QPushButton {{ background: {C['text']}; border: none; border-radius: 17px; }}
+        QPushButton:hover {{ background: {C['muted']}; }}
+        QPushButton:pressed {{ background: {C['muted']}; }}
+        """
+
+    @staticmethod
+    def _stop_btn_style() -> str:
+        return """
         QPushButton { background: rgba(239,68,68,0.85); border: none; border-radius: 17px; }
         QPushButton:hover { background: rgba(248,113,113,0.9); }
         QPushButton:pressed { background: rgba(220,38,38,0.9); }
-    """
+        """
 
     def _set_send_mode(self):
         self._is_streaming = False
         self._send_btn.setText("")
         self._send_btn.setIcon(_svg_icon("send_arrow", _SVG_SEND, "#18181b"))
         self._send_btn.setIconSize(QSize(18, 18))
-        self._send_btn.setStyleSheet(self._SEND_BTN_STYLE)
+        self._send_btn.setStyleSheet(self._send_btn_style())
 
     def _set_stop_mode(self):
         self._is_streaming = True
         self._send_btn.setText("")
         self._send_btn.setIcon(_svg_icon("stop_circle", _SVG_STOP, "#ffffff"))
         self._send_btn.setIconSize(QSize(16, 16))
-        self._send_btn.setStyleSheet(self._STOP_BTN_STYLE)
+        self._send_btn.setStyleSheet(self._stop_btn_style())
 
     def _on_send_btn_click(self):
         if self._is_streaming:
@@ -2318,8 +2503,8 @@ class ChatPanel(QWidget):
         lbl.setWordWrap(True)
         lbl.setAlignment(Qt.AlignCenter)
         lbl.setStyleSheet(
-            "QLabel { background: transparent; color: #71717a;"
-            " border: none; padding: 6px 20px; font-size: 12px; }"
+            f"QLabel {{ background: transparent; color: {C['muted']};"
+            f" border: none; padding: 6px 20px; font-size: 12px; }}"
         )
         self._msg_layout.insertWidget(self._msg_layout.count() - 1, lbl)
         self._scroll_bottom()
@@ -2425,15 +2610,22 @@ def main():
     font.setPointSize(10)
     app.setFont(font)
 
-    # ── Agent initialisation ──────────────────────────────
-    za = ZeroAgent()
-    runner = AgentRunner(za)
-    if runner.llmclient is None:
+    # ── Config loading ───────────────────────────────────
+    config: Optional[AgentConfig] = None
+    config_path = os.path.join(os.path.expanduser("~"), ".zero_agent", "config.yaml")
+    if os.path.isfile(config_path):
+        config = AgentConfig.from_yaml(config_path)
+    else:
         QMessageBox.critical(
             None,
             "未配置 LLM",
             "未在 ~/.zero_agent/config.yaml 中发现任何可用的 LLM 接口配置，\n程序将在无 LLM 模式下运行。",
         )
+        config = AgentConfig()
+
+    # ── Agent initialisation ──────────────────────────────
+    za = ZeroAgent(config=config)
+    runner = AgentRunner(za)
 
     # ── Windows ───────────────────────────────────────────
     panel = ChatPanel(runner)

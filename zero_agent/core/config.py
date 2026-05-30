@@ -159,6 +159,9 @@ class AgentConfig:
                 model: claude-sonnet-4-6
             max_turns: 80
 
+        相对路径 (workspace_dir, memory_dir, sessions_dir, log_dir)
+        会自动基于配置文件所在目录解析为绝对路径.
+
         Args:
             path: YAML 文件路径.
 
@@ -173,7 +176,22 @@ class AgentConfig:
 
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
-        return cls._from_dict(data)
+        config = cls._from_dict(data)
+        config._resolve_paths(os.path.dirname(os.path.abspath(str(path))))
+        return config
+
+    def _resolve_paths(self, base_dir: str) -> None:
+        """将相对路径字段基于 base_dir 解析为绝对路径.
+
+        仅处理非空且非绝对路径的字段。已为绝对路径的值保持不变。
+
+        Args:
+            base_dir: 基准目录（通常为配置文件所在目录）.
+        """
+        for attr in ("workspace_dir", "memory_dir", "sessions_dir", "log_dir"):
+            val = getattr(self, attr)
+            if val and not os.path.isabs(val):
+                setattr(self, attr, os.path.normpath(os.path.join(base_dir, val)))
 
     @classmethod
     def from_env(cls) -> "AgentConfig":

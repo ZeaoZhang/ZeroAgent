@@ -1,0 +1,21 @@
+/* ZeroAgent Qt Markdown CSS — used in QTextBrowser for assistant messages */
+body { color: var(--qt-text); font-family: "Arial", "Microsoft YaHei", sans-serif; font-size: 13px; line-height: 1.6; font-weight: 400; }
+h1 { color: var(--qt-text); font-size: 20px; font-weight: 700; border-bottom: 1px solid var(--qt-border); padding-bottom: 4px; margin-top: 16px; }
+h2 { color: var(--qt-text); font-size: 17px; font-weight: 700; border-bottom: 1px solid var(--qt-border); padding-bottom: 3px; margin-top: 14px; }
+h3 { color: var(--qt-text); font-size: 15px; font-weight: 600; margin-top: 12px; }
+h4,h5,h6 { color: var(--qt-muted); font-size: 13px; font-weight: 600; margin-top: 10px; }
+code { background: var(--qt-code-bg); color: var(--qt-accent); padding: 1px 4px; border-radius: 3px;
+       font-family: Consolas, "Courier New", monospace; font-size: 12px; }
+pre  { background: var(--qt-pre-bg); border: 1px solid var(--qt-border); border-radius: 6px;
+       padding: 10px 12px; margin: 8px 0; }
+pre code { background: transparent; padding: 0; color: var(--qt-text); }
+a { color: var(--qt-link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+blockquote { border-left: 3px solid var(--qt-accent); margin: 8px 0 8px 0; padding: 4px 0 4px 12px; color: var(--qt-muted); }
+table { border-collapse: collapse; margin: 8px 0; }
+th, td { border: 1px solid var(--qt-border); padding: 5px 10px; }
+th { background: var(--qt-th-bg); color: var(--qt-text); font-weight: 700; }
+hr { border: none; border-top: 1px solid var(--qt-border); margin: 12px 0; }
+ul, ol { padding-left: 22px; margin: 4px 0; }
+li { margin: 2px 0; }
+p { margin: 6px 0; }

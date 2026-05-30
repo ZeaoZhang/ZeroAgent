@@ -346,7 +346,11 @@ class LiteLLMSession:
             kwargs["num_retries"] = self.config.max_retries
 
         if self.config.connect_timeout:
-            kwargs["timeout"] = (self.config.connect_timeout, self.config.read_timeout)
+            import httpx
+            kwargs["timeout"] = httpx.Timeout(
+                timeout=self.config.read_timeout,
+                connect=self.config.connect_timeout,
+            )
 
         if self.config.proxy:
             # 设置环境变量供 litellm httpx 客户端使用（trust_env=True）
