@@ -1,4 +1,4 @@
-// GenericAgent Web2 browser bridge adapter.
+// ZeroAgent Web2 browser bridge adapter.
 // HTTP is the command/data channel. WebSocket only carries small state events.
 (() => {
   'use strict';
@@ -6,8 +6,9 @@
   const listeners = new Map();
   let ws = null;
   let cachedBridgeReady = null;
-  const bridgeBase = `${location.protocol}//${location.hostname}:14168`;
-  const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:14168/ws`;
+  const bridgePort = location.port || '14168';
+  const bridgeBase = `${location.protocol}//${location.hostname}:${bridgePort}`;
+  const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:${bridgePort}/ws`;
 
   function on(channel, cb) {
     if (typeof cb !== 'function') return () => {};
@@ -85,6 +86,11 @@
         return http('/model-profiles');
       case 'session/new':
         return http('/session/new', { method: 'POST', body: params || {} });
+      case 'session/activate': {
+        const sid = params.sessionId || params.id || params.bridgeSessionId;
+        if (!sid) throw new Error('session/activate missing sessionId');
+        return http(`/session/${encodeURIComponent(sid)}/activate`, { method: 'POST', body: params || {} });
+      }
       case 'session/prompt': {
         const sid = params.sessionId || params.id || params.bridgeSessionId;
         if (!sid) throw new Error('session/prompt missing sessionId');
@@ -117,6 +123,7 @@
 
   window.ga = {
     platform: navigator.platform.toLowerCase().includes('mac') ? 'darwin' : 'win32',
+    bridgeUrl: bridgeBase,
     startBridge: async () => { connectWs(); return http('/status'); },
     stopBridge: async () => ({ ok: true }),
     checkStatus: () => rpc('app/status', {}),
@@ -124,8 +131,10 @@
     saveConfig: (cfg) => rpc('app/config/save', cfg || {}),
     getModelProfiles: () => rpc('get/model-profiles', {}),
     selectGaRoot: () => rpc('app/path/selectGaRoot', {}),
-    openMykeyTemplate: () => rpc('app/path/open', { kind: 'mykeyTemplate' }),
-    openMykey: () => rpc('app/path/open', { kind: 'mykey' }),
+    openConfigDir: () => rpc('app/path/open', { kind: 'configDir' }),
+    openMykeyTemplate: () => rpc('app/path/open', { kind: 'configDir' }),
+    openMykey: () => rpc('app/path/open', { kind: 'config' }),
+    openConfig: () => rpc('app/path/open', { kind: 'config' }),
     pollSession: (sessionId, afterId = 0) => rpc('session/poll', { sessionId, afterId }),
     rpc,
     onBridgeMessage: (cb) => on('bridge-message', cb),

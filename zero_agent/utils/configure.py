@@ -1,7 +1,7 @@
 """交互式配置向导 — ZeroAgent 终端配置助手.
 
 引导用户完成 LLM 提供商选择、API Key 输入、模型选择等，
-生成 ~/.zero_agent/config.yaml 配置文件。
+生成项目根目录 config.yaml 配置文件。
 
 用法:
     python -m zero_agent.utils.configure          # 交互模式
@@ -14,6 +14,8 @@ import os
 import sys
 from getpass import getpass
 from typing import Optional
+
+from zero_agent.core.config import default_config_path
 
 
 # 预定义提供商配置
@@ -230,17 +232,16 @@ def _build_config_yaml(
 
 
 def _write_config(content: str) -> None:
-    """将配置写入 ~/.zero_agent/config.yaml.
+    """将配置写入项目根目录 config.yaml.
 
     如果已存在，先备份为 config.yaml.bak.
 
     Args:
         content: YAML 配置字符串.
     """
-    config_dir = os.path.join(os.path.expanduser("~"), ".zero_agent")
+    config_path = str(default_config_path())
+    config_dir = os.path.dirname(config_path)
     os.makedirs(config_dir, exist_ok=True)
-
-    config_path = os.path.join(config_dir, "config.yaml")
 
     # 备份已有配置
     if os.path.isfile(config_path):
@@ -255,7 +256,7 @@ def _write_config(content: str) -> None:
         f.write(content)
 
     print(f"\n配置已保存到: {config_path}")
-    print("使用方式: zero-agent -c ~/.zero_agent/config.yaml")
+    print("使用方式: zero-agent")
 
 
 def _prompt(text: str, default: str = "") -> str:

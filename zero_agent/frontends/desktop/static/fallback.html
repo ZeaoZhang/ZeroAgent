@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>GenericAgent — Setup</title>
+<title>ZeroAgent Setup</title>
 <style>
 :root{--bg:#fff;--text:#0a0a0a;--muted:#6b6b6b;--border:#e8e8e8;--accent:#0a0a0a;--accent-text:#fff;--radius:10px;--font:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Helvetica,Arial,sans-serif}
 @media(prefers-color-scheme:dark){:root{--bg:#1a1a1a;--text:#ededed;--muted:#a0a0a0;--border:#2a2a2a;--accent:#ededed;--accent-text:#0a0a0a}}
@@ -24,7 +24,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
 </head>
 <body>
 <div class="card">
-  <h1>⚙️ Setup Required</h1>
+  <h1>Setup Required</h1>
   <p>The backend could not start. Please configure the paths below.</p>
   <p>后端启动失败，请配置以下路径。</p>
 
@@ -38,7 +38,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
 
   <label class="field-label">Project directory 项目目录</label>
   <div class="input-row">
-    <input id="projdir" type="text" placeholder="path to GenericAgent folder" spellcheck="false">
+    <input id="projdir" type="text" placeholder="path to ZeroAgent folder" spellcheck="false">
   </div>
   <p style="color:var(--muted);font-size:.75rem;margin-top:.3rem">
     The folder containing <code>frontends/desktop_bridge.py</code>
@@ -67,10 +67,10 @@ async function doStart() {
   if (!pythonPath) { statusEl.className='err'; statusEl.textContent='Please enter Python path / 请输入 Python 路径'; return; }
   if (!projectDir) { statusEl.className='err'; statusEl.textContent='Please enter project directory / 请输入项目目录'; return; }
   btn.disabled = true;
-  statusEl.className=''; statusEl.textContent='Starting bridge… 正在启动…';
+  statusEl.className=''; statusEl.textContent='Starting bridge... 正在启动...';
   try {
     await invoke('start_bridge_with_config', {pythonPath, projectDir});
-    statusEl.className='ok'; statusEl.textContent='Connected! 已连接，正在打开主窗口…';
+    statusEl.className='ok'; statusEl.textContent='Connected. 已连接，正在打开主窗口...';
     // Show main window and hide setup
     const mainWin = await Window.getByLabel('main');
     if (mainWin) {

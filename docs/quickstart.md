@@ -24,7 +24,7 @@ export ZA_LLM_API_KEY=sk-ant-xxx
 export ZA_LLM_MODEL=claude-sonnet-4-6
 ```
 
-或创建 YAML 配置文件 `~/.zero_agent/config.yaml`：
+或创建项目根目录的 YAML 配置文件 `config.yaml`：
 
 ```yaml
 default_backend: default
@@ -41,7 +41,7 @@ llm_backends:
 ### 交互模式
 
 ```bash
-zero-agent -c ~/.zero_agent/config.yaml
+zero-agent
 ```
 
 输入任务描述即可开始：

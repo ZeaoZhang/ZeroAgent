@@ -1,8 +1,9 @@
 """Agent 配置系统.
 
+默认配置优先读取项目根目录的 config.yaml；ZA_CONFIG_PATH 仅作为显式覆盖。
 支持三种配置来源（优先级从高到低）:
     1. 代码直接构造 AgentConfig(...)
-    2. YAML 文件 → AgentConfig.from_yaml(path)
+    2. ZA_CONFIG_PATH 或项目 config.yaml → AgentConfig.from_yaml(path)
     3. 环境变量 → AgentConfig.from_env()
 
 LLMBackendConfig: 单个 LLM 后端的连接和参数配置.
@@ -18,6 +19,35 @@ from typing import Optional
 
 # 配置文件 mtime 缓存，用于热加载检测
 _config_mtime: dict[str, int] = {}
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def project_root() -> Path:
+    """Return the ZeroAgent project root for project-local defaults."""
+    return PROJECT_ROOT
+
+
+def default_config_path() -> Path:
+    """Return the default config path, preferring project-local config.yaml.
+
+    ZA_CONFIG_PATH remains an explicit override for temporary test/dev runs.
+    """
+    env_path = os.environ.get("ZA_CONFIG_PATH")
+    if env_path:
+        return Path(env_path).expanduser()
+    return PROJECT_ROOT / "config.yaml"
+
+
+def load_default_config() -> "AgentConfig":
+    """Load the default config from project config.yaml, then env fallback."""
+    path = default_config_path()
+    if path.is_file():
+        config = AgentConfig.from_yaml(path)
+    else:
+        config = AgentConfig.from_env()
+    config._source_path = str(path)  # type: ignore[attr-defined]
+    return config
 
 
 @dataclass

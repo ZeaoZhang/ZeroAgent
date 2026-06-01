@@ -89,7 +89,7 @@ export ZA_WORKSPACE_DIR=./workspace
 export ZA_LANG=auto
 ```
 
-或创建 YAML 配置文件，例如 `~/.zero_agent/config.yaml`:
+或创建项目根目录的 YAML 配置文件 `config.yaml`:
 
 ```yaml
 default_backend: default
@@ -125,14 +125,14 @@ llm_backends:
     model: gpt-4o
 ```
 
-> 不要把真实 API Key 提交到 Git。建议使用环境变量或本机 `~/.zero_agent/config.yaml`。
+> 不要把真实 API Key 提交到 Git。`config.yaml` 已加入 `.gitignore`，默认作为本机项目配置使用。
 
 ## 快速开始
 
 交互式 REPL:
 
 ```bash
-zero-agent -c ~/.zero_agent/config.yaml
+zero-agent
 ```
 
 一次性任务:
@@ -145,7 +145,6 @@ zero-agent -i "列出当前目录下的文件"
 
 ```bash
 zero-agent \
-  -c ~/.zero_agent/config.yaml \
   -m claude-sonnet-4-6 \
   --workspace ./workspace \
   --max-turns 50 \
@@ -163,7 +162,7 @@ zero-agent --task tasks/demo
 Reflect 模式:
 
 ```bash
-zero-agent -c ~/.zero_agent/config.yaml --reflect path/to/reflect_module.py
+zero-agent --reflect path/to/reflect_module.py
 ```
 
 Streamlit UI:

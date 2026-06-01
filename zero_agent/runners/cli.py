@@ -13,7 +13,7 @@ import sys
 from typing import Optional
 
 from zero_agent.core.agent import ZeroAgent
-from zero_agent.core.config import AgentConfig
+from zero_agent.core.config import AgentConfig, default_config_path, load_default_config
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -33,8 +33,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     agent.handler.max_turns = agent.config.max_turns
 
     # 记录配置路径以支持热重载
-    if args.config:
-        agent.set_config_path(args.config)
+    agent.set_config_path(getattr(config, "_source_path", None))
 
     if args.reflect:
         # Reflect 反射模式
@@ -123,10 +122,11 @@ def _load_config(args: argparse.Namespace) -> AgentConfig:
     Returns:
         AgentConfig 实例.
     """
+    config_path = args.config or str(default_config_path())
     if args.config:
-        config = AgentConfig.from_yaml(args.config)
+        config = AgentConfig.from_yaml(config_path)
     else:
-        config = AgentConfig.from_env()
+        config = load_default_config()
 
     from zero_agent.bots.shared.continue_cmd import set_sessions_dir
     set_sessions_dir(os.path.abspath(config.sessions_dir))
@@ -144,6 +144,7 @@ def _load_config(args: argparse.Namespace) -> AgentConfig:
     elif args.quiet:
         config.verbose = False
 
+    config._source_path = config_path  # type: ignore[attr-defined]
     return config
 
 

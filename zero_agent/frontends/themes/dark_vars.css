@@ -1,23 +1,23 @@
 /* ZeroAgent Dark Mode CSS Variables — true dark, not warm brown */
 :root {
-    --za-primary: #D4A27F;
-    --za-primary-hover: #E0B494;
-    --za-bg: #0d0d0d;
-    --za-bg-secondary: #1a1a1a;
-    --za-code-bg: #141414;
-    --za-text: #e4e4e4;
-    --za-text-secondary: #999999;
-    --za-border: #2a2a2a;
-    --za-sidebar-bg: #111111;
-    --za-accent: #E09070;
-    --za-success: #6BAE6F;
-    --za-warning: #D4A05A;
-    --za-error: #D46A6A;
-    --za-info: #6A8A9A;
+    --za-primary: #D7FF73;
+    --za-primary-hover: #E7FF9B;
+    --za-bg: #090A08;
+    --za-bg-secondary: #161914;
+    --za-code-bg: #070807;
+    --za-text: #F4F1E8;
+    --za-text-secondary: #C1BDAA;
+    --za-border: #2E3429;
+    --za-sidebar-bg: #0D0F0C;
+    --za-accent: #D66B2C;
+    --za-success: #A7D95C;
+    --za-warning: #D7A44C;
+    --za-error: #F07C73;
+    --za-info: #9DBB86;
     --za-font: 'Source Sans Pro', -apple-system, BlinkMacSystemFont, "Segoe UI",
                "Helvetica Neue", Roboto, "Noto Sans SC", "Microsoft YaHei", sans-serif;
     --za-mono: 'Source Code Pro', "SF Mono", "Fira Code", "Cascadia Code",
               "JetBrains Mono", "Noto Sans Mono SC", monospace;
-    --za-surface: #141414;
+    --za-surface: #10120F;
     --za-shadow: rgba(0, 0, 0, 0.4);
 }

@@ -1,19 +1,18 @@
 window.process = window.process || { platform: navigator.platform.toLowerCase().includes('mac') ? 'darwin' : 'win32' };
-// GenericAgent Desktop — Renderer Logic
+// ZeroAgent Desktop renderer logic.
 // Handles UI state, sessions, streaming, slash commands.
 
 'use strict';
 
 // ─── State ────────────────────────────────────────────────────────────────
 const state = {
-  sessions: new Map(),      // localSessionId -> { id, bridgeSessionId, title, messages: [], cwd, config, diagnostics }
+  sessions: new Map(),
   activeId: null,
   bridgeReady: false,
-  defaultConfig: { theme: 'auto', llmNo: 0, gaRoot: '' },
+  defaultConfig: { theme: 'dark', llmNo: 0, gaRoot: '' },
   modelProfiles: [],
   restartingBridge: false,
   bridgeNoticeMessage: null,
-  mykeyReady: true,
   runtimeBySessionId: new Map(),
 };
 
@@ -167,7 +166,7 @@ function detectStructuredKind(line) {
   const m = trimmed.match(/^(TOOL_RECALL|TOOL_REQUEST|TOOL_RESPONSE|COWORK|TUNR|TURN|ACTION|OBSERVATION|THOUGHT|TOOL)[\s:_-]*(.*)$/i);
   if (m) return { kind: m[1].toUpperCase(), rest: (m[2] || '').trim() };
 
-  // GenericAgent's ACP bridge currently streams tool calls/results as plain
+  // ZeroAgent currently streams tool calls/results as plain
   // assistant text, not as ACP `tool_call` notifications. Recognize the real
   // XML-ish markers so streamed code_run/file_read/etc. blocks are folded.
   if (/^<function_calls\b[^>]*>/i.test(trimmed) || /^<invoke\b[^>]*\bname=["'][^"']+["'][^>]*>/i.test(trimmed)) {
@@ -649,12 +648,17 @@ function setActiveSession(id) {
   state.activeId = id;
   const sess = state.sessions.get(id);
   if (!sess) return;
+  if (sess.bridgeSessionId && state.bridgeReady) {
+    window.ga.rpc('session/activate', { sessionId: sess.bridgeSessionId }).catch((err) => {
+      addDiagnostic('warn', 'Failed to activate bridge session', err);
+    });
+  }
   sessionTitleEl.textContent = sess.title;
   renderMessages();
   renderSessionList();
   renderDiagnostics();
   const runtime = getSessionRuntime(sess);
-  setBusy(runtime.busy, runtime.busy ? 'Agent is responding…' : null, sess);
+  setBusy(runtime.busy, runtime.busy ? 'Agent is responding...' : null, sess);
   // When switching to a session that is still running, ensure the live draft
   // is rendered immediately and polling is active (it may have been started
   // earlier but its render calls were no-ops because the session wasn't active).
@@ -672,7 +676,7 @@ function setActiveSession(id) {
       // Do an immediate one-shot poll to refresh the view right now.
       (async () => {
         try {
-          const res = await GaBridge.pollSession(sess.bridgeSessionId || sess.id, runtime.lastPolledMessageId || 0);
+          const res = await window.ga.pollSession(sess.bridgeSessionId || sess.id, runtime.lastPolledMessageId || 0);
           if (res?.error) return;
           const result = res.result || res;
           for (const msg of (result.messages || [])) upsertPolledMessage(sess, msg, { partial: false });
@@ -697,33 +701,6 @@ function renderSessionList() {
     item.setAttribute('aria-selected', sess.id === state.activeId ? 'true' : 'false');
     item.setAttribute('data-session-id', sess.id);
     item.title = sess.title;
-    // ─── Drag-and-drop reorder ───
-    item.draggable = true;
-    item.addEventListener('dragstart', (e) => {
-      e.dataTransfer.setData('text/plain', sess.id);
-      e.dataTransfer.effectAllowed = 'move';
-      item.classList.add('dragging');
-    });
-    item.addEventListener('dragend', () => {
-      item.classList.remove('dragging');
-      sessionListEl.querySelectorAll('.session-tab.drag-over').forEach(el => el.classList.remove('drag-over'));
-    });
-    item.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      item.classList.add('drag-over');
-    });
-    item.addEventListener('dragleave', () => {
-      item.classList.remove('drag-over');
-    });
-    item.addEventListener('drop', (e) => {
-      e.preventDefault();
-      item.classList.remove('drag-over');
-      const draggedId = e.dataTransfer.getData('text/plain');
-      if (draggedId && draggedId !== sess.id) {
-        reorderSession(draggedId, sess.id);
-      }
-    });
     // Per-tab status dot
     const dot = document.createElement('span');
     dot.className = 'tab-dot';
@@ -749,18 +726,6 @@ function renderSessionList() {
     item.addEventListener('click', () => setActiveSession(sess.id));
     sessionListEl.insertBefore(item, newBtn);
   }
-}
-
-// ─── Tab drag reorder helper ─────────────────────────────────────────────────
-function reorderSession(draggedId, targetId) {
-  const entries = [...state.sessions.entries()];
-  const fromIdx = entries.findIndex(([id]) => id === draggedId);
-  const toIdx = entries.findIndex(([id]) => id === targetId);
-  if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
-  const [moved] = entries.splice(fromIdx, 1);
-  entries.splice(toIdx, 0, moved);
-  state.sessions = new Map(entries);
-  renderSessionList();
 }
 
 function closeSession(id) {
@@ -794,7 +759,7 @@ async function newSession() {
   // Don't mark previousSess as busy - it's not doing anything
   // Just show status text without changing any tab dot
   const statusEl = $('status');
-  if (statusEl) statusEl.textContent = 'Creating session…';
+  if (statusEl) statusEl.textContent = 'Creating session...';
   let createdSess = null;
   try {
     const cwd = await getCwd();
@@ -813,7 +778,7 @@ async function newSession() {
 }
 
 async function getCwd() {
-  // Use GA root as default cwd
+  // Use the ZeroAgent root as default cwd.
   const status = await window.ga.checkStatus();
   return status.gaRoot;
 }
@@ -848,8 +813,22 @@ function renderMessages() {
     messagesEl.classList.add('empty');
     messagesEl.innerHTML = `
       <div class="empty-state">
-        <div class="empty-title">New task</div>
-        <div class="empty-sub">Task me anything. Type <code>/help</code> for commands.</div>
+        <div class="empty-panel empty-copy">
+          <div class="empty-brand">ZeroAgent</div>
+          <div class="empty-title">Ready</div>
+          <div class="empty-sub">No active run</div>
+        </div>
+        <div class="empty-panel empty-visual" aria-hidden="true">
+          <div class="empty-scanline"></div>
+          <div class="empty-frame">
+            <span></span><span></span><span></span>
+          </div>
+        </div>
+        <div class="empty-panel empty-status" aria-hidden="true">
+          <div class="empty-status-row"><span></span><strong></strong></div>
+          <div class="empty-status-row"><span></span><strong></strong></div>
+          <div class="empty-status-row"><span></span><strong></strong></div>
+        </div>
       </div>`;
     state._prevRenderedId = state.activeId;
     return;
@@ -901,7 +880,7 @@ function renderMessage(msg, append = true) {
         if (dataUrl) {
           return `<img src="${dataUrl}" class="user-msg-thumb" />`;
         }
-        return `<span class="user-msg-thumb-placeholder" title="Image expired">🖼</span>`;
+        return '<span class="user-msg-thumb-placeholder" title="Image expired">IMG</span>';
       }).join('') + '</div>';
     }
     wrap.innerHTML = `<div class="bubble">${imagesHtml}${escapeHtml(msg.content)}</div>`;
@@ -999,7 +978,7 @@ function handleNotification(msg) {
     if ((msg.state === 'running' || msg.status === 'running') && !runtime.polling) {
       runtime.busy = true;
       runtime.forcePollOnce = true;
-      setBusy(true, 'Thinking…', sess);
+      setBusy(true, 'Thinking...', sess);
       pollSessionMessages(sess);
     } else if (msg.state === 'idle' || msg.state === 'error' || msg.status === 'idle') {
       // Session finished in background — do a final poll to pick up remaining messages
@@ -1027,7 +1006,7 @@ function handleNotification(msg) {
   } else if (kind === 'task_started') {
     hideError();
     startTaskTimer(sess);
-    setBusy(true, 'Thinking…', sess);
+    setBusy(true, 'Thinking...', sess);
   } else if (kind === 'task_completed' || kind === 'cancelled') {
     finalizeAssistantReply(sess);
     setBusy(false, null, sess);
@@ -1392,7 +1371,7 @@ async function pollSessionMessages(sess) {
       for (const msg of (result.messages || [])) upsertPolledMessage(sess, msg, { partial: false });
       if (result.partial) upsertPolledMessage(sess, result.partial, { partial: true });
       const busy = result.status === 'running' || !!result.partial;
-      setBusy(busy, busy ? 'Thinking…' : null, sess);
+      setBusy(busy, busy ? 'Thinking...' : null, sess);
       if (!busy) {
         finalizeAssistantReply(sess);
         break;
@@ -1432,13 +1411,13 @@ async function sendPrompt(text, images = []) {
   renderMessage(localUserMsg);
   startTaskTimer(sess);
   if (sess.untitled || isUntitledSessionTitle(sess.title)) {
-    sess.title = text.trim().slice(0, 40) + (text.trim().length > 40 ? '…' : '');
+    sess.title = text.trim().slice(0, 40) + (text.trim().length > 40 ? '...' : '');
     sess.untitled = false;
     sessionTitleEl.textContent = sess.title;
     renderSessionList();
   }
 
-  setBusy(true, 'Thinking…', sess);
+  setBusy(true, 'Thinking...', sess);
   try {
     const res = await window.ga.rpc('session/prompt', {
       sessionId: await ensureBridgeSession(sess),
@@ -1513,7 +1492,7 @@ async function handleSlash(cmd) {
         cfg.theme = arg;
         applyTheme();
         await window.ga.saveConfig(cfg);
-        showSystem(`Theme → ${arg}`);
+        showSystem(`Theme: ${arg}`);
       } else {
         showSystem('Usage: /theme light|dark|auto');
       }
@@ -1523,7 +1502,7 @@ async function handleSlash(cmd) {
         const status = await window.ga.checkStatus();
         showSystem(`cwd: ${sess?.cwd || status.gaRoot}`);
       } else {
-        showSystem(`Creating new session in ${arg}…`);
+        showSystem(`Creating new session in ${arg}...`);
         // Need a new session for different cwd
         const res = await window.ga.rpc('session/new', { cwd: arg, mcp_servers: [] });
         if (res.error) showSystem('Failed: ' + (res.error.message || res.error));
@@ -1591,8 +1570,8 @@ function setBusy(busy, label, sess = state.sessions.get(state.activeId)) {
     updateTabDot(sess.id, dotKind);
   }
   if (!isActiveSession(sess)) return;
-  if (busy) setStatus('busy', label || 'Working…');
-  else setStatus(state.bridgeReady ? 'ok' : 'warn', state.bridgeReady ? 'Ready' : 'Starting…');
+  if (busy) setStatus('busy', label || 'Working...');
+  else setStatus(state.bridgeReady ? 'ok' : 'warn', state.bridgeReady ? 'Ready' : 'Starting...');
   renderSendButtonState();
 }
 
@@ -1727,13 +1706,13 @@ async function ensureBridgeSession(sess) {
 
 async function restartBridge(options = {}) {
   const { remapSessions = false } = options;
-  setStatus('warn', 'Restarting…');
+  setStatus('warn', 'Restarting...');
   state.bridgeReady = false;
   state.restartingBridge = true;
   if (remapSessions) {
     for (const sess of state.sessions.values()) sess.bridgeSessionId = null;
   }
-  state.bridgeNoticeMessage = showSystem('Bridge restarting…');
+  state.bridgeNoticeMessage = showSystem('Bridge restarting...');
   await window.ga.startBridge(getActiveConfig().llmNo || 0);
   window.setTimeout(() => {
     if (state.restartingBridge && !state.bridgeReady && !getActiveSessionRuntime()?.busy) {
@@ -1749,7 +1728,7 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
   if (state.bridgeReady) return; // already marked ready, prevent double-fire
   state.bridgeReady = true;
   state.restartingBridge = false;
-  if (getActiveSessionRuntime()?.busy) setStatus('busy', 'Agent is responding…');
+  if (getActiveSessionRuntime()?.busy) setStatus('busy', 'Agent is responding...');
   else setStatus('ok', 'Ready');
   updateBridgeNotice(noticeText);
   hideError();
@@ -1781,8 +1760,9 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
             runtime.lastPolledMessageId = maxId;
           }
         }
-        // Activate the first session
-        const firstLocalId = [...state.sessions.keys()][0];
+        const activeBridgeId = listRes?.activeSessionId || existingSessions[0]?.id || existingSessions[0]?.sessionId;
+        const preferred = [...state.sessions.values()].find((sess) => sess.bridgeSessionId === activeBridgeId);
+        const firstLocalId = preferred?.id || [...state.sessions.keys()][0];
         if (firstLocalId) setActiveSession(firstLocalId);
       } else {
         await newSession();
@@ -1813,9 +1793,9 @@ window.ga.onBridgeError((err) => {
   state.bridgeReady = false;
   state.restartingBridge = false;
 
-  if (err.type === 'no-mykey') {
-    showError(err.message, 'Setup', async () => {
-      await window.ga.openMykeyTemplate();
+  if (err.type === 'no-config' || err.type === 'no-mykey') {
+    showError(err.message, 'Config', async () => {
+      await (window.ga.openConfigDir || window.ga.openMykeyTemplate)();
     }, { skipDiagnostic: true });
   } else if (err.type === 'no-python') {
     showError(err.message, 'Settings', openSettings, { skipDiagnostic: true });
@@ -1827,7 +1807,7 @@ window.ga.onBridgeError((err) => {
 window.ga.onBridgeClosed((info) => {
   addDiagnostic('warn', 'Bridge closed', info);
   if (state.restartingBridge) {
-    setStatus('warn', 'Restarting…');
+    setStatus('warn', 'Restarting...');
     return;
   }
   state.bridgeReady = false;
@@ -1957,7 +1937,7 @@ $('settings-btn').addEventListener('click', openSettings);
 $('close-settings').addEventListener('click', closeSettings);
 $('cancel-settings').addEventListener('click', closeSettings);
 $('save-settings').addEventListener('click', saveSettings);
-$('open-mykey').addEventListener('click', () => openConfigFile(window.ga.openMykey, 'mykey.py'));
+$('open-mykey').addEventListener('click', () => openConfigFile(window.ga.openConfig, 'config.yaml'));
 $('error-dismiss').addEventListener('click', hideError);
 
 settingsModal.querySelector('.modal-backdrop').addEventListener('click', closeSettings);

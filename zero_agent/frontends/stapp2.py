@@ -168,7 +168,7 @@ def init():
     za = ZeroAgent()
     runner = AgentRunner(za)
     if runner.llmclient is None:
-        st.error("⚠️ 未配置任何可用的 LLM 接口，请检查 ~/.zero_agent/config.yaml 或环境变量后重启。")
+        st.error("未配置任何可用的 LLM 接口，请检查项目根目录 config.yaml 或环境变量后重启。")
         st.stop()
     return runner
 
@@ -430,4 +430,3 @@ if prompt := st.chat_input("请输入指令", disabled=st.session_state.streamin
     st.session_state.messages.append({"role": "user", "content": prompt, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
     start_agent_task(prompt)
     st.rerun()
-

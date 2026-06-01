@@ -1,6 +1,11 @@
 """Tests for core/config.py — YAML config parsing and runtime effects."""
 
-from zero_agent.core.config import AgentConfig, LLMBackendConfig
+from zero_agent.core.config import (
+    AgentConfig,
+    LLMBackendConfig,
+    default_config_path,
+    load_default_config,
+)
 from zero_agent.llm.failover import AutoFailoverSession
 from zero_agent.llm.factory import LLMFactory
 
@@ -76,3 +81,36 @@ def test_factory_applies_yaml_log_dir_to_sessions(tmp_path) -> None:
     assert primary.primary._log_dir == log_dir
     assert primary.backups[0]._log_dir == log_dir
     assert sessions["backup"]._log_dir == log_dir
+
+
+def test_default_config_path_uses_project_config(monkeypatch, tmp_path) -> None:
+    """默认配置文件路径应指向项目根目录的 config.yaml."""
+    monkeypatch.delenv("ZA_CONFIG_PATH", raising=False)
+    monkeypatch.setattr("zero_agent.core.config.PROJECT_ROOT", tmp_path)
+
+    assert default_config_path() == tmp_path / "config.yaml"
+
+
+def test_load_default_config_prefers_project_config(monkeypatch, tmp_path) -> None:
+    """未指定 ZA_CONFIG_PATH 时，应优先读取项目根目录 config.yaml."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+default_backend: local
+llm_backends:
+  local:
+    provider: openai
+    api_key: sk-local
+    api_base: https://example.invalid/v1
+    model: local-test
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ZA_CONFIG_PATH", raising=False)
+    monkeypatch.setattr("zero_agent.core.config.PROJECT_ROOT", tmp_path)
+
+    config = load_default_config()
+
+    assert config.default_backend == "local"
+    assert config.llm_backends["local"].model == "local-test"
+    assert getattr(config, "_source_path") == str(config_path)

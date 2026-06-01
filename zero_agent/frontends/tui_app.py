@@ -253,12 +253,9 @@ class ZeroAgentTUI(App):
 
     @staticmethod
     def _load_config() -> AgentConfig:
-        config_path = os.path.join(
-            os.path.expanduser("~"), ".zero_agent", "config.yaml"
-        )
-        if os.path.isfile(config_path):
-            return AgentConfig.from_yaml(config_path)
-        return AgentConfig.from_env()
+        from zero_agent.core.config import load_default_config
+
+        return load_default_config()
 
     # ── Messages ────────────────────────────────────────────
 

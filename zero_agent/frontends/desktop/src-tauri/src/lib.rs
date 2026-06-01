@@ -21,7 +21,7 @@ fn project_root() -> PathBuf {
 }
 
 fn find_bridge_script() -> PathBuf {
-    // exe is at frontends/GenericAgent.exe
+    // exe is at frontends/ZeroAgent.exe
     // bridge is at frontends/desktop_bridge.py
     std::env::current_exe()
         .expect("cannot get exe path")

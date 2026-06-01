@@ -2612,14 +2612,15 @@ def main():
 
     # ── Config loading ───────────────────────────────────
     config: Optional[AgentConfig] = None
-    config_path = os.path.join(os.path.expanduser("~"), ".zero_agent", "config.yaml")
-    if os.path.isfile(config_path):
-        config = AgentConfig.from_yaml(config_path)
-    else:
+    from zero_agent.core.config import default_config_path, load_default_config
+    config_path = str(default_config_path())
+    try:
+        config = load_default_config()
+    except Exception:
         QMessageBox.critical(
             None,
             "未配置 LLM",
-            "未在 ~/.zero_agent/config.yaml 中发现任何可用的 LLM 接口配置，\n程序将在无 LLM 模式下运行。",
+            f"未在项目配置文件中发现任何可用的 LLM 接口配置:\n{config_path}\n程序将在无 LLM 模式下运行。",
         )
         config = AgentConfig()
 

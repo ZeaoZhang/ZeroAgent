@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Generator, List, Optional
 
-from zero_agent.core.config import AgentConfig
+from zero_agent.core.config import AgentConfig, load_default_config
 from zero_agent.core.handler import BaseHandler
 from zero_agent.core.hooks import HookSystem
 from zero_agent.core.loop import AgentLoop
@@ -77,12 +77,12 @@ class ZeroAgent:
         """初始化 ZeroAgent.
 
         Args:
-            config: Agent 配置，None 时从环境变量构建.
+            config: Agent 配置，None 时从项目 config.yaml 或环境变量构建.
             handler: 自定义工具分发器，None 时创建 BaseHandler.
             registry: 自定义工具注册中心，None 时自动加载内置工具.
             hooks: 自定义 HookSystem，None 时创建默认 HookSystem.
         """
-        self.config = config or AgentConfig.from_env()
+        self.config = config or load_default_config()
         self.hooks = hooks or HookSystem()
         self._register_builtin_plugins()
 
@@ -113,7 +113,7 @@ class ZeroAgent:
         self.task_dir: Optional[str] = None
         self._turn_end_hooks: Dict[str, Any] = {}
         self.loop: Optional[AgentLoop] = None
-        self._config_path: Optional[str] = None
+        self._config_path: Optional[str] = getattr(self.config, "_source_path", None)
 
     def set_config_path(self, path: Optional[str]) -> None:
         """设置配置文件的路径，用于热重载检测."""
