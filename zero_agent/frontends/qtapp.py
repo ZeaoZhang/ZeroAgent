@@ -38,6 +38,15 @@ from zero_agent.frontends.themes.qt_colors import (
     build_action_btn_style, build_tab_button_style, build_model_row_style,
     build_send_btn_style, build_stop_btn_style, build_titlebar_btn_style,
 )
+from zero_agent.frontends.ui_contract import (
+    APP_NAME,
+    DEFAULT_SESSION_TITLE,
+    DEFAULT_SESSION_TITLE_ZH,
+    QT_AUTO_DISABLE_LABEL_ZH,
+    QT_AUTO_ENABLE_LABEL_ZH,
+    QT_READY_NOTICE_ZH,
+    QT_UNTITLED_SESSION_ZH,
+)
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from zero_agent.core.agent import ZeroAgent
@@ -1045,7 +1054,7 @@ class _TabButton(QPushButton):
 
 
 def _action_btn(label: str, color: str, icon: QIcon | None = None) -> QPushButton:
-    btn = QPushButton(label)
+    btn = QPushButton("  " + label)
     if icon and not icon.isNull():
         btn.setIcon(icon)
         btn.setIconSize(QSize(16, 16))
@@ -1054,12 +1063,15 @@ def _action_btn(label: str, color: str, icon: QIcon | None = None) -> QPushButto
         QPushButton {{
             background: {C['hover_bg']}; color: {C['text']};
             border: 1px solid {C['border'].name()};
-            border-left: 3px solid {color};
             border-radius: 8px; padding: 0 14px;
-            font-size: 13px; font-weight: 700; text-align: left;
+            font-size: 13px; font-weight: 600; text-align: left;
         }}
-        QPushButton:hover {{ background: {C['hover_bg']}; }}
-        QPushButton:checked {{ color: {color}; background: {C['hover_bg']}; }}
+        QPushButton:hover {{
+            background: {C['hover_bg']};
+            border-color: {color};
+            color: {color};
+        }}
+        QPushButton:checked {{ color: {color}; background: {C['hover_bg']}; border-color: {color}; }}
     """)
     return btn
 
@@ -1075,7 +1087,7 @@ class ChatPanel(QWidget):
 
         # session state
         self._messages: list[dict] = []
-        self._session = {"id": _make_session_id(), "title": "新对话", "messages": []}
+        self._session = {"id": _make_session_id(), "title": DEFAULT_SESSION_TITLE_ZH, "messages": []}
         self._history: list[dict] = _load_history()
         self._pending_files: list[dict] = []  # {'name','type','raw'}
         self._settings_health_checked = False
@@ -1598,7 +1610,7 @@ class ChatPanel(QWidget):
 
         ly.addStretch()
 
-        new_btn = QPushButton("新对话")
+        new_btn = QPushButton(DEFAULT_SESSION_TITLE_ZH)
         new_btn.setIcon(_svg_icon("plus", _SVG_PLUS, C["svg_color"]))
         new_btn.setIconSize(QSize(12, 12))
         new_btn.setFixedHeight(27)
@@ -1928,7 +1940,7 @@ class ChatPanel(QWidget):
         sep.setStyleSheet(f"color: {C['text']}; font-weight: 600; font-size: 13px;")
         ly.addWidget(sep)
 
-        self._auto_btn = _action_btn(f"开启自主行动 (idle > {AUTO_IDLE_THRESHOLD // 60} min 自动触发)", "#f59e0b",
+        self._auto_btn = _action_btn(QT_AUTO_ENABLE_LABEL_ZH.format(minutes=AUTO_IDLE_THRESHOLD // 60), "#f59e0b",
                                       _svg_icon("bolt", _SVG_BOLT))
         self._auto_btn.setCheckable(True)
         self._auto_btn.clicked.connect(self._do_toggle_auto)
@@ -2184,7 +2196,7 @@ class ChatPanel(QWidget):
         self._refresh_chips()
 
         # Update session title
-        if self._session["title"] == "新对话" and prompt:
+        if self._session["title"] in (DEFAULT_SESSION_TITLE_ZH, DEFAULT_SESSION_TITLE) and prompt:
             self._session["title"] = prompt[:20] + ("..." if len(prompt) > 20 else "")
 
         from datetime import datetime
@@ -2248,7 +2260,7 @@ class ChatPanel(QWidget):
                 self._add_system_notice(f"✅ 已恢复 {count} 轮对话\n来源: {fname}")
         elif op == "/new":
             self._do_clear()
-            self._add_system_notice("✅ 已开启新对话")
+            self._add_system_notice(QT_READY_NOTICE_ZH)
         else:
             self._add_system_notice(f"未知命令: {cmd}\n{HELP_TEXT}")
 
@@ -2408,7 +2420,7 @@ class ChatPanel(QWidget):
         self._hist_list.clear()
         for s in reversed(self._history[-20:]):
             n = len(s.get("messages", []))
-            item = QListWidgetItem(f"  {s.get('title','未命名')}   ({n} 条)")
+            item = QListWidgetItem(f"  {s.get('title', QT_UNTITLED_SESSION_ZH)}   ({n} 条)")
             item.setData(Qt.UserRole, s)
             self._hist_list.addItem(item)
 
@@ -2532,7 +2544,7 @@ class ChatPanel(QWidget):
     def _auto_save(self):
         if not self._messages:
             return
-        if self._session.get("title") == "新对话":
+        if self._session.get("title") in (DEFAULT_SESSION_TITLE_ZH, DEFAULT_SESSION_TITLE):
             first_user = next(
                 (m["content"] for m in self._messages if m["role"] == "user"), ""
             )
@@ -2556,7 +2568,7 @@ class ChatPanel(QWidget):
 
     def _do_clear(self):
         self._messages.clear()
-        self._session = {"id": _make_session_id(), "title": "新对话", "messages": []}
+        self._session = {"id": _make_session_id(), "title": DEFAULT_SESSION_TITLE_ZH, "messages": []}
         self._rebuild_messages()
         self._switch_tab(0)
         self._update_token_usage()
@@ -2569,7 +2581,7 @@ class ChatPanel(QWidget):
     def _do_toggle_auto(self):
         self.autonomous_enabled = not self.autonomous_enabled
         self._auto_btn.setChecked(self.autonomous_enabled)
-        lbl = "暂停自主行动" if self.autonomous_enabled else "开启自主行动 (idle > 30 min 自动触发)"
+        lbl = QT_AUTO_DISABLE_LABEL_ZH if self.autonomous_enabled else QT_AUTO_ENABLE_LABEL_ZH.format(minutes=AUTO_IDLE_THRESHOLD // 60)
         self._auto_btn.setText(lbl)
 
     def _do_trigger_auto(self):
@@ -2598,7 +2610,7 @@ def main():
     )
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    app.setApplicationName("ZeroAgent")
+    app.setApplicationName(APP_NAME)
 
     # Font
     font = QFont()
@@ -2638,7 +2650,7 @@ def main():
     panel.show()
 
     scr = QApplication.primaryScreen().availableGeometry()
-    print(f"[ZeroAgent] 启动成功")
+    print(f"[{APP_NAME}] 启动成功")
     print(f"  屏幕分辨率: {scr.width()}x{scr.height()}")
     print(f"  悬浮按钮: ({button.x()}, {button.y()})")
     print(f"  聊天面板: ({panel.x()}, {panel.y()})")

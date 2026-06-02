@@ -1,5 +1,30 @@
 window.process = window.process || { platform: navigator.platform.toLowerCase().includes('mac') ? 'darwin' : 'win32' };
 // ZeroAgent Desktop renderer logic.
+
+const UI = Object.freeze({
+  APP_NAME: 'ZeroAgent',
+  DEFAULT_SESSION_TITLE: 'New chat',
+  CHAT_PLACEHOLDER: 'Ask ZeroAgent to work on something',
+  WELCOME_TITLE: 'Ready',
+  WELCOME_SUBTITLE: 'No active run',
+});
+
+const COMMANDS = Object.freeze([
+  { command: '/help', description: 'Show available commands' },
+  { command: '/new', description: 'Start a new session' },
+  { command: '/clear', description: 'Clear current session display' },
+  { command: '/stop', description: 'Cancel the current request' },
+  { command: '/settings', description: 'Open model and config settings' },
+  { command: '/theme light', description: 'Switch to light theme' },
+  { command: '/theme dark', description: 'Switch to dark theme' },
+  { command: '/theme auto', description: 'Follow system theme' },
+  { command: '/cwd ', description: 'Create a session in a directory' },
+]);
+
+for (const el of document.querySelectorAll('[data-ui="app-name"]')) el.textContent = UI.APP_NAME;
+for (const el of document.querySelectorAll('[data-ui="welcome-title"]')) el.textContent = UI.WELCOME_TITLE;
+for (const el of document.querySelectorAll('[data-ui="welcome-subtitle"]')) el.textContent = UI.WELCOME_SUBTITLE;
+for (const el of document.querySelectorAll('[data-ui="chat-placeholder"]')) el.placeholder = UI.CHAT_PLACEHOLDER;
 // Handles UI state, sessions, streaming, slash commands.
 
 'use strict';
@@ -35,6 +60,11 @@ const sessionListEl = $('session-list');
 const sessionTitleEl = $('session-title');
 const statusBadge = $('status-badge');
 const statusText = $('status-text');
+const sidebarActiveTitleEl = $('sidebar-active-title');
+const sidebarStatusEl = $('sidebar-status');
+const sidebarSessionListEl = $('sidebar-session-list');
+const sidebarModelEl = $('sidebar-model');
+const commandPaletteEl = $('command-palette');
 const settingsModal = $('settings-modal');
 const errorBanner = $('error-banner');
 const diagnosticsPanel = $('diagnostics-panel');
@@ -625,13 +655,24 @@ function isUntitledSessionTitle(title) {
   return !title || /^new\s+chat$/i.test(String(title).trim());
 }
 
-function createLocalSession(id, title, bridgeSessionId = id) {
+function coerceTimestamp(value, fallback) {
+  const num = Number(value);
+  return Number.isFinite(num) && num > 0 ? num : fallback;
+}
+
+function createLocalSession(id, title, bridgeSessionId = id, metadata = {}) {
+  const now = Date.now() / 1000;
   const sess = {
-    id, bridgeSessionId, title: title || 'New chat', messages: [], cwd: null,
+    id, bridgeSessionId, title: title || UI.DEFAULT_SESSION_TITLE, messages: [], cwd: null,
     untitled: isUntitledSessionTitle(title),
     config: { ...state.defaultConfig },
     diagnostics: [],
+    createdAt: coerceTimestamp(metadata.createdAt ?? metadata.created_at, now),
+    updatedAt: coerceTimestamp(metadata.updatedAt ?? metadata.updated_at, now),
+    status: metadata.status || 'idle',
+    msgSeq: Number(metadata.msgSeq || metadata.msg_seq || 0),
   };
+  if (Array.isArray(metadata.messages)) sess.messages = metadata.messages;
   getSessionRuntime(sess);
   // Keep freshly-created chats visually quiet: the empty state is enough guidance.
   state.sessions.set(id, sess);
@@ -654,6 +695,7 @@ function setActiveSession(id) {
     });
   }
   sessionTitleEl.textContent = sess.title;
+  if (sidebarActiveTitleEl) sidebarActiveTitleEl.textContent = sess.title;
   renderMessages();
   renderSessionList();
   renderDiagnostics();
@@ -725,6 +767,109 @@ function renderSessionList() {
     item.appendChild(closeBtn);
     item.addEventListener('click', () => setActiveSession(sess.id));
     sessionListEl.insertBefore(item, newBtn);
+
+  }
+  renderSidebarSessions();
+  const active = state.sessions.get(state.activeId);
+  if (active && sidebarActiveTitleEl) sidebarActiveTitleEl.textContent = active.title;
+}
+
+function hasUserMessages(sess) {
+  return !!sess && Array.isArray(sess.messages) && sess.messages.some((msg) => msg.role === 'user');
+}
+
+function sessionUpdatedAt(sess) {
+  return coerceTimestamp(sess?.updatedAt ?? sess?.updated_at, coerceTimestamp(sess?.createdAt ?? sess?.created_at, Date.now() / 1000));
+}
+
+function sessionGroupLabel(sess, now = Date.now() / 1000) {
+  const updated = sessionUpdatedAt(sess);
+  const dayAgo = now - 86400;
+  const weekAgo = now - 604800;
+  if (updated >= dayAgo) return 'Today';
+  if (updated >= dayAgo - 86400) return 'Yesterday';
+  if (updated >= weekAgo) return 'This Week';
+  return 'Earlier';
+}
+
+function createSidebarSessionButton(sess) {
+  const item = document.createElement('button');
+  item.type = 'button';
+  item.className = 'sidebar-session-item' + (sess.id === state.activeId ? ' active' : '');
+  item.setAttribute('data-session-id', sess.id);
+  item.title = sess.title;
+  item.disabled = sess.id === state.activeId;
+  const runtime = getSessionRuntime(sess);
+  const dot = document.createElement('span');
+  dot.className = 'tab-dot';
+  if (runtime && runtime.busy) dot.classList.add('busy');
+  const label = document.createElement('span');
+  label.className = 'sidebar-session-label';
+  label.textContent = sess.title;
+  item.appendChild(dot);
+  item.appendChild(label);
+  item.addEventListener('click', () => setActiveSession(sess.id));
+  return item;
+}
+
+function renderSidebarSessions() {
+  if (!sidebarSessionListEl) return;
+  sidebarSessionListEl.textContent = '';
+  const sessions = [...state.sessions.values()]
+    .filter(hasUserMessages)
+    .sort((a, b) => sessionUpdatedAt(b) - sessionUpdatedAt(a));
+  if (!sessions.length) {
+    const empty = document.createElement('div');
+    empty.className = 'sidebar-empty';
+    empty.textContent = 'No saved sessions yet. Start a conversation first.';
+    sidebarSessionListEl.appendChild(empty);
+    return;
+  }
+
+  const groups = new Map([
+    ['Today', []],
+    ['Yesterday', []],
+    ['This Week', []],
+    ['Earlier', []],
+  ]);
+  const now = Date.now() / 1000;
+  for (const sess of sessions) groups.get(sessionGroupLabel(sess, now)).push(sess);
+
+  for (const [label, group] of groups.entries()) {
+    if (!group.length) continue;
+    const details = document.createElement('details');
+    details.className = 'sidebar-session-group';
+    details.open = label === 'Today';
+    const summary = document.createElement('summary');
+    summary.textContent = `${label} (${group.length})`;
+    details.appendChild(summary);
+    const list = document.createElement('div');
+    list.className = 'sidebar-group-list';
+    for (const sess of group.slice(0, 30)) {
+      list.appendChild(createSidebarSessionButton(sess));
+    }
+    details.appendChild(list);
+    sidebarSessionListEl.appendChild(details);
+  }
+}
+
+function touchSession(sess, timestamp = Date.now() / 1000) {
+  if (!sess) return;
+  sess.updatedAt = coerceTimestamp(timestamp, Date.now() / 1000);
+}
+
+function syncBridgeSessionMeta(sess, meta = {}) {
+  if (!sess) return;
+  if (meta.title) {
+    sess.title = meta.title;
+    sess.untitled = isUntitledSessionTitle(meta.title);
+  }
+  sess.status = meta.status || sess.status;
+  sess.msgSeq = Number(meta.msgSeq || meta.msg_seq || sess.msgSeq || 0);
+  touchSession(sess, meta.updatedAt ?? meta.updated_at);
+  if (isActiveSession(sess)) {
+    sessionTitleEl.textContent = sess.title;
+    if (sidebarActiveTitleEl) sidebarActiveTitleEl.textContent = sess.title;
   }
 }
 
@@ -767,7 +912,7 @@ async function newSession() {
     if (res.error) throw new Error(typeof res.error === 'string' ? res.error : (res.error.message || JSON.stringify(res.error)));
     const bridgeSessionId = res.sessionId;
     const localSessionId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    createdSess = createLocalSession(localSessionId, 'New chat', bridgeSessionId);
+    createdSess = createLocalSession(localSessionId, UI.DEFAULT_SESSION_TITLE, bridgeSessionId);
     createdSess.cwd = cwd;
     setActiveSession(localSessionId);
   } catch (e) {
@@ -814,9 +959,9 @@ function renderMessages() {
     messagesEl.innerHTML = `
       <div class="empty-state">
         <div class="empty-panel empty-copy">
-          <div class="empty-brand">ZeroAgent</div>
-          <div class="empty-title">Ready</div>
-          <div class="empty-sub">No active run</div>
+          <div class="empty-brand">${UI.APP_NAME}</div>
+          <div class="empty-title">${UI.WELCOME_TITLE}</div>
+          <div class="empty-sub">${UI.WELCOME_SUBTITLE}</div>
         </div>
         <div class="empty-panel empty-visual" aria-hidden="true">
           <div class="empty-scanline"></div>
@@ -974,6 +1119,7 @@ function handleNotification(msg) {
   if (msg.type === 'session-state') {
     const sess = findSessionByBridgeId(msg.sessionId);
     if (!sess) return;
+    syncBridgeSessionMeta(sess, msg);
     const runtime = getSessionRuntime(sess);
     if ((msg.state === 'running' || msg.status === 'running') && !runtime.polling) {
       runtime.busy = true;
@@ -1354,7 +1500,9 @@ function upsertPolledMessage(sess, raw, { partial = false } = {}) {
     return;
   }
   sess.messages.push(msg);
+  touchSession(sess, msg.ts);
   if (isActiveSession(sess)) renderMessage(msg);
+  renderSidebarSessions();
 }
 
 async function pollSessionMessages(sess) {
@@ -1408,13 +1556,17 @@ async function sendPrompt(text, images = []) {
 
   const localUserMsg = { role: 'user', content: text, image_ids: imageIds };
   sess.messages.push(localUserMsg);
+  touchSession(sess);
   renderMessage(localUserMsg);
   startTaskTimer(sess);
   if (sess.untitled || isUntitledSessionTitle(sess.title)) {
     sess.title = text.trim().slice(0, 40) + (text.trim().length > 40 ? '...' : '');
     sess.untitled = false;
     sessionTitleEl.textContent = sess.title;
+    if (sidebarActiveTitleEl) sidebarActiveTitleEl.textContent = sess.title;
     renderSessionList();
+  } else {
+    renderSidebarSessions();
   }
 
   setBusy(true, 'Thinking...', sess);
@@ -1436,7 +1588,9 @@ async function sendPrompt(text, images = []) {
     pollSessionMessages(sess);
   } catch (e) {
     sess.messages.push({ role: 'error', content: e.message || String(e) });
+    touchSession(sess);
     if (isActiveSession(sess)) renderMessage({ role: 'error', content: e.message || String(e) });
+    renderSidebarSessions();
     setBusy(false, null, sess);
   }
 }
@@ -1465,10 +1619,7 @@ async function handleSlash(cmd) {
     case 'help':
       showSystem([
         'Available commands:',
-        '  /new        New session',
-        '  /clear      Clear current session display',
-        '  /stop       Cancel the current request',
-        '  /theme      Switch theme (light|dark|auto)',
+        ...COMMANDS.map((entry) => `  ${entry.command.padEnd(13)} ${entry.description}`),
       ].join('\n'));
       break;
     case 'new':
@@ -1523,7 +1674,11 @@ async function handleSlash(cmd) {
 function showSystem(text) {
   const msg = { role: 'system', content: text };
   const sess = state.sessions.get(state.activeId);
-  if (sess) sess.messages.push(msg);
+  if (sess) {
+    sess.messages.push(msg);
+    touchSession(sess);
+    renderSidebarSessions();
+  }
   renderMessage(msg);
   return msg;
 }
@@ -1541,20 +1696,22 @@ function updateBridgeNotice(text) {
 function setStatus(kind, text) {
   statusBadge.className = 'badge ' + kind;
   statusText.textContent = text;
+  if (sidebarStatusEl) sidebarStatusEl.textContent = text;
   // Update per-tab dot for active session
   updateTabDot(state.activeId, kind);
 }
 
 function updateTabDot(sessionId, kind) {
   if (!sessionId) return;
-  const tab = sessionListEl.querySelector(`[data-session-id="${sessionId}"]`);
-  if (!tab) return;
-  const dot = tab.querySelector('.tab-dot');
-  if (!dot) return;
-  dot.className = 'tab-dot';
-  if (kind === 'busy') dot.classList.add('busy');
-  else if (kind === 'warn') dot.classList.add('warn');
-  else if (kind === 'err') dot.classList.add('err');
+  const tabs = document.querySelectorAll(`[data-session-id="${sessionId}"]`);
+  for (const tab of tabs) {
+    const dot = tab.querySelector('.tab-dot');
+    if (!dot) continue;
+    dot.className = 'tab-dot';
+    if (kind === 'busy') dot.classList.add('busy');
+    else if (kind === 'warn') dot.classList.add('warn');
+    else if (kind === 'err') dot.classList.add('err');
+  }
   // 'ok' = default green (no extra class needed)
 }
 
@@ -1586,6 +1743,60 @@ function renderSendButtonState() {
 
 function updateSendButton() {
   renderSendButtonState();
+}
+
+function commandMatchesQuery(entry, query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q || q === '/') return true;
+  return entry.command.toLowerCase().startsWith(q)
+    || entry.description.toLowerCase().includes(q.replace(/^\//, ''));
+}
+
+function hideCommandPalette() {
+  if (commandPaletteEl) commandPaletteEl.classList.add('hidden');
+}
+
+function insertCommand(command) {
+  inputEl.value = command;
+  if (!command.endsWith(' ') && ['/theme', '/cwd'].some((prefix) => command.startsWith(prefix))) {
+    inputEl.value += ' ';
+  }
+  inputEl.focus();
+  inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length);
+  inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function renderCommandPalette() {
+  if (!commandPaletteEl) return;
+  const text = inputEl.value.trimStart();
+  if (!text.startsWith('/')) {
+    hideCommandPalette();
+    return;
+  }
+  const matches = COMMANDS.filter((entry) => commandMatchesQuery(entry, text));
+  if (!matches.length) {
+    hideCommandPalette();
+    return;
+  }
+  commandPaletteEl.textContent = '';
+  for (const entry of matches) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'command-suggestion';
+    button.setAttribute('role', 'option');
+    const command = document.createElement('code');
+    command.textContent = entry.command;
+    const description = document.createElement('span');
+    description.textContent = entry.description;
+    button.appendChild(command);
+    button.appendChild(description);
+    button.addEventListener('click', () => {
+      insertCommand(entry.command);
+      hideCommandPalette();
+    });
+    commandPaletteEl.appendChild(button);
+  }
+  commandPaletteEl.classList.remove('hidden');
 }
 
 function showError(text, actionLabel, actionFn, options = {}) {
@@ -1629,10 +1840,7 @@ function renderModelOptions() {
   for (const profile of options) {
     const opt = document.createElement('option');
     opt.value = String(profile.llmNo);
-    // Display as "name/model" when both fields available
-    const displayName = profile.name && profile.model
-      ? `${profile.name}/${profile.model}`
-      : profile.name || profile.model || `Model ${profile.llmNo}`;
+    const displayName = profile.name || profile.model || `Model ${profile.llmNo}`;
     opt.textContent = displayName;
     select.appendChild(opt);
   }
@@ -1643,6 +1851,10 @@ function renderModelOptions() {
     select.appendChild(opt);
   }
   select.value = selected;
+  if (sidebarModelEl) {
+    const selectedOption = [...select.options].find((opt) => opt.value === select.value);
+    sidebarModelEl.textContent = selectedOption ? selectedOption.textContent : 'Default / Auto';
+  }
 }
 
 async function loadModelProfiles() {
@@ -1690,6 +1902,23 @@ async function saveSettings() {
     showError('Failed to save settings: ' + (err.message || err));
   } finally {
     saveBtn.disabled = false;
+  }
+}
+
+async function forceStopActiveSession() {
+  if (await cancelPrompt()) showSystem('Stop requested.');
+  else setStatus(state.bridgeReady ? 'ok' : 'warn', state.bridgeReady ? 'Ready' : 'Starting...');
+}
+
+async function reinjectTools() {
+  try {
+    const sess = state.sessions.get(state.activeId);
+    if (sess?.bridgeSessionId) {
+      await window.ga.rpc('session/reinject-tools', { sessionId: sess.bridgeSessionId });
+    }
+    showSystem('Tools will be re-injected next turn.');
+  } catch (err) {
+    showError('Failed to reinject tools: ' + (err.message || err));
   }
 }
 
@@ -1744,12 +1973,13 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
         // Restore each session from bridge
         for (const bSess of existingSessions) {
           const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-          const sess = createLocalSession(localId, bSess.title || 'Restored', bSess.id || bSess.sessionId);
+          const sess = createLocalSession(localId, bSess.title || 'Restored', bSess.id || bSess.sessionId, bSess);
           // Fetch full messages for this session
           const sid = bSess.id || bSess.sessionId;
           const msgRes = await fetch(`${bridgeUrl}/session/${sid}/messages?after=0&limit=9999`).then(r => r.json()).catch(() => null);
           if (msgRes?.messages) {
             sess.messages = msgRes.messages;
+            syncBridgeSessionMeta(sess, msgRes);
             // Initialize polling state so we don't re-fetch these messages
             const runtime = getSessionRuntime(sess);
             runtime.seenBridgeMessageIds = new Set();
@@ -1825,6 +2055,7 @@ inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
   updateSendButton();
+  renderCommandPalette();
 });
 
 // IME composition fix - triple guard for CJK input methods (macOS especially)
@@ -1840,6 +2071,8 @@ inputEl.addEventListener('keydown', (e) => {
   } else if (e.key === 'Escape' && getActiveSessionRuntime()?.busy) {
     e.preventDefault();
     cancelPrompt();
+  } else if (e.key === 'Escape') {
+    hideCommandPalette();
   }
 });
 
@@ -1911,6 +2144,7 @@ function submitInput() {
   const images = [...pendingImages];
   inputEl.value = '';
   inputEl.style.height = 'auto';
+  hideCommandPalette();
   clearPendingImages();
   updateSendButton();
 
@@ -1933,7 +2167,11 @@ sendBtn.addEventListener('click', () => {
 
 // ─── Buttons ─────────────────────────────────────────────────────────────
 $('new-session-btn').addEventListener('click', newSession);
+$('sidebar-new-btn').addEventListener('click', newSession);
 $('settings-btn').addEventListener('click', openSettings);
+$('sidebar-settings-btn').addEventListener('click', openSettings);
+$('sidebar-stop-btn').addEventListener('click', forceStopActiveSession);
+$('sidebar-tools-btn').addEventListener('click', reinjectTools);
 $('close-settings').addEventListener('click', closeSettings);
 $('cancel-settings').addEventListener('click', closeSettings);
 $('save-settings').addEventListener('click', saveSettings);

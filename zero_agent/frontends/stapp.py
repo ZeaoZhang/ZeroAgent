@@ -2,7 +2,7 @@
 Streamlit Web 前端 — ZeroAgent 可视化聊天界面.
 
 保留原有 ZeroAgent 对话能力，并优化为更清晰的多会话工作台，包括:
-- Anthropic 风格主题 (stapp2.py CSS)
+- Anthropic 风格共享主题
 - Turn 折叠 (stapp.py fold_turns + st.expander)
 - 桌面宠物启动
 - 空闲自主行动模式
@@ -35,13 +35,25 @@ from urllib.request import urlopen
 
 import streamlit as st
 
+from zero_agent.frontends.ui_contract import (
+    APP_KICKER,
+    APP_NAME,
+    CHAT_PLACEHOLDER,
+    CHAT_PLACEHOLDER_ZH,
+    DEFAULT_SESSION_TITLE,
+    EXPORT_BUTTON_LABEL,
+    EXPORT_FILE_PREFIX,
+    WELCOME_SUBTITLE,
+    WELCOME_TITLE,
+)
+
 try:
     from streamlit import iframe as _st_iframe
     _embed_html = lambda html_content, **kw: _st_iframe(html_content, **{k: max(v, 1) if isinstance(v, int) else v for k, v in kw.items()})
 except (ImportError, AttributeError):
     from streamlit.components.v1 import html as _embed_html
 
-st.set_page_config(page_title="ZeroAgent", layout="wide")
+st.set_page_config(page_title=APP_NAME, layout="wide")
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -64,15 +76,15 @@ I18N = {
         "auto_running": "自主行动运行中，会在你离开它30分钟后自动进行",
         "auto_stopped": "自主行动已停止",
         "stop_gen": "停止生成",
-        "new_session": "新会话",
+        "new_session": DEFAULT_SESSION_TITLE,
         "export_chat": "导出",
         "settings": "Settings",
         "max_turns": "Max Turns",
         "font_size": "Font Size",
         "llm_backend": "LLM Backend",
-        "chat_placeholder": "请输入指令",
-        "welcome": "待命",
-        "no_active_run": "无运行任务",
+        "chat_placeholder": CHAT_PLACEHOLDER_ZH,
+        "welcome": WELCOME_TITLE,
+        "no_active_run": WELCOME_SUBTITLE,
         "config_error": "创建项目根目录 config.yaml 或设置环境变量 ZA_LLM_PROVIDER / ZA_LLM_API_KEY / ZA_LLM_API_BASE / ZA_LLM_MODEL",
     },
     "en": {
@@ -86,15 +98,15 @@ I18N = {
         "auto_running": "Autonomous mode active after 30 minutes idle",
         "auto_stopped": "Autonomous mode stopped",
         "stop_gen": "Stop Generation",
-        "new_session": "New Session",
+        "new_session": DEFAULT_SESSION_TITLE,
         "export_chat": "Export",
         "settings": "Settings",
         "max_turns": "Max Turns",
         "font_size": "Font Size",
         "llm_backend": "LLM Backend",
-        "chat_placeholder": "Enter your instruction...",
-        "welcome": "Ready",
-        "no_active_run": "No active run",
+        "chat_placeholder": CHAT_PLACEHOLDER,
+        "welcome": WELCOME_TITLE,
+        "no_active_run": WELCOME_SUBTITLE,
         "config_error": "Create project config.yaml or set ZA_LLM_PROVIDER / ZA_LLM_API_KEY / ZA_LLM_API_BASE / ZA_LLM_MODEL env vars",
     },
 }
@@ -221,6 +233,29 @@ def _new_session_id() -> str:
 
 
 def _create_web_session(title: str | None = None, messages: list[dict] | None = None) -> str:
+    # Reuse current session if it has no user messages (avoid empty session spam)
+    current_sid = st.session_state.get("active_web_session_id", "")
+    current = st.session_state.get("web_sessions", {}).get(current_sid)
+    if current and not messages:
+        has_user = any(m.get("role") == "user" for m in current.get("messages", []))
+        if not has_user:
+            # Reset the existing empty session
+            now = int(time.time())
+            current["title"] = title or T("new_session")
+            current["messages"] = list(messages or [])
+            current["display_queue"] = None
+            current["partial_response"] = ""
+            current["streaming"] = False
+            current["last_reply_time"] = now
+            current["updated_at"] = now
+            current["agent_state"] = {}
+            st.session_state.messages = current["messages"]
+            st.session_state.display_queue = None
+            st.session_state.partial_response = ""
+            st.session_state.streaming = False
+            st.session_state.last_reply_time = now
+            return current_sid
+
     sid = _new_session_id()
     now = int(time.time())
     st.session_state.web_sessions[sid] = {
@@ -535,10 +570,164 @@ def render_main_stream(prompt: str | None = None) -> None:
 # Slash Commands
 # ═══════════════════════════════════════════════════════════════
 
+SLASH_COMMANDS = [
+    ("/new", "开始新会话，清除当前上下文"),
+    ("/continue", "从历史日志恢复对话（/continue 编号）"),
+    ("/btw", "旁路提问，不影响对话上下文"),
+    ("/export", "导出对话：clip / 文件名 / all"),
+    ("/help", "显示所有可用命令"),
+]
+
+SLASH_PALETTE_JS = """<script>
+(function() {
+    var d = window.parent.document;
+    var palette = null;
+    var items = [];
+    var selIdx = -1;
+    var observer = null;
+
+    function cmdList() {
+        return [
+            {cmd:"/new", desc:"新建会话，清除当前上下文"},
+            {cmd:"/continue", desc:"从历史日志恢复对话（/continue 编号）"},
+            {cmd:"/btw", desc:"旁路提问，不影响对话上下文"},
+            {cmd:"/export", desc:"导出对话：clip / 文件名 / all"},
+            {cmd:"/help", desc:"显示所有可用命令"},
+        ];
+    }
+
+    function buildPalette() {
+        if (palette) return palette;
+        var el = d.createElement('div');
+        el.id = 'za-slash-palette';
+        d.body.appendChild(el);
+        palette = el;
+        return palette;
+    }
+
+    function showPalette(filter) {
+        var el = buildPalette();
+        var cmds = cmdList();
+        if (filter && filter !== '/') {
+            cmds = cmds.filter(function(c) { return c.cmd.indexOf(filter) === 0; });
+        }
+        items = cmds;
+        selIdx = -1;
+        el.innerHTML = cmds.map(function(c, i) {
+            return '<div class="za-slash-item" data-idx="' + i + '">' +
+                '<span class="za-slash-cmd">' + c.cmd.replace(/</g,'&lt;') + '</span>' +
+                '<span class="za-slash-desc">' + c.desc.replace(/</g,'&lt;') + '</span>' +
+                '</div>';
+        }).join('');
+        el.classList.add('active');
+        el.querySelectorAll('.za-slash-item').forEach(function(div) {
+            div.addEventListener('mousedown', function(e) {
+                e.preventDefault();
+                var idx = parseInt(div.dataset.idx);
+                selectCmd(idx);
+            });
+        });
+    }
+
+    function hidePalette() {
+        if (palette) palette.classList.remove('active');
+        items = [];
+        selIdx = -1;
+    }
+
+    function selectCmd(idx) {
+        if (idx < 0 || idx >= items.length) return;
+        var textarea = d.querySelector('textarea[data-testid="stChatInputTextArea"]');
+        if (textarea) {
+            var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+            if (nativeSetter && nativeSetter.set) {
+                nativeSetter.set.call(textarea, items[idx].cmd + ' ');
+            } else {
+                textarea.value = items[idx].cmd + ' ';
+            }
+            textarea.dispatchEvent(new Event('input', {bubbles: true}));
+            textarea.focus();
+        }
+        hidePalette();
+    }
+
+    function updateSelection(dir) {
+        if (!items.length) return;
+        var el = palette;
+        var old = el.querySelector('.za-slash-item.selected');
+        if (old) old.classList.remove('selected');
+        selIdx += dir;
+        if (selIdx < 0) selIdx = items.length - 1;
+        if (selIdx >= items.length) selIdx = 0;
+        var cur = el.querySelector('[data-idx="' + selIdx + '"]');
+        if (cur) cur.classList.add('selected');
+    }
+
+    function onInput(e) {
+        var ta = e.target;
+        var val = ta.value || '';
+        if (val.startsWith('/')) {
+            showPalette(val);
+        } else {
+            hidePalette();
+        }
+    }
+
+    function onKeyDown(e) {
+        if (!palette || !palette.classList.contains('active')) return;
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            e.stopPropagation();
+            updateSelection(1);
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            e.stopPropagation();
+            updateSelection(-1);
+        } else if (e.key === 'Enter' || e.key === 'Tab') {
+            if (selIdx >= 0) {
+                e.preventDefault();
+                e.stopPropagation();
+                selectCmd(selIdx);
+            }
+        } else if (e.key === 'Escape') {
+            hidePalette();
+        }
+    }
+
+    function bindTextareas() {
+        d.querySelectorAll('textarea[data-testid="stChatInputTextArea"]').forEach(function(ta) {
+            if (ta.__zaSlashBound) return;
+            ta.__zaSlashBound = 1;
+            ta.addEventListener('input', onInput);
+            ta.addEventListener('keydown', onKeyDown);
+            ta.addEventListener('blur', function() {
+                setTimeout(hidePalette, 150);
+            });
+        });
+    }
+
+    bindTextareas();
+    observer = new MutationObserver(bindTextareas);
+    observer.observe(d.body, {childList: true, subtree: true});
+})();
+</script>"""
+
 
 def _handle_slash_cmd(runner: Any, cmd: str, ts: str) -> bool:
     """处理斜杠命令，返回 True 表示已处理并需要 rerun."""
     cmd = cmd.strip()
+
+    if cmd == "/help":
+        help_lines = ["**可用命令：**\n"]
+        for sc_cmd, sc_desc in SLASH_COMMANDS:
+            help_lines.append(f"- `{sc_cmd}` — {sc_desc}")
+        st.session_state.messages = list(st.session_state.messages) + [
+            {"role": "user", "content": cmd, "time": ts},
+            {"role": "assistant", "content": "\n".join(help_lines), "time": ts},
+        ]
+        _persist_active_session_aliases()
+        _reset_and_rerun()
+        return True
 
     if cmd == "/new":
         from zero_agent.bots.shared.continue_cmd import reset_conversation
@@ -548,7 +737,7 @@ def _handle_slash_cmd(runner: Any, cmd: str, ts: str) -> bool:
         runner.za.handler.history_info = []
         runner.za.handler._empty_ct = 0
         messages = [
-            {"role": "assistant", "content": reset_conversation(runner.za), "time": ts}
+            {"role": "assistant", "content": reset_conversation(runner), "time": ts}
         ]
         _create_web_session(title=T("new_session"), messages=messages)
         _persist_runner_state(runner)
@@ -563,7 +752,7 @@ def _handle_slash_cmd(runner: Any, cmd: str, ts: str) -> bool:
         sessions = list_sessions(exclude_pid=os.getpid()) if m else []
         idx = int(m.group(1)) - 1 if m else -1
         target = sessions[idx][0] if 0 <= idx < len(sessions) else None
-        result = handle_frontend_command(runner.za, cmd)
+        result = handle_frontend_command(runner, cmd)
         history = extract_ui_messages(target) if target and "成功" in result else None
         tail = [{"role": "assistant", "content": result, "time": ts}]
         if history:
@@ -579,7 +768,7 @@ def _handle_slash_cmd(runner: Any, cmd: str, ts: str) -> bool:
 
     if cmd.startswith("/btw"):
         from zero_agent.bots.shared.btw_cmd import handle_frontend_command as btw_handle
-        answer = btw_handle(runner.za, cmd)
+        answer = btw_handle(runner, cmd)
         st.session_state.messages = list(st.session_state.messages) + [
             {"role": "user", "content": cmd, "time": ts},
             {"role": "assistant", "content": answer, "time": ts},
@@ -607,7 +796,7 @@ def _handle_slash_cmd(runner: Any, cmd: str, ts: str) -> bool:
             log_dir = getattr(runner.za.config, "log_dir", None)
             result = f"日志目录: `{log_dir}`" if log_dir else "未配置日志目录"
         else:
-            text = last_assistant_text(runner.za)
+            text = last_assistant_text(runner)
             if not text:
                 result = "还没有模型回复可导出"
             elif sub_lower in ("clip", "copy"):
@@ -672,7 +861,7 @@ def _render_session_history(runner) -> None:
         label = f"{i+1}. {preview_text} · {n_rounds}轮 · {rel}"
 
         if st.button(label, key=f"load_session_{i}", use_container_width=True):
-            result = handle_frontend_command(runner.za, f"/continue {i + 1}")
+            result = handle_frontend_command(runner, f"/continue {i + 1}")
             ui_msgs = extract_ui_messages(path) if "成功" in result else None
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             if ui_msgs:
@@ -723,24 +912,53 @@ def _render_sidebar(runner: Any) -> None:
         _persist_runner_state(runner)
         _reset_and_rerun()
 
+    # Active sessions (with user messages) grouped by time
+    st.divider()
+    st.caption("Sessions")
+
+    now = int(time.time())
     sessions = sorted(
-        st.session_state.web_sessions.values(),
+        [s for s in st.session_state.web_sessions.values()
+         if any(m.get("role") == "user" for m in s.get("messages", []))],
         key=lambda s: int(s.get("updated_at", 0)),
         reverse=True,
     )
-    for sess in sessions:
-        title = sess.get("title") or T("new_session")
-        count = len(sess.get("messages", []))
-        label = f"{title} ({count})"
-        selected = sess["id"] == st.session_state.active_web_session_id
-        if st.button(
-            label,
-            key=f"switch_web_session_{sess['id']}",
-            disabled=selected or bool(st.session_state.get("streaming")),
-            use_container_width=True,
-        ):
-            _switch_web_session(sess["id"], runner)
-            st.rerun()
+
+    if not sessions:
+        st.caption("No saved sessions yet. Start a conversation first.")
+
+    groups: dict[str, list[dict]] = {"Today": [], "Yesterday": [], "This Week": [], "Earlier": []}
+    day_ago = now - 86400
+    week_ago = now - 604800
+    for s in sessions:
+        t = int(s.get("updated_at", 0))
+        if t >= day_ago:
+            groups["Today"].append(s)
+        elif t >= day_ago - 86400:
+            groups["Yesterday"].append(s)
+        elif t >= week_ago:
+            groups["This Week"].append(s)
+        else:
+            groups["Earlier"].append(s)
+
+    for group_label in ["Today", "Yesterday", "This Week", "Earlier"]:
+        group = groups[group_label]
+        if not group:
+            continue
+        with st.expander(f"{group_label} ({len(group)})", expanded=(group_label == "Today")):
+            for sess in group[:30]:  # limit per group
+                title = sess.get("title") or T("new_session")
+                count = sum(1 for m in sess.get("messages", []) if m.get("role") == "user")
+                label = f"{title}"
+                selected = sess["id"] == st.session_state.active_web_session_id
+                if st.button(
+                    label,
+                    key=f"switch_web_session_{sess['id']}",
+                    disabled=selected or bool(st.session_state.get("streaming")),
+                    use_container_width=True,
+                ):
+                    _switch_web_session(sess["id"], runner)
+                    st.rerun()
 
     st.divider()
     st.header(T("settings"))
@@ -779,8 +997,6 @@ def _render_sidebar(runner: Any) -> None:
     if st.button(T("desktop_pet")):
         kwargs = {"creationflags": 0x08} if sys.platform == "win32" else {}
         pet_script = os.path.join(SCRIPT_DIR, "desktop_pet.pyw")
-        if not os.path.exists(pet_script):
-            pet_script = os.path.join(SCRIPT_DIR, "desktop_pet_basic.pyw")
         subprocess.Popen([sys.executable, pet_script], **kwargs)
 
         def _pet_req(q: str) -> None:
@@ -880,9 +1096,9 @@ def _render_export() -> None:
         lines.append("")
     md = "\n".join(lines)
     st.download_button(
-        "Download Chat",
+        EXPORT_BUTTON_LABEL,
         data=md,
-        file_name=f"zero-agent-chat-{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+        file_name=f"{EXPORT_FILE_PREFIX}-{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
         mime="text/markdown",
         use_container_width=True,
     )
@@ -897,13 +1113,14 @@ def main() -> None:
     _init_session()
 
     # Inject theme CSS + toggle JS
-    _theme = st.session_state.get("theme", "light")
+    _theme = st.session_state.get("theme", "dark")
     st.markdown(load_theme_css(_theme, "stapp"), unsafe_allow_html=True)
     st.markdown(_build_font_css(st.session_state.font_scale), unsafe_allow_html=True)
-    _embed_html(theme_toggle_js(), height=0, width=0)
+    _embed_html(theme_toggle_js(_theme), height=0, width=0)
     _embed_html(AUTOSCROLL_JS, height=0, width=0)
     _embed_html(SCROLL_GHOST_FIX_JS, height=0, width=0)
     _embed_html(IME_FIX_JS, height=0, width=0)
+    _embed_html(SLASH_PALETTE_JS, height=0, width=0)
 
     try:
         runner = _get_runner()
@@ -921,7 +1138,7 @@ def main() -> None:
         f"""
 <div class="za-topline">
   <div>
-    <div class="za-kicker">ZeroAgent Workbench</div>
+    <div class="za-kicker">{html.escape(APP_KICKER)}</div>
     <h1>{header_title}</h1>
   </div>
   <div class="za-runtime-pill">
@@ -944,7 +1161,7 @@ def main() -> None:
             f"""
 <section class="za-welcome" aria-label="Empty session">
   <div class="za-welcome-copy">
-    <div class="za-welcome-brand">ZeroAgent</div>
+    <div class="za-welcome-brand">{html.escape(APP_NAME)}</div>
     <h2>{html.escape(T("welcome"))}</h2>
     <p>{html.escape(T("no_active_run"))}</p>
   </div>

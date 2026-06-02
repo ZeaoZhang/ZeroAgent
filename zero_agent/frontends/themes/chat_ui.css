@@ -113,7 +113,7 @@ button[data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"] {
     opacity: 1 !important;
     background-color: color-mix(in srgb, var(--za-primary) 82%, var(--za-bg)) !important;
     border-color: var(--za-primary) !important;
-    color: #111508 !important;
+    font-weight: 600 !important;
 }
 
 /* Sidebar selectbox — subtle pill */
@@ -226,11 +226,11 @@ h2, h3, h4, h5, h6 {
     font-weight: 500 !important; transition: all 0.2s ease !important;
 }
 .stButton > button:hover {
-    background-color: var(--za-primary) !important; color: #111508 !important;
+    background-color: var(--za-primary) !important; color: var(--za-on-primary) !important;
     border-color: var(--za-primary) !important;
 }
 .stButton > button[kind="primary"] {
-    background-color: var(--za-primary) !important; color: #111508 !important;
+    background-color: var(--za-primary) !important; color: var(--za-on-primary) !important;
     border-color: var(--za-primary) !important;
 }
 .stButton > button[kind="primary"]:hover {
@@ -280,7 +280,7 @@ h2, h3, h4, h5, h6 {
     border-color: transparent !important;
 }
 [data-testid="stChatInput"] button, [data-testid="stChatInputSubmitButton"] {
-    background-color: var(--za-primary) !important; color: #111508 !important;
+    background-color: var(--za-primary) !important; color: var(--za-on-primary) !important;
     border-radius: 8px !important; width: 48px !important; height: 48px !important;
     min-width: 48px !important; min-height: 48px !important; padding: 0 !important;
     display: inline-flex !important; align-items: center !important;
@@ -617,12 +617,12 @@ a:hover { color: var(--za-primary-hover) !important; }
     50% { transform: translateY(42px); opacity: 0.85; }
 }
 
-/* ===== Button contrast fix (dark text on warm buttons) ===== */
+/* ===== Button contrast fix ===== */
 .stButton > button[kind="primary"] {
-    color: #111508 !important;
+    color: var(--za-on-primary) !important;
 }
 [data-testid="stChatInput"] button, [data-testid="stChatInputSubmitButton"] {
-    color: #111508 !important;
+    color: var(--za-on-primary) !important;
 }
 
 /* ===== Focus-visible ===== */

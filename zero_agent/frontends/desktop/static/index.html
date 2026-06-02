@@ -3,10 +3,39 @@
 <head>
   <meta charset="UTF-8">
   <title>ZeroAgent</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=app-sidebar-1">
 </head>
 <body>
   <div id="app">
+    <aside id="sidebar" aria-label="Workspace">
+      <div class="sidebar-brand">
+        <div class="sidebar-kicker">ZEROAGENT</div>
+        <div id="sidebar-active-title" class="sidebar-title" data-ui="app-name">ZeroAgent</div>
+      </div>
+
+      <button id="sidebar-new-btn" class="sidebar-primary" type="button">New chat</button>
+
+      <section class="sidebar-section" aria-labelledby="sidebar-sessions-title">
+        <div id="sidebar-sessions-title" class="sidebar-section-title">Sessions</div>
+        <div id="sidebar-session-list" class="sidebar-session-list"></div>
+      </section>
+
+      <section class="sidebar-section sidebar-settings" aria-labelledby="sidebar-settings-title">
+        <div id="sidebar-settings-title" class="sidebar-heading">Settings</div>
+        <div class="sidebar-model-card">
+          <span>Model</span>
+          <strong id="sidebar-model">Default / Auto</strong>
+        </div>
+        <button id="sidebar-settings-btn" class="sidebar-action" type="button">Settings</button>
+        <button id="sidebar-stop-btn" class="sidebar-action" type="button">Force Stop</button>
+        <button id="sidebar-tools-btn" class="sidebar-action" type="button">Reinject Tools</button>
+      </section>
+
+      <div class="sidebar-footer" aria-live="polite">
+        <span id="sidebar-status" class="sidebar-status">Starting...</span>
+      </div>
+    </aside>
+
     <!-- Main area -->
     <main id="main">
       <header id="topbar">
@@ -20,7 +49,7 @@
           </div>
         </div>
         <div class="topbar-right">
-          <h1 id="session-title" class="sr-only">ZeroAgent</h1>
+          <h1 id="session-title" class="sr-only" data-ui="app-name">ZeroAgent</h1>
           <span id="status-badge" class="badge">
             <span class="status-dot"></span>
             <span id="status-text">Starting...</span>
@@ -39,9 +68,9 @@
       <section id="messages" class="empty">
         <div class="empty-state">
           <div class="empty-panel empty-copy">
-            <div class="empty-brand">ZeroAgent</div>
-            <div class="empty-title">Ready</div>
-            <div class="empty-sub">No active run</div>
+            <div class="empty-brand" data-ui="app-name">ZeroAgent</div>
+            <div class="empty-title" data-ui="welcome-title">Ready</div>
+            <div class="empty-sub" data-ui="welcome-subtitle">No active run</div>
           </div>
           <div class="empty-panel empty-visual" aria-hidden="true">
             <div class="empty-scanline"></div>
@@ -60,7 +89,8 @@
       <div id="composer-wrap">
         <div id="composer">
           <div id="image-previews" class="image-previews"></div>
-          <textarea id="input" rows="1" placeholder="Ask ZeroAgent to work on something"></textarea>
+          <textarea id="input" rows="1" placeholder="Ask ZeroAgent to work on something" data-ui="chat-placeholder"></textarea>
+          <div id="command-palette" class="command-palette hidden" role="listbox" aria-label="Command suggestions"></div>
           <div class="composer-bottom">
             <div class="composer-hints">
               <button id="settings-btn" class="icon-btn ghost" title="Settings" aria-label="Settings">
@@ -69,7 +99,6 @@
                   <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                 </svg>
               </button>
-
             </div>
             <button id="send-btn" class="send-btn" title="Send (Enter)">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -124,6 +153,6 @@
 
   <script src="vendor/marked.min.js"></script>
   <script src="ga-web.js?v=bridge-port-1"></script>
-  <script src="app.js?v=session-tabs-1"></script>
+  <script src="app.js?v=app-sidebar-1"></script>
 </body>
 </html>

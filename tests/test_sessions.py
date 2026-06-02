@@ -104,3 +104,25 @@ def test_sanitize_file_write_required_matches_properties(mock_config) -> None:
 
     assert "content" not in parameters["properties"]
     assert "content" not in parameters.get("required", [])
+
+
+def test_completion_kwargs_include_provider_for_openai_compatible_backend() -> None:
+    session = LiteLLMSession(
+        LLMBackendConfig(
+            name="deepseek",
+            provider="openai",
+            api_key="sk-test",
+            api_base="https://api.deepseek.com",
+            model="deepseek-v4-flash",
+        )
+    )
+
+    kwargs = session._build_completion_kwargs(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        stream=True,
+    )
+
+    assert kwargs["model"] == "deepseek-v4-flash"
+    assert kwargs["custom_llm_provider"] == "openai"
+    assert kwargs["api_base"] == "https://api.deepseek.com"

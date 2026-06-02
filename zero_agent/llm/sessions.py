@@ -329,6 +329,8 @@ class LiteLLMSession:
             "api_base": self.config.api_base,
             "temperature": self.config.temperature,
         }
+        if self.config.provider:
+            kwargs["custom_llm_provider"] = self.config.provider
 
         if self.config.max_tokens:
             kwargs["max_tokens"] = self.config.max_tokens

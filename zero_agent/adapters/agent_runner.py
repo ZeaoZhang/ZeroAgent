@@ -8,6 +8,7 @@ queue-based put_task() 接口，使现有 Bot/Conductor/Desktop Bridge 等
 from __future__ import annotations
 
 import queue
+import os
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -40,6 +41,7 @@ class AgentRunner:
         self._running = False
         self._stop_sig = False
         self._worker_thread: Optional[threading.Thread] = None
+        self._configure_shared_session_commands()
 
     # —— 兼容 GenericAgent 的公开属性 ——
 
@@ -47,6 +49,22 @@ class AgentRunner:
     def za(self):
         """返回底层 ZeroAgent 实例 (兼容前端直接访问)."""
         return self._agent
+
+    @property
+    def config(self):
+        """返回底层 ZeroAgent 配置 (兼容共享命令)."""
+        return self._agent.config
+
+    @property
+    def log_path(self) -> str | None:
+        """当前进程的 model_responses 日志路径 (兼容 /export)."""
+        sessions_dir = getattr(self._agent.config, "sessions_dir", None)
+        if not sessions_dir:
+            return None
+        return os.path.join(
+            os.path.abspath(sessions_dir),
+            f"model_responses_{os.getpid()}.txt",
+        )
 
     @property
     def is_running(self) -> bool:
@@ -85,6 +103,17 @@ class AgentRunner:
     def llmclient(self):
         """兼容 GenericAgent 的 llmclient 检查 (非 None 表示已配置)."""
         return self._agent.client
+
+    def _configure_shared_session_commands(self) -> None:
+        """让 /continue 等共享命令使用当前配置里的 sessions_dir."""
+        sessions_dir = getattr(self._agent.config, "sessions_dir", None)
+        if not sessions_dir:
+            return
+        try:
+            from zero_agent.bots.shared.continue_cmd import set_sessions_dir
+            set_sessions_dir(os.path.abspath(sessions_dir))
+        except Exception:
+            pass
 
     # —— LLM 管理 (兼容 GenericAgent bot /list_llms + /llm n) ——
 

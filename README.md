@@ -12,7 +12,7 @@ ZeroAgent 是一个基于 `litellm` 的可复用自主 Agent 框架。从 Generi
 - **记忆与压缩**: 分层记忆管理、历史标签压缩、消息裁剪和 OCR/视觉记忆扩展。
 - **Hook 与插件**: 8 个标准事件钩子，包含 Langfuse tracing 插件示例。
 - **Reflect 模式**: 支持反射式唤醒、目标模式、定时任务和 agent team worker。
-- **多入口**: 提供 REPL、一次性任务、文件 I/O 批处理、Streamlit UI 和 launcher。
+- **多入口**: 提供 REPL、一次性任务、文件 I/O 批处理、统一 Web/Qt 前端和桌面 launcher。
 - **工程化测试**: pytest 测试覆盖 core、LLM、tools、memory、plugins 和 reflect 模块。
 
 ## 安装
@@ -35,8 +35,11 @@ pip install -e .
 可选功能:
 
 ```bash
-# Streamlit / pywebview UI
+# Web / pywebview UI
 pip install -e ".[ui]"
+
+# Qt 桌面界面
+pip install -e ".[qt]"
 
 # Browser control runtime (web_scan / web_execute_js)
 pip install -e ".[browser]"
@@ -165,11 +168,30 @@ Reflect 模式:
 zero-agent --reflect path/to/reflect_module.py
 ```
 
-Streamlit UI:
+Web UI:
 
 ```bash
 pip install -e ".[ui]"
 streamlit run zero_agent/frontends/stapp.py
+```
+
+pywebview 桌面窗口:
+
+```bash
+zero-agent-launcher
+```
+
+Qt 桌面界面:
+
+```bash
+pip install -e ".[qt]"
+python -m zero_agent.frontends.qtapp
+```
+
+Tauri 桌面 Web bridge:
+
+```bash
+python -m zero_agent.frontends.desktop_bridge
 ```
 
 ## REPL 命令
@@ -196,7 +218,7 @@ zero_agent/
   tools/       # 工具注册表；默认核心工具和可选扩展工具模块
   memory/      # 分层记忆、OCR、视觉 API、会话压缩
   reflect/     # 反射式运行、目标模式、调度、subagent/team worker
-  frontends/   # Streamlit UI 和 launcher
+  frontends/   # 支持的 Web/Qt/桌面前端、launcher、桌宠资源
   runners/     # CLI 入口
   utils/       # 配置向导、文件、文本、keychain、统计工具
   plugins/     # Langfuse tracing 等插件

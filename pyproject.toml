@@ -12,14 +12,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ui = ["streamlit>=1.28", "pywebview>=4.0", "textual>=0.50", "aiohttp>=3.9"]
+ui = ["streamlit>=1.28", "pywebview>=4.0", "aiohttp>=3.9"]
+qt = ["PySide6>=6.6", "markdown>=3.5"]
 browser = ["beautifulsoup4>=4.12", "bottle>=0.12", "simple-websocket-server>=0.4"]
 memory = ["rapidocr-onnxruntime>=1.3", "Pillow>=10.0"]
 plot = ["matplotlib>=3.7"]
 telegram = ["python-telegram-bot>=20.0"]
 discord = ["discord.py>=2.3"]
 bots = ["zero-agent[telegram,discord]"]
-all-extras = ["zero-agent[ui,browser,memory,plot,bots]"]
+all-extras = ["zero-agent[ui,qt,browser,memory,plot,bots]"]
 
 [project.scripts]
 zero-agent = "zero_agent.runners.cli:main"
@@ -46,12 +47,22 @@ packages = [
     "zero_agent.reflect",
     "zero_agent.plugins",
     "zero_agent.frontends",
+    "zero_agent.frontends.themes",
     "zero_agent.vendor",
     "zero_agent.vendor.genericagent",
     "zero_agent.assets",
 ]
 
 [tool.setuptools.package-data]
+"zero_agent.frontends" = [
+    "desktop/static/*",
+    "desktop/static/vendor/*",
+    "skins/**/*",
+    "*.gif",
+    "*.png",
+    "*.md",
+]
+"zero_agent.frontends.themes" = ["*.css"]
 "zero_agent.assets" = ["code_run_header.py", "tmwd_cdp_bridge/*"]
 "zero_agent.memory.sops" = ["*.md", "*.py", "**/*.md", "**/*.py", "**/*.txt"]
 

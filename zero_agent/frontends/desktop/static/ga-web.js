@@ -108,6 +108,11 @@
         if (!sid) throw new Error('session/cancel missing sessionId');
         return http(`/session/${encodeURIComponent(sid)}/cancel`, { method: 'POST', body: params || {} });
       }
+      case 'session/reinject-tools': {
+        const sid = params.sessionId || params.id || params.bridgeSessionId;
+        if (!sid) throw new Error('session/reinject-tools missing sessionId');
+        return http(`/session/${encodeURIComponent(sid)}/reinject-tools`, { method: 'POST', body: params || {} });
+      }
       case 'app/path/open':
         return http('/path/open', { method: 'POST', body: params || {} });
       case 'app/path/selectGaRoot':

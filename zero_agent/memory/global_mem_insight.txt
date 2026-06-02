@@ -1,0 +1,6 @@
+# [Global Memory Insight]
+需要时read L2 或 ls ../memory/ 查L3
+L0(META-SOP): memory_management_sop
+L2: 现空
+L3: (暂无)
+L4: L4_raw_sessions/ 历史会话

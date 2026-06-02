@@ -31,11 +31,11 @@ def last_assistant_text(runner) -> str | None:
         return None
     if client is None:
         return None
-    backend = getattr(client, "backend", None)
-    if backend is None or not getattr(backend, "history", None):
+    backend = getattr(client, "backend", None) or client
+    if not getattr(backend, "history", None):
         return None
 
-    log_path = getattr(runner, "log_path", None)
+    log_path = _resolve_log_path(runner)
     if not log_path or not os.path.isfile(log_path):
         return None
     try:
@@ -49,6 +49,20 @@ def last_assistant_text(runner) -> str | None:
         return None
     text = _assistant_text(pairs[-1][1])
     return text if text.strip() else None
+
+
+def _resolve_log_path(runner) -> str | None:
+    log_path = getattr(runner, "log_path", None)
+    if log_path:
+        return log_path
+    config = getattr(runner, "config", None)
+    sessions_dir = getattr(config, "sessions_dir", None)
+    if not sessions_dir:
+        return None
+    return os.path.join(
+        os.path.abspath(sessions_dir),
+        f"model_responses_{os.getpid()}.txt",
+    )
 
 
 def export_to_temp(text: str, name: str) -> str:

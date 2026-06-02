@@ -36,6 +36,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in minimal installs.
 
 from zero_agent.core.config import AgentConfig, default_config_path, load_default_config
 from zero_agent.core.exceptions import ConfigError
+from zero_agent.frontends.ui_contract import DEFAULT_SESSION_TITLE
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -89,7 +90,7 @@ def validate_runnable_config(config: AgentConfig) -> None:
 @dataclass
 class Session:
     id: str
-    title: str = "New chat"
+    title: str = DEFAULT_SESSION_TITLE
     cwd: str = ""
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -196,7 +197,7 @@ class AgentManager:
         msg.update(extra)
         sess.messages.append(msg)
         sess.updated_at = time.time()
-        if role == "user" and content.strip() and sess.title == "New chat":
+        if role == "user" and content.strip() and sess.title == DEFAULT_SESSION_TITLE:
             sess.title = content.strip().replace("\n", " ")[:40]
         return msg
 
@@ -385,6 +386,20 @@ class AgentManager:
             sess.partial = None
             sess.updated_at = time.time()
         emit_session_state(sess, "cancelled")
+        return {"ok": True, "sessionId": sid}
+
+    def reinject_tools(self, sid: str) -> dict:
+        with self.lock:
+            sess = self.sessions.get(sid)
+            if not sess:
+                raise web.HTTPNotFound(
+                    text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False),
+                    content_type="application/json",
+                )
+            if sess.runner and getattr(sess.runner, "za", None):
+                with contextlib.suppress(Exception):
+                    sess.runner.za.client.last_tools = ""
+        emit_session_state(sess, "tools-reset")
         return {"ok": True, "sessionId": sid}
 
 
@@ -621,6 +636,12 @@ async def cancel_handler(request):
     sid = request.match_info["sid"]
     return json_ok(manager.cancel(sid))
 
+
+async def reinject_tools_handler(request):
+    sid = request.match_info["sid"]
+    return json_ok(manager.reinject_tools(sid))
+
+
 async def path_open_handler(request):
     data = await read_json(request)
     kind = data.get("kind", "")
@@ -659,6 +680,7 @@ def create_app():
     app.router.add_post("/session/{sid}/prompt", prompt_handler)
     app.router.add_get("/session/{sid}/messages", messages_handler)
     app.router.add_post("/session/{sid}/cancel", cancel_handler)
+    app.router.add_post("/session/{sid}/reinject-tools", reinject_tools_handler)
     app.router.add_post("/path/open", path_open_handler)
 
     static_dir = APP_DIR / "desktop" / "static"

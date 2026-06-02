@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from unittest.mock import MagicMock
 
@@ -68,6 +69,17 @@ class TestAgentRunnerConstruction:
     def test_history_property(self, mock_agent: ZeroAgent) -> None:
         runner = AgentRunner(mock_agent)
         assert isinstance(runner.history, list)
+
+    def test_config_property(self, mock_agent: ZeroAgent) -> None:
+        runner = AgentRunner(mock_agent)
+        assert runner.config is mock_agent.config
+
+    def test_log_path_uses_config_sessions_dir(self, mock_agent: ZeroAgent) -> None:
+        runner = AgentRunner(mock_agent)
+        assert runner.log_path == os.path.join(
+            os.path.abspath(mock_agent.config.sessions_dir),
+            f"model_responses_{os.getpid()}.txt",
+        )
 
     def test_is_running_starts_false(self, mock_agent: ZeroAgent) -> None:
         runner = AgentRunner(mock_agent)

@@ -34,7 +34,11 @@ from zero_agent.bots.shared.continue_cmd import (
 from zero_agent.bots.shared.btw_cmd import _strip_cmd, _help_text
 from zero_agent.bots.shared.review_cmd import handle as review_handle
 from zero_agent.bots.shared.session_names import set_name, name_for, has_name, gc
-from zero_agent.bots.shared.export_cmd import wrap_for_clipboard, export_to_temp
+from zero_agent.bots.shared.export_cmd import (
+    wrap_for_clipboard,
+    export_to_temp,
+    last_assistant_text,
+)
 
 
 # —— common.py ——
@@ -146,7 +150,7 @@ class TestContinueCmd:
 
     def test_list_sessions_empty_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("zero_agent.bots.shared.continue_cmd._LOG_GLOB",
+            with patch("zero_agent.bots.shared.continue_cmd._sessions_glob",
                        os.path.join(tmp, "model_responses_*.txt")):
                 assert list_sessions() == []
 
@@ -212,29 +216,26 @@ class TestSessionNames:
     def test_set_and_get_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             import zero_agent.bots.shared.session_names as sn
-            with patch.object(sn, "_LOG_DIR", tmp):
-                with patch.object(sn, "_REG_PATH", os.path.join(tmp, "names.json")):
-                    sn.set_name("/fake/path/model_responses_123.txt", "my session")
-                    assert sn.name_for("/fake/path/model_responses_123.txt") == "my session"
+            with patch.object(sn, "_get_log_dir", return_value=tmp):
+                sn.set_name("/fake/path/model_responses_123.txt", "my session")
+                assert sn.name_for("/fake/path/model_responses_123.txt") == "my session"
 
     def test_has_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             import zero_agent.bots.shared.session_names as sn
-            with patch.object(sn, "_LOG_DIR", tmp):
-                with patch.object(sn, "_REG_PATH", os.path.join(tmp, "names.json")):
-                    sn.set_name("/fake/path/a.txt", "test")
-                    assert sn.has_name("test") is True
-                    assert sn.has_name("nonexistent") is False
+            with patch.object(sn, "_get_log_dir", return_value=tmp):
+                sn.set_name("/fake/path/a.txt", "test")
+                assert sn.has_name("test") is True
+                assert sn.has_name("nonexistent") is False
 
     def test_gc(self):
         with tempfile.TemporaryDirectory() as tmp:
             import zero_agent.bots.shared.session_names as sn
-            with patch.object(sn, "_LOG_DIR", tmp):
-                with patch.object(sn, "_REG_PATH", os.path.join(tmp, "names.json")):
-                    sn.set_name("/fake/path/gone.txt", "gone")
-                    # _resolve_basename returns None for nonexistent files → gc removes it
-                    removed = sn.gc()
-                    assert removed >= 0
+            with patch.object(sn, "_get_log_dir", return_value=tmp):
+                sn.set_name("/fake/path/gone.txt", "gone")
+                # _resolve_basename returns None for nonexistent files → gc removes it
+                removed = sn.gc()
+                assert removed >= 0
 
 
 # —— export_cmd.py ——
@@ -262,3 +263,18 @@ class TestExportCmd:
             with patch("zero_agent.bots.shared.export_cmd._TEMP_DIR", tmp):
                 path = export_to_temp("data", "noext")
                 assert path.endswith(".md")
+
+    def test_last_assistant_text_reads_zeroagent_session_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = os.path.join(tmp, f"model_responses_{os.getpid()}.txt")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("=== Prompt === now\n{}\n")
+                f.write("=== Response === now\n")
+                f.write("[{'type': 'text', 'text': 'final answer'}]\n")
+
+            runner = MagicMock()
+            runner.llmclient = MagicMock()
+            runner.llmclient.history = [{"role": "user", "content": "hello"}]
+            runner.log_path = log_path
+
+            assert last_assistant_text(runner) == "final answer"
