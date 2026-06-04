@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <title>ZeroAgent</title>
-  <link rel="stylesheet" href="styles.css?v=app-sidebar-1">
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div id="app">
@@ -12,14 +12,11 @@
         <div class="sidebar-kicker">ZEROAGENT</div>
         <div id="sidebar-active-title" class="sidebar-title" data-ui="app-name">ZeroAgent</div>
       </div>
-
       <button id="sidebar-new-btn" class="sidebar-primary" type="button">New chat</button>
-
       <section class="sidebar-section" aria-labelledby="sidebar-sessions-title">
         <div id="sidebar-sessions-title" class="sidebar-section-title">Sessions</div>
         <div id="sidebar-session-list" class="sidebar-session-list"></div>
       </section>
-
       <section class="sidebar-section sidebar-settings" aria-labelledby="sidebar-settings-title">
         <div id="sidebar-settings-title" class="sidebar-heading">Settings</div>
         <div class="sidebar-model-card">
@@ -30,7 +27,6 @@
         <button id="sidebar-stop-btn" class="sidebar-action" type="button">Force Stop</button>
         <button id="sidebar-tools-btn" class="sidebar-action" type="button">Reinject Tools</button>
       </section>
-
       <div class="sidebar-footer" aria-live="polite">
         <span id="sidebar-status" class="sidebar-status">Starting...</span>
       </div>
@@ -42,7 +38,7 @@
         <div class="topbar-left">
           <div id="session-list" class="tab-strip" role="tablist" aria-label="Chats">
             <button id="new-session-btn" class="tab-new-btn" title="New chat" aria-label="New chat">
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M12 5v14M5 12h14"/>
               </svg>
             </button>
@@ -52,7 +48,7 @@
           <h1 id="session-title" class="sr-only" data-ui="app-name">ZeroAgent</h1>
           <span id="status-badge" class="badge">
             <span class="status-dot"></span>
-            <span id="status-text">Starting...</span>
+            <span id="status-text">Starting…</span>
           </span>
         </div>
       </header>
@@ -67,22 +63,8 @@
 
       <section id="messages" class="empty">
         <div class="empty-state">
-          <div class="empty-panel empty-copy">
-            <div class="empty-brand" data-ui="app-name">ZeroAgent</div>
-            <div class="empty-title" data-ui="welcome-title">Ready</div>
-            <div class="empty-sub" data-ui="welcome-subtitle">No active run</div>
-          </div>
-          <div class="empty-panel empty-visual" aria-hidden="true">
-            <div class="empty-scanline"></div>
-            <div class="empty-frame">
-              <span></span><span></span><span></span>
-            </div>
-          </div>
-          <div class="empty-panel empty-status" aria-hidden="true">
-            <div class="empty-status-row"><span></span><strong></strong></div>
-            <div class="empty-status-row"><span></span><strong></strong></div>
-            <div class="empty-status-row"><span></span><strong></strong></div>
-          </div>
+          <div class="empty-title" data-ui="welcome-title">Ready</div>
+          <div class="empty-sub" data-ui="welcome-subtitle">No active run</div>
         </div>
       </section>
 
@@ -94,14 +76,16 @@
           <div class="composer-bottom">
             <div class="composer-hints">
               <button id="settings-btn" class="icon-btn ghost" title="Settings" aria-label="Settings">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                   <circle cx="12" cy="12" r="3"/>
                   <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                 </svg>
+                <span class="hint-label">Settings</span>
               </button>
+
             </div>
             <button id="send-btn" class="send-btn" title="Send (Enter)">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M5 12h14M13 6l6 6-6 6"/>
               </svg>
             </button>
@@ -116,7 +100,7 @@
       <div class="modal-body">
         <div class="modal-header">
           <h2>Settings</h2>
-          <button class="icon-btn ghost" id="close-settings" aria-label="Close settings">×</button>
+          <button class="icon-btn ghost" id="close-settings">✕</button>
         </div>
         <div class="modal-content">
           <div class="form-row">
@@ -147,12 +131,12 @@
     <div id="error-banner" class="error-banner hidden">
       <span id="error-text"></span>
       <button class="icon-btn ghost" id="error-action"></button>
-      <button class="icon-btn ghost" id="error-dismiss" aria-label="Dismiss error">×</button>
+      <button class="icon-btn ghost" id="error-dismiss">✕</button>
     </div>
   </div>
 
   <script src="vendor/marked.min.js"></script>
-  <script src="ga-web.js?v=bridge-port-1"></script>
-  <script src="app.js?v=app-sidebar-1"></script>
+  <script src="ga-web.js?v=14168-2"></script>
+  <script src="app.js?v=poll-fold-7"></script>
 </body>
 </html>

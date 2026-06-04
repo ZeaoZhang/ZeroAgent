@@ -1080,6 +1080,15 @@ def _action_btn(label: str, color: str, icon: QIcon | None = None) -> QPushButto
 class ChatPanel(QWidget):
     """Frameless always-on-top chat window."""
 
+    _SLASH_COMMANDS = [
+        ("/help", "显示所有可用命令", "/help"),
+        ("/new", "开始新会话，清除当前上下文", "/new"),
+        ("/status", "查看运行状态和当前模型", "/status"),
+        ("/stop", "停止当前响应", "/stop"),
+        ("/llm", "查看或切换模型：/llm 0", "/llm "),
+        ("/restore", "从最近保存的记录恢复对话", "/restore"),
+    ]
+
     def __init__(self, runner):
         super().__init__()
         self.runner = runner
@@ -1113,6 +1122,8 @@ class ChatPanel(QWidget):
         # drag state (title bar)
         self._drag_pos: Optional[QPoint] = None
         self._current_theme = "dark"
+        self._slash_items: list[dict] = []
+        self._slash_selected = 0
 
         self._build_ui()
 
@@ -1436,12 +1447,13 @@ class ChatPanel(QWidget):
             _svg_icon("moon", SVG_MOON, svg_color) if self._current_theme == "dark"
             else _svg_icon("sun", SVG_SUN, svg_color)
         )
-        for btn, svg in [
-            (self._mini_btn, SVG_MINIMIZE),
-            (self._maxi_btn, SVG_MAXIMIZE if not self.isMaximized() else SVG_RESTORE),
-            (self._close_btn, SVG_CLOSE),
+        for key, btn, svg in [
+            ("minimize", self._mini_btn, SVG_MINIMIZE),
+            ("maximize" if not self.isMaximized() else "restore",
+             self._maxi_btn, SVG_MAXIMIZE if not self.isMaximized() else SVG_RESTORE),
+            ("close", self._close_btn, SVG_CLOSE),
         ]:
-            btn.setIcon(_svg_icon("winctl", svg, svg_color))
+            btn.setIcon(_svg_icon(key, svg, svg_color))
             btn.setStyleSheet(build_titlebar_btn_style(C, danger=(btn is self._close_btn)))
         self._search_btn.setIcon(_svg_icon("search", SVG_SEARCH, C["muted"]))
         self._search_btn.setStyleSheet(f"""
@@ -1498,10 +1510,8 @@ class ChatPanel(QWidget):
             self._refresh_model_rows_style()
 
         # ── input area ──
-        self._input.setStyleSheet(
-            f"QTextEdit {{ background: transparent; color: {C['text']};"
-            f" border: none; padding: 10px 12px; font-size: 14px; }}"
-        )
+        self._apply_input_theme()
+        self._refresh_slash_palette_style()
 
     def _rebuild_md_css(self):
         """Rebuild _MD_CSS from current C palette."""
@@ -1726,7 +1736,7 @@ class ChatPanel(QWidget):
         wrap.setStyleSheet("background: transparent;")
         ly = QVBoxLayout(wrap)
         ly.setContentsMargins(20, 6, 20, 0)
-        ly.setSpacing(0)
+        ly.setSpacing(6)
 
         self._chips_row = QWidget()
         self._chips_row.setStyleSheet("background: transparent;")
@@ -1737,17 +1747,8 @@ class ChatPanel(QWidget):
         ly.addWidget(self._chips_row)
 
         card = QWidget()
-        card.setStyleSheet(f"""
-            QWidget#inputCard {{
-                background: rgba(32,32,38,0.85);
-                border: 1px solid {C['border'].name()};
-                border-radius: 16px;
-            }}
-            QWidget#inputCard:focus-within {{
-                border-color: rgba(124,58,237,0.55);
-            }}
-        """)
         card.setObjectName("inputCard")
+        self._input_card = card
         card_ly = QVBoxLayout(card)
         card_ly.setContentsMargins(14, 10, 10, 10)
         card_ly.setSpacing(6)
@@ -1762,13 +1763,6 @@ class ChatPanel(QWidget):
         self._input.setAutoFormatting(QTextEdit.AutoNone)
         self._input.setFixedHeight(64)
         self._input.setPlaceholderText("给助手发送消息... Enter发送，Shift+Enter换行")
-        self._input.setStyleSheet(f"""
-            QTextEdit {{
-                background: transparent; color: {C['text']};
-                border: none; padding: 0; font-size: 14px;
-                selection-background-color: rgba(124,58,237,0.4);
-            }}
-        """)
         self._input.installEventFilter(self)
         self._input.textChanged.connect(self._on_text_changed)
         card_ly.addWidget(self._input)
@@ -1808,8 +1802,64 @@ class ChatPanel(QWidget):
         bottom.addWidget(self._send_btn)
 
         card_ly.addLayout(bottom)
+        self._slash_palette = QFrame()
+        self._slash_palette.setObjectName("slashPalette")
+        self._slash_palette.setFixedHeight(0)
+        self._slash_palette.hide()
+        self._slash_ly = QVBoxLayout(self._slash_palette)
+        self._slash_ly.setContentsMargins(6, 6, 6, 6)
+        self._slash_ly.setSpacing(2)
+        ly.addWidget(self._slash_palette)
         ly.addWidget(card)
+        self._apply_input_theme()
         return wrap
+
+    def _apply_input_theme(self):
+        if not hasattr(self, "_input"):
+            return
+        if self._current_theme == "light":
+            card_bg = "rgba(255,255,255,0.96)"
+            card_border = "rgba(213,206,197,0.95)"
+            card_focus = "rgba(204,120,92,0.75)"
+            input_bg = "#ffffff"
+            selection = "rgba(204,120,92,0.25)"
+        else:
+            card_bg = "rgba(32,32,38,0.85)"
+            card_border = C["border"].name()
+            card_focus = "rgba(124,58,237,0.55)"
+            input_bg = "transparent"
+            selection = "rgba(124,58,237,0.4)"
+
+        if hasattr(self, "_input_card"):
+            self._input_card.setStyleSheet(f"""
+                QWidget#inputCard {{
+                    background: {card_bg};
+                    border: 1px solid {card_border};
+                    border-radius: 16px;
+                }}
+                QWidget#inputCard:focus-within {{
+                    border-color: {card_focus};
+                }}
+            """)
+        self._input.setStyleSheet(f"""
+            QTextEdit {{
+                background: {input_bg};
+                color: {C['text']};
+                border: none;
+                padding: 0;
+                font-size: 14px;
+                selection-background-color: {selection};
+            }}
+            QTextEdit::placeholder {{
+                color: {C['muted']};
+            }}
+        """)
+        if hasattr(self, "_char_lbl"):
+            self._char_lbl.setStyleSheet(f"color: {C['muted']}; font-size: 11px;")
+        if hasattr(self, "_token_lbl"):
+            self._token_lbl.setStyleSheet(f"color: {C['muted']}; font-size: 11px; margin-left: 10px;")
+        if hasattr(self, "_send_btn"):
+            self._send_btn.setStyleSheet(self._stop_btn_style() if self._is_streaming else self._send_btn_style())
 
     # ── history page ──────────────────────────────────────────────────────────
     def _build_history_page(self) -> QWidget:
@@ -2076,8 +2126,21 @@ class ChatPanel(QWidget):
             if obj is self._search_input and event.key() == Qt.Key_Escape:
                 self._hide_search()
                 return True
+            if obj is self._input and self._slash_palette.isVisible():
+                if event.key() == Qt.Key_Escape:
+                    self._hide_slash_palette()
+                    return True
+                if event.key() in (Qt.Key_Up, Qt.Key_Down):
+                    step = -1 if event.key() == Qt.Key_Up else 1
+                    self._move_slash_selection(step)
+                    return True
+                if event.key() == Qt.Key_Tab:
+                    self._accept_slash_selection(send=False)
+                    return True
             if obj is self._input and event.key() in (Qt.Key_Return, Qt.Key_Enter):
                 if not (event.modifiers() & Qt.ShiftModifier):
+                    if self._slash_palette.isVisible() and self._accept_slash_selection(send=True):
+                        return True
                     self._handle_send()
                     return True
         # 搜索框失焦时关闭搜索
@@ -2089,6 +2152,110 @@ class ChatPanel(QWidget):
     def _on_text_changed(self):
         n = len(self._input.toPlainText())
         self._char_lbl.setText(f"{n} / 2000")
+        self._update_slash_palette()
+
+    def _update_slash_palette(self):
+        text = self._input.toPlainText()
+        if not text.startswith("/") or "\n" in text:
+            self._hide_slash_palette()
+            return
+        query = text.strip().lower()
+        matches = [
+            (cmd, desc, fill)
+            for cmd, desc, fill in self._SLASH_COMMANDS
+            if cmd.startswith(query) or query in desc.lower()
+        ]
+        if not matches:
+            self._hide_slash_palette()
+            return
+        self._show_slash_palette(matches)
+
+    def _show_slash_palette(self, matches: list[tuple[str, str, str]]):
+        while self._slash_ly.count():
+            item = self._slash_ly.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._slash_items = []
+        self._slash_selected = min(self._slash_selected, max(0, len(matches) - 1))
+
+        for idx, (cmd, desc, fill) in enumerate(matches[:6]):
+            row = QPushButton()
+            row.setCursor(QCursor(Qt.PointingHandCursor))
+            row.setFixedHeight(34)
+            row.setText(f"{cmd}  {desc}")
+            row.clicked.connect(lambda _checked=False, i=idx: self._accept_slash_selection(i, send=False))
+            self._slash_ly.addWidget(row)
+            self._slash_items.append({"button": row, "cmd": cmd, "fill": fill})
+
+        self._slash_palette.setFixedHeight(12 + len(self._slash_items) * 36)
+        self._slash_palette.show()
+        self._refresh_slash_palette_style()
+
+    def _hide_slash_palette(self):
+        if hasattr(self, "_slash_palette"):
+            self._slash_palette.hide()
+            self._slash_palette.setFixedHeight(0)
+
+    def _move_slash_selection(self, step: int):
+        if not self._slash_items:
+            return
+        self._slash_selected = (self._slash_selected + step) % len(self._slash_items)
+        self._refresh_slash_palette_style()
+
+    def _accept_slash_selection(self, idx: int | None = None, send: bool = False) -> bool:
+        if not self._slash_items:
+            return False
+        if idx is not None:
+            self._slash_selected = idx
+        selected = self._slash_items[self._slash_selected]
+        fill = selected["fill"]
+        self._input.blockSignals(True)
+        self._input.setPlainText(fill)
+        self._input.blockSignals(False)
+        cursor = self._input.textCursor()
+        cursor.movePosition(cursor.End)
+        self._input.setTextCursor(cursor)
+        self._char_lbl.setText(f"{len(fill)} / 2000")
+        self._hide_slash_palette()
+        if send and not fill.endswith(" "):
+            self._handle_send()
+        return True
+
+    def _refresh_slash_palette_style(self):
+        if not hasattr(self, "_slash_palette"):
+            return
+        if self._current_theme == "light":
+            palette_bg = "rgba(255,255,255,0.98)"
+            item_bg = "transparent"
+            selected_bg = "rgba(204,120,92,0.13)"
+        else:
+            palette_bg = "rgba(24,24,30,0.96)"
+            item_bg = "transparent"
+            selected_bg = "rgba(124,58,237,0.22)"
+        self._slash_palette.setStyleSheet(f"""
+            QFrame#slashPalette {{
+                background: {palette_bg};
+                border: 1px solid {C['border'].name()};
+                border-radius: 12px;
+            }}
+        """)
+        for idx, item in enumerate(self._slash_items):
+            bg = selected_bg if idx == self._slash_selected else item_bg
+            item["button"].setStyleSheet(f"""
+                QPushButton {{
+                    background: {bg};
+                    color: {C['text']};
+                    border: none;
+                    border-radius: 7px;
+                    padding: 0 10px;
+                    text-align: left;
+                    font-size: 12px;
+                }}
+                QPushButton:hover {{
+                    background: {selected_bg};
+                    color: {C['text']};
+                }}
+            """)
 
     # ── file attachment ────────────────────────────────────────────────────────
     def _attach_files(self):

@@ -31,10 +31,10 @@ for (const el of document.querySelectorAll('[data-ui="chat-placeholder"]')) el.p
 
 // ─── State ────────────────────────────────────────────────────────────────
 const state = {
-  sessions: new Map(),
+  sessions: new Map(),      // localSessionId -> { id, bridgeSessionId, title, messages: [], cwd, config, diagnostics }
   activeId: null,
   bridgeReady: false,
-  defaultConfig: { theme: 'dark', llmNo: 0, gaRoot: '' },
+  defaultConfig: { theme: 'auto', llmNo: 0, gaRoot: '' },
   modelProfiles: [],
   restartingBridge: false,
   bridgeNoticeMessage: null,
@@ -108,11 +108,13 @@ function renderDiagnostics() {
 }
 
 function openDiagnostics() {
+  if (!diagnosticsPanel) return;
   renderDiagnostics();
   diagnosticsPanel.classList.remove('hidden');
 }
 
 function closeDiagnostics() {
+  if (!diagnosticsPanel) return;
   diagnosticsPanel.classList.add('hidden');
 }
 
@@ -196,7 +198,7 @@ function detectStructuredKind(line) {
   const m = trimmed.match(/^(TOOL_RECALL|TOOL_REQUEST|TOOL_RESPONSE|COWORK|TUNR|TURN|ACTION|OBSERVATION|THOUGHT|TOOL)[\s:_-]*(.*)$/i);
   if (m) return { kind: m[1].toUpperCase(), rest: (m[2] || '').trim() };
 
-  // ZeroAgent currently streams tool calls/results as plain
+  // ZeroAgent streams tool calls/results as plain
   // assistant text, not as ACP `tool_call` notifications. Recognize the real
   // XML-ish markers so streamed code_run/file_read/etc. blocks are folded.
   if (/^<function_calls\b[^>]*>/i.test(trimmed) || /^<invoke\b[^>]*\bname=["'][^"']+["'][^>]*>/i.test(trimmed)) {
@@ -655,11 +657,6 @@ function isUntitledSessionTitle(title) {
   return !title || /^new\s+chat$/i.test(String(title).trim());
 }
 
-function coerceTimestamp(value, fallback) {
-  const num = Number(value);
-  return Number.isFinite(num) && num > 0 ? num : fallback;
-}
-
 function createLocalSession(id, title, bridgeSessionId = id, metadata = {}) {
   const now = Date.now() / 1000;
   const sess = {
@@ -667,10 +664,9 @@ function createLocalSession(id, title, bridgeSessionId = id, metadata = {}) {
     untitled: isUntitledSessionTitle(title),
     config: { ...state.defaultConfig },
     diagnostics: [],
-    createdAt: coerceTimestamp(metadata.createdAt ?? metadata.created_at, now),
-    updatedAt: coerceTimestamp(metadata.updatedAt ?? metadata.updated_at, now),
+    createdAt: Number(metadata.createdAt || metadata.created_at || now),
+    updatedAt: Number(metadata.updatedAt || metadata.updated_at || now),
     status: metadata.status || 'idle',
-    msgSeq: Number(metadata.msgSeq || metadata.msg_seq || 0),
   };
   if (Array.isArray(metadata.messages)) sess.messages = metadata.messages;
   getSessionRuntime(sess);
@@ -689,18 +685,13 @@ function setActiveSession(id) {
   state.activeId = id;
   const sess = state.sessions.get(id);
   if (!sess) return;
-  if (sess.bridgeSessionId && state.bridgeReady) {
-    window.ga.rpc('session/activate', { sessionId: sess.bridgeSessionId }).catch((err) => {
-      addDiagnostic('warn', 'Failed to activate bridge session', err);
-    });
-  }
   sessionTitleEl.textContent = sess.title;
   if (sidebarActiveTitleEl) sidebarActiveTitleEl.textContent = sess.title;
   renderMessages();
   renderSessionList();
   renderDiagnostics();
   const runtime = getSessionRuntime(sess);
-  setBusy(runtime.busy, runtime.busy ? 'Agent is responding...' : null, sess);
+  setBusy(runtime.busy, runtime.busy ? 'Agent is responding…' : null, sess);
   // When switching to a session that is still running, ensure the live draft
   // is rendered immediately and polling is active (it may have been started
   // earlier but its render calls were no-ops because the session wasn't active).
@@ -743,6 +734,33 @@ function renderSessionList() {
     item.setAttribute('aria-selected', sess.id === state.activeId ? 'true' : 'false');
     item.setAttribute('data-session-id', sess.id);
     item.title = sess.title;
+    // ─── Drag-and-drop reorder ───
+    item.draggable = true;
+    item.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', sess.id);
+      e.dataTransfer.effectAllowed = 'move';
+      item.classList.add('dragging');
+    });
+    item.addEventListener('dragend', () => {
+      item.classList.remove('dragging');
+      sessionListEl.querySelectorAll('.session-tab.drag-over').forEach(el => el.classList.remove('drag-over'));
+    });
+    item.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      item.classList.add('drag-over');
+    });
+    item.addEventListener('dragleave', () => {
+      item.classList.remove('drag-over');
+    });
+    item.addEventListener('drop', (e) => {
+      e.preventDefault();
+      item.classList.remove('drag-over');
+      const draggedId = e.dataTransfer.getData('text/plain');
+      if (draggedId && draggedId !== sess.id) {
+        reorderSession(draggedId, sess.id);
+      }
+    });
     // Per-tab status dot
     const dot = document.createElement('span');
     dot.className = 'tab-dot';
@@ -767,11 +785,22 @@ function renderSessionList() {
     item.appendChild(closeBtn);
     item.addEventListener('click', () => setActiveSession(sess.id));
     sessionListEl.insertBefore(item, newBtn);
-
   }
   renderSidebarSessions();
   const active = state.sessions.get(state.activeId);
   if (active && sidebarActiveTitleEl) sidebarActiveTitleEl.textContent = active.title;
+}
+
+// ─── Tab drag reorder helper ─────────────────────────────────────────────────
+function reorderSession(draggedId, targetId) {
+  const entries = [...state.sessions.entries()];
+  const fromIdx = entries.findIndex(([id]) => id === draggedId);
+  const toIdx = entries.findIndex(([id]) => id === targetId);
+  if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+  const [moved] = entries.splice(fromIdx, 1);
+  entries.splice(toIdx, 0, moved);
+  state.sessions = new Map(entries);
+  renderSessionList();
 }
 
 function hasUserMessages(sess) {
@@ -779,17 +808,7 @@ function hasUserMessages(sess) {
 }
 
 function sessionUpdatedAt(sess) {
-  return coerceTimestamp(sess?.updatedAt ?? sess?.updated_at, coerceTimestamp(sess?.createdAt ?? sess?.created_at, Date.now() / 1000));
-}
-
-function sessionGroupLabel(sess, now = Date.now() / 1000) {
-  const updated = sessionUpdatedAt(sess);
-  const dayAgo = now - 86400;
-  const weekAgo = now - 604800;
-  if (updated >= dayAgo) return 'Today';
-  if (updated >= dayAgo - 86400) return 'Yesterday';
-  if (updated >= weekAgo) return 'This Week';
-  return 'Earlier';
+  return Number(sess?.updatedAt || sess?.updated_at || sess?.createdAt || sess?.created_at || Date.now() / 1000);
 }
 
 function createSidebarSessionButton(sess) {
@@ -799,9 +818,9 @@ function createSidebarSessionButton(sess) {
   item.setAttribute('data-session-id', sess.id);
   item.title = sess.title;
   item.disabled = sess.id === state.activeId;
-  const runtime = getSessionRuntime(sess);
   const dot = document.createElement('span');
   dot.className = 'tab-dot';
+  const runtime = getSessionRuntime(sess);
   if (runtime && runtime.busy) dot.classList.add('busy');
   const label = document.createElement('span');
   label.className = 'sidebar-session-label';
@@ -825,52 +844,35 @@ function renderSidebarSessions() {
     sidebarSessionListEl.appendChild(empty);
     return;
   }
-
-  const groups = new Map([
-    ['Today', []],
-    ['Yesterday', []],
-    ['This Week', []],
-    ['Earlier', []],
-  ]);
-  const now = Date.now() / 1000;
-  for (const sess of sessions) groups.get(sessionGroupLabel(sess, now)).push(sess);
-
-  for (const [label, group] of groups.entries()) {
-    if (!group.length) continue;
-    const details = document.createElement('details');
-    details.className = 'sidebar-session-group';
-    details.open = label === 'Today';
-    const summary = document.createElement('summary');
-    summary.textContent = `${label} (${group.length})`;
-    details.appendChild(summary);
-    const list = document.createElement('div');
-    list.className = 'sidebar-group-list';
-    for (const sess of group.slice(0, 30)) {
-      list.appendChild(createSidebarSessionButton(sess));
-    }
-    details.appendChild(list);
-    sidebarSessionListEl.appendChild(details);
+  for (const sess of sessions.slice(0, 40)) {
+    sidebarSessionListEl.appendChild(createSidebarSessionButton(sess));
   }
 }
 
-function touchSession(sess, timestamp = Date.now() / 1000) {
-  if (!sess) return;
-  sess.updatedAt = coerceTimestamp(timestamp, Date.now() / 1000);
-}
-
-function syncBridgeSessionMeta(sess, meta = {}) {
-  if (!sess) return;
-  if (meta.title) {
-    sess.title = meta.title;
-    sess.untitled = isUntitledSessionTitle(meta.title);
+function renderCommandPalette() {
+  if (!commandPaletteEl) return;
+  const raw = inputEl.value.trim();
+  if (!raw.startsWith('/')) {
+    commandPaletteEl.classList.add('hidden');
+    commandPaletteEl.textContent = '';
+    return;
   }
-  sess.status = meta.status || sess.status;
-  sess.msgSeq = Number(meta.msgSeq || meta.msg_seq || sess.msgSeq || 0);
-  touchSession(sess, meta.updatedAt ?? meta.updated_at);
-  if (isActiveSession(sess)) {
-    sessionTitleEl.textContent = sess.title;
-    if (sidebarActiveTitleEl) sidebarActiveTitleEl.textContent = sess.title;
+  const matches = COMMANDS.filter((entry) => entry.command.startsWith(raw) || raw === '/').slice(0, 7);
+  commandPaletteEl.textContent = '';
+  for (const entry of matches) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'command-item';
+    item.innerHTML = `<code>${escapeHtml(entry.command)}</code><span>${escapeHtml(entry.description)}</span>`;
+    item.addEventListener('click', () => {
+      inputEl.value = entry.command.endsWith(' ') ? entry.command : `${entry.command} `;
+      inputEl.focus();
+      updateSendButton();
+      renderCommandPalette();
+    });
+    commandPaletteEl.appendChild(item);
   }
+  commandPaletteEl.classList.toggle('hidden', matches.length === 0);
 }
 
 function closeSession(id) {
@@ -904,7 +906,7 @@ async function newSession() {
   // Don't mark previousSess as busy - it's not doing anything
   // Just show status text without changing any tab dot
   const statusEl = $('status');
-  if (statusEl) statusEl.textContent = 'Creating session...';
+  if (statusEl) statusEl.textContent = 'Creating session…';
   let createdSess = null;
   try {
     const cwd = await getCwd();
@@ -912,7 +914,7 @@ async function newSession() {
     if (res.error) throw new Error(typeof res.error === 'string' ? res.error : (res.error.message || JSON.stringify(res.error)));
     const bridgeSessionId = res.sessionId;
     const localSessionId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    createdSess = createLocalSession(localSessionId, UI.DEFAULT_SESSION_TITLE, bridgeSessionId);
+    createdSess = createLocalSession(localSessionId, 'New chat', bridgeSessionId);
     createdSess.cwd = cwd;
     setActiveSession(localSessionId);
   } catch (e) {
@@ -923,7 +925,7 @@ async function newSession() {
 }
 
 async function getCwd() {
-  // Use the ZeroAgent root as default cwd.
+  // Use ZeroAgent root as default cwd.
   const status = await window.ga.checkStatus();
   return status.gaRoot;
 }
@@ -958,22 +960,8 @@ function renderMessages() {
     messagesEl.classList.add('empty');
     messagesEl.innerHTML = `
       <div class="empty-state">
-        <div class="empty-panel empty-copy">
-          <div class="empty-brand">${UI.APP_NAME}</div>
-          <div class="empty-title">${UI.WELCOME_TITLE}</div>
-          <div class="empty-sub">${UI.WELCOME_SUBTITLE}</div>
-        </div>
-        <div class="empty-panel empty-visual" aria-hidden="true">
-          <div class="empty-scanline"></div>
-          <div class="empty-frame">
-            <span></span><span></span><span></span>
-          </div>
-        </div>
-        <div class="empty-panel empty-status" aria-hidden="true">
-          <div class="empty-status-row"><span></span><strong></strong></div>
-          <div class="empty-status-row"><span></span><strong></strong></div>
-          <div class="empty-status-row"><span></span><strong></strong></div>
-        </div>
+        <div class="empty-title">New task</div>
+        <div class="empty-sub">Task me anything. Type <code>/help</code> for commands.</div>
       </div>`;
     state._prevRenderedId = state.activeId;
     return;
@@ -1025,7 +1013,7 @@ function renderMessage(msg, append = true) {
         if (dataUrl) {
           return `<img src="${dataUrl}" class="user-msg-thumb" />`;
         }
-        return '<span class="user-msg-thumb-placeholder" title="Image expired">IMG</span>';
+        return `<span class="user-msg-thumb-placeholder" title="Image expired">🖼</span>`;
       }).join('') + '</div>';
     }
     wrap.innerHTML = `<div class="bubble">${imagesHtml}${escapeHtml(msg.content)}</div>`;
@@ -1119,12 +1107,11 @@ function handleNotification(msg) {
   if (msg.type === 'session-state') {
     const sess = findSessionByBridgeId(msg.sessionId);
     if (!sess) return;
-    syncBridgeSessionMeta(sess, msg);
     const runtime = getSessionRuntime(sess);
     if ((msg.state === 'running' || msg.status === 'running') && !runtime.polling) {
       runtime.busy = true;
       runtime.forcePollOnce = true;
-      setBusy(true, 'Thinking...', sess);
+      setBusy(true, 'Thinking…', sess);
       pollSessionMessages(sess);
     } else if (msg.state === 'idle' || msg.state === 'error' || msg.status === 'idle') {
       // Session finished in background — do a final poll to pick up remaining messages
@@ -1152,7 +1139,7 @@ function handleNotification(msg) {
   } else if (kind === 'task_started') {
     hideError();
     startTaskTimer(sess);
-    setBusy(true, 'Thinking...', sess);
+    setBusy(true, 'Thinking…', sess);
   } else if (kind === 'task_completed' || kind === 'cancelled') {
     finalizeAssistantReply(sess);
     setBusy(false, null, sess);
@@ -1500,9 +1487,7 @@ function upsertPolledMessage(sess, raw, { partial = false } = {}) {
     return;
   }
   sess.messages.push(msg);
-  touchSession(sess, msg.ts);
   if (isActiveSession(sess)) renderMessage(msg);
-  renderSidebarSessions();
 }
 
 async function pollSessionMessages(sess) {
@@ -1519,7 +1504,7 @@ async function pollSessionMessages(sess) {
       for (const msg of (result.messages || [])) upsertPolledMessage(sess, msg, { partial: false });
       if (result.partial) upsertPolledMessage(sess, result.partial, { partial: true });
       const busy = result.status === 'running' || !!result.partial;
-      setBusy(busy, busy ? 'Thinking...' : null, sess);
+      setBusy(busy, busy ? 'Thinking…' : null, sess);
       if (!busy) {
         finalizeAssistantReply(sess);
         break;
@@ -1556,20 +1541,16 @@ async function sendPrompt(text, images = []) {
 
   const localUserMsg = { role: 'user', content: text, image_ids: imageIds };
   sess.messages.push(localUserMsg);
-  touchSession(sess);
   renderMessage(localUserMsg);
   startTaskTimer(sess);
   if (sess.untitled || isUntitledSessionTitle(sess.title)) {
-    sess.title = text.trim().slice(0, 40) + (text.trim().length > 40 ? '...' : '');
+    sess.title = text.trim().slice(0, 40) + (text.trim().length > 40 ? '…' : '');
     sess.untitled = false;
     sessionTitleEl.textContent = sess.title;
-    if (sidebarActiveTitleEl) sidebarActiveTitleEl.textContent = sess.title;
     renderSessionList();
-  } else {
-    renderSidebarSessions();
   }
 
-  setBusy(true, 'Thinking...', sess);
+  setBusy(true, 'Thinking…', sess);
   try {
     const res = await window.ga.rpc('session/prompt', {
       sessionId: await ensureBridgeSession(sess),
@@ -1588,9 +1569,7 @@ async function sendPrompt(text, images = []) {
     pollSessionMessages(sess);
   } catch (e) {
     sess.messages.push({ role: 'error', content: e.message || String(e) });
-    touchSession(sess);
     if (isActiveSession(sess)) renderMessage({ role: 'error', content: e.message || String(e) });
-    renderSidebarSessions();
     setBusy(false, null, sess);
   }
 }
@@ -1609,6 +1588,26 @@ async function cancelPrompt() {
   }
 }
 
+async function forceStopActiveSession() {
+  const ok = await cancelPrompt();
+  showSystem(ok ? 'Stop requested.' : 'No active run to stop.');
+}
+
+async function reinjectTools() {
+  const sess = state.sessions.get(state.activeId);
+  if (!sess) {
+    showSystem('No active session.');
+    return;
+  }
+  try {
+    const sessionId = await ensureBridgeSession(sess);
+    await window.ga.rpc('session/reinject-tools', { sessionId });
+    showSystem('Tools will be reinjected on the next turn.');
+  } catch (err) {
+    showError('Failed to reinject tools: ' + (err.message || err));
+  }
+}
+
 // ─── Slash commands ──────────────────────────────────────────────────────
 async function handleSlash(cmd) {
   const [name, ...rest] = cmd.trim().slice(1).split(/\s+/);
@@ -1619,7 +1618,10 @@ async function handleSlash(cmd) {
     case 'help':
       showSystem([
         'Available commands:',
-        ...COMMANDS.map((entry) => `  ${entry.command.padEnd(13)} ${entry.description}`),
+        '  /new        New session',
+        '  /clear      Clear current session display',
+        '  /stop       Cancel the current request',
+        '  /theme      Switch theme (light|dark|auto)',
       ].join('\n'));
       break;
     case 'new':
@@ -1643,7 +1645,7 @@ async function handleSlash(cmd) {
         cfg.theme = arg;
         applyTheme();
         await window.ga.saveConfig(cfg);
-        showSystem(`Theme: ${arg}`);
+        showSystem(`Theme → ${arg}`);
       } else {
         showSystem('Usage: /theme light|dark|auto');
       }
@@ -1653,7 +1655,7 @@ async function handleSlash(cmd) {
         const status = await window.ga.checkStatus();
         showSystem(`cwd: ${sess?.cwd || status.gaRoot}`);
       } else {
-        showSystem(`Creating new session in ${arg}...`);
+        showSystem(`Creating new session in ${arg}…`);
         // Need a new session for different cwd
         const res = await window.ga.rpc('session/new', { cwd: arg, mcp_servers: [] });
         if (res.error) showSystem('Failed: ' + (res.error.message || res.error));
@@ -1674,11 +1676,7 @@ async function handleSlash(cmd) {
 function showSystem(text) {
   const msg = { role: 'system', content: text };
   const sess = state.sessions.get(state.activeId);
-  if (sess) {
-    sess.messages.push(msg);
-    touchSession(sess);
-    renderSidebarSessions();
-  }
+  if (sess) sess.messages.push(msg);
   renderMessage(msg);
   return msg;
 }
@@ -1703,15 +1701,14 @@ function setStatus(kind, text) {
 
 function updateTabDot(sessionId, kind) {
   if (!sessionId) return;
-  const tabs = document.querySelectorAll(`[data-session-id="${sessionId}"]`);
-  for (const tab of tabs) {
-    const dot = tab.querySelector('.tab-dot');
-    if (!dot) continue;
-    dot.className = 'tab-dot';
-    if (kind === 'busy') dot.classList.add('busy');
-    else if (kind === 'warn') dot.classList.add('warn');
-    else if (kind === 'err') dot.classList.add('err');
-  }
+  const tab = sessionListEl.querySelector(`[data-session-id="${sessionId}"]`);
+  if (!tab) return;
+  const dot = tab.querySelector('.tab-dot');
+  if (!dot) return;
+  dot.className = 'tab-dot';
+  if (kind === 'busy') dot.classList.add('busy');
+  else if (kind === 'warn') dot.classList.add('warn');
+  else if (kind === 'err') dot.classList.add('err');
   // 'ok' = default green (no extra class needed)
 }
 
@@ -1727,8 +1724,8 @@ function setBusy(busy, label, sess = state.sessions.get(state.activeId)) {
     updateTabDot(sess.id, dotKind);
   }
   if (!isActiveSession(sess)) return;
-  if (busy) setStatus('busy', label || 'Working...');
-  else setStatus(state.bridgeReady ? 'ok' : 'warn', state.bridgeReady ? 'Ready' : 'Starting...');
+  if (busy) setStatus('busy', label || 'Working…');
+  else setStatus(state.bridgeReady ? 'ok' : 'warn', state.bridgeReady ? 'Ready' : 'Starting…');
   renderSendButtonState();
 }
 
@@ -1743,60 +1740,6 @@ function renderSendButtonState() {
 
 function updateSendButton() {
   renderSendButtonState();
-}
-
-function commandMatchesQuery(entry, query) {
-  const q = String(query || '').trim().toLowerCase();
-  if (!q || q === '/') return true;
-  return entry.command.toLowerCase().startsWith(q)
-    || entry.description.toLowerCase().includes(q.replace(/^\//, ''));
-}
-
-function hideCommandPalette() {
-  if (commandPaletteEl) commandPaletteEl.classList.add('hidden');
-}
-
-function insertCommand(command) {
-  inputEl.value = command;
-  if (!command.endsWith(' ') && ['/theme', '/cwd'].some((prefix) => command.startsWith(prefix))) {
-    inputEl.value += ' ';
-  }
-  inputEl.focus();
-  inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length);
-  inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-}
-
-function renderCommandPalette() {
-  if (!commandPaletteEl) return;
-  const text = inputEl.value.trimStart();
-  if (!text.startsWith('/')) {
-    hideCommandPalette();
-    return;
-  }
-  const matches = COMMANDS.filter((entry) => commandMatchesQuery(entry, text));
-  if (!matches.length) {
-    hideCommandPalette();
-    return;
-  }
-  commandPaletteEl.textContent = '';
-  for (const entry of matches) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'command-suggestion';
-    button.setAttribute('role', 'option');
-    const command = document.createElement('code');
-    command.textContent = entry.command;
-    const description = document.createElement('span');
-    description.textContent = entry.description;
-    button.appendChild(command);
-    button.appendChild(description);
-    button.addEventListener('click', () => {
-      insertCommand(entry.command);
-      hideCommandPalette();
-    });
-    commandPaletteEl.appendChild(button);
-  }
-  commandPaletteEl.classList.remove('hidden');
 }
 
 function showError(text, actionLabel, actionFn, options = {}) {
@@ -1840,7 +1783,10 @@ function renderModelOptions() {
   for (const profile of options) {
     const opt = document.createElement('option');
     opt.value = String(profile.llmNo);
-    const displayName = profile.name || profile.model || `Model ${profile.llmNo}`;
+    // Display as "name/model" when both fields available
+    const displayName = profile.name && profile.model
+      ? `${profile.name}/${profile.model}`
+      : profile.name || profile.model || `Model ${profile.llmNo}`;
     opt.textContent = displayName;
     select.appendChild(opt);
   }
@@ -1851,10 +1797,6 @@ function renderModelOptions() {
     select.appendChild(opt);
   }
   select.value = selected;
-  if (sidebarModelEl) {
-    const selectedOption = [...select.options].find((opt) => opt.value === select.value);
-    sidebarModelEl.textContent = selectedOption ? selectedOption.textContent : 'Default / Auto';
-  }
 }
 
 async function loadModelProfiles() {
@@ -1862,6 +1804,10 @@ async function loadModelProfiles() {
     const result = await window.ga.getModelProfiles();
     state.modelProfiles = Array.isArray(result && result.profiles) ? result.profiles : [];
     renderModelOptions();
+    const activeProfile = state.modelProfiles.find((profile) => profile.active) || state.modelProfiles[0];
+    if (sidebarModelEl && activeProfile) {
+      sidebarModelEl.textContent = activeProfile.name || activeProfile.model || 'Default / Auto';
+    }
   } catch (err) {
     addDiagnostic('warn', 'Failed to load model names', err);
     renderModelOptions();
@@ -1905,23 +1851,6 @@ async function saveSettings() {
   }
 }
 
-async function forceStopActiveSession() {
-  if (await cancelPrompt()) showSystem('Stop requested.');
-  else setStatus(state.bridgeReady ? 'ok' : 'warn', state.bridgeReady ? 'Ready' : 'Starting...');
-}
-
-async function reinjectTools() {
-  try {
-    const sess = state.sessions.get(state.activeId);
-    if (sess?.bridgeSessionId) {
-      await window.ga.rpc('session/reinject-tools', { sessionId: sess.bridgeSessionId });
-    }
-    showSystem('Tools will be re-injected next turn.');
-  } catch (err) {
-    showError('Failed to reinject tools: ' + (err.message || err));
-  }
-}
-
 async function ensureBridgeSession(sess) {
   if (!sess) throw new Error('No active session.');
   if (sess.bridgeSessionId) return sess.bridgeSessionId;
@@ -1935,13 +1864,13 @@ async function ensureBridgeSession(sess) {
 
 async function restartBridge(options = {}) {
   const { remapSessions = false } = options;
-  setStatus('warn', 'Restarting...');
+  setStatus('warn', 'Restarting…');
   state.bridgeReady = false;
   state.restartingBridge = true;
   if (remapSessions) {
     for (const sess of state.sessions.values()) sess.bridgeSessionId = null;
   }
-  state.bridgeNoticeMessage = showSystem('Bridge restarting...');
+  state.bridgeNoticeMessage = showSystem('Bridge restarting…');
   await window.ga.startBridge(getActiveConfig().llmNo || 0);
   window.setTimeout(() => {
     if (state.restartingBridge && !state.bridgeReady && !getActiveSessionRuntime()?.busy) {
@@ -1957,7 +1886,7 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
   if (state.bridgeReady) return; // already marked ready, prevent double-fire
   state.bridgeReady = true;
   state.restartingBridge = false;
-  if (getActiveSessionRuntime()?.busy) setStatus('busy', 'Agent is responding...');
+  if (getActiveSessionRuntime()?.busy) setStatus('busy', 'Agent is responding…');
   else setStatus('ok', 'Ready');
   updateBridgeNotice(noticeText);
   hideError();
@@ -1979,7 +1908,7 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
           const msgRes = await fetch(`${bridgeUrl}/session/${sid}/messages?after=0&limit=9999`).then(r => r.json()).catch(() => null);
           if (msgRes?.messages) {
             sess.messages = msgRes.messages;
-            syncBridgeSessionMeta(sess, msgRes);
+            sess.updatedAt = Number(msgRes.updatedAt || sess.updatedAt || Date.now() / 1000);
             // Initialize polling state so we don't re-fetch these messages
             const runtime = getSessionRuntime(sess);
             runtime.seenBridgeMessageIds = new Set();
@@ -1990,9 +1919,8 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
             runtime.lastPolledMessageId = maxId;
           }
         }
-        const activeBridgeId = listRes?.activeSessionId || existingSessions[0]?.id || existingSessions[0]?.sessionId;
-        const preferred = [...state.sessions.values()].find((sess) => sess.bridgeSessionId === activeBridgeId);
-        const firstLocalId = preferred?.id || [...state.sessions.keys()][0];
+        // Activate the first session
+        const firstLocalId = [...state.sessions.keys()][0];
         if (firstLocalId) setActiveSession(firstLocalId);
       } else {
         await newSession();
@@ -2023,9 +1951,9 @@ window.ga.onBridgeError((err) => {
   state.bridgeReady = false;
   state.restartingBridge = false;
 
-  if (err.type === 'no-config' || err.type === 'no-mykey') {
-    showError(err.message, 'Config', async () => {
-      await (window.ga.openConfigDir || window.ga.openMykeyTemplate)();
+  if (err.type === 'no-mykey') {
+    showError(err.message, 'Setup', async () => {
+      await window.ga.openMykeyTemplate();
     }, { skipDiagnostic: true });
   } else if (err.type === 'no-python') {
     showError(err.message, 'Settings', openSettings, { skipDiagnostic: true });
@@ -2037,7 +1965,7 @@ window.ga.onBridgeError((err) => {
 window.ga.onBridgeClosed((info) => {
   addDiagnostic('warn', 'Bridge closed', info);
   if (state.restartingBridge) {
-    setStatus('warn', 'Restarting...');
+    setStatus('warn', 'Restarting…');
     return;
   }
   state.bridgeReady = false;
@@ -2071,8 +1999,6 @@ inputEl.addEventListener('keydown', (e) => {
   } else if (e.key === 'Escape' && getActiveSessionRuntime()?.busy) {
     e.preventDefault();
     cancelPrompt();
-  } else if (e.key === 'Escape') {
-    hideCommandPalette();
   }
 });
 
@@ -2144,7 +2070,6 @@ function submitInput() {
   const images = [...pendingImages];
   inputEl.value = '';
   inputEl.style.height = 'auto';
-  hideCommandPalette();
   clearPendingImages();
   updateSendButton();
 
@@ -2175,7 +2100,7 @@ $('sidebar-tools-btn').addEventListener('click', reinjectTools);
 $('close-settings').addEventListener('click', closeSettings);
 $('cancel-settings').addEventListener('click', closeSettings);
 $('save-settings').addEventListener('click', saveSettings);
-$('open-mykey').addEventListener('click', () => openConfigFile(window.ga.openConfig, 'config.yaml'));
+$('open-mykey').addEventListener('click', () => openConfigFile(window.ga.openMykey, 'config.yaml'));
 $('error-dismiss').addEventListener('click', hideError);
 
 settingsModal.querySelector('.modal-backdrop').addEventListener('click', closeSettings);

@@ -6,9 +6,8 @@
   const listeners = new Map();
   let ws = null;
   let cachedBridgeReady = null;
-  const bridgePort = location.port || '14168';
-  const bridgeBase = `${location.protocol}//${location.hostname}:${bridgePort}`;
-  const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:${bridgePort}/ws`;
+  const bridgeBase = `${location.protocol}//${location.hostname}:14168`;
+  const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:14168/ws`;
 
   function on(channel, cb) {
     if (typeof cb !== 'function') return () => {};
@@ -86,11 +85,6 @@
         return http('/model-profiles');
       case 'session/new':
         return http('/session/new', { method: 'POST', body: params || {} });
-      case 'session/activate': {
-        const sid = params.sessionId || params.id || params.bridgeSessionId;
-        if (!sid) throw new Error('session/activate missing sessionId');
-        return http(`/session/${encodeURIComponent(sid)}/activate`, { method: 'POST', body: params || {} });
-      }
       case 'session/prompt': {
         const sid = params.sessionId || params.id || params.bridgeSessionId;
         if (!sid) throw new Error('session/prompt missing sessionId');
@@ -120,7 +114,7 @@
       case 'list_continuable_sessions':
         return { sessions: [] };
       case 'restore_session':
-        throw new Error('restore_session is not implemented in web2 bridge');
+        throw new Error('restore_session is not implemented in the desktop bridge');
       default:
         throw new Error(`Unknown RPC method: ${method}`);
     }
@@ -128,7 +122,6 @@
 
   window.ga = {
     platform: navigator.platform.toLowerCase().includes('mac') ? 'darwin' : 'win32',
-    bridgeUrl: bridgeBase,
     startBridge: async () => { connectWs(); return http('/status'); },
     stopBridge: async () => ({ ok: true }),
     checkStatus: () => rpc('app/status', {}),
@@ -136,10 +129,8 @@
     saveConfig: (cfg) => rpc('app/config/save', cfg || {}),
     getModelProfiles: () => rpc('get/model-profiles', {}),
     selectGaRoot: () => rpc('app/path/selectGaRoot', {}),
-    openConfigDir: () => rpc('app/path/open', { kind: 'configDir' }),
-    openMykeyTemplate: () => rpc('app/path/open', { kind: 'configDir' }),
-    openMykey: () => rpc('app/path/open', { kind: 'config' }),
-    openConfig: () => rpc('app/path/open', { kind: 'config' }),
+    openMykeyTemplate: () => rpc('app/path/open', { kind: 'mykeyTemplate' }),
+    openMykey: () => rpc('app/path/open', { kind: 'mykey' }),
     pollSession: (sessionId, afterId = 0) => rpc('session/poll', { sessionId, afterId }),
     rpc,
     onBridgeMessage: (cb) => on('bridge-message', cb),
