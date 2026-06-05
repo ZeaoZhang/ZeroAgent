@@ -1,4 +1,4 @@
-// ZeroAgent Web2 browser bridge adapter.
+// GenericAgent Web2 browser bridge adapter.
 // HTTP is the command/data channel. WebSocket only carries small state events.
 (() => {
   'use strict';
@@ -102,11 +102,6 @@
         if (!sid) throw new Error('session/cancel missing sessionId');
         return http(`/session/${encodeURIComponent(sid)}/cancel`, { method: 'POST', body: params || {} });
       }
-      case 'session/reinject-tools': {
-        const sid = params.sessionId || params.id || params.bridgeSessionId;
-        if (!sid) throw new Error('session/reinject-tools missing sessionId');
-        return http(`/session/${encodeURIComponent(sid)}/reinject-tools`, { method: 'POST', body: params || {} });
-      }
       case 'app/path/open':
         return http('/path/open', { method: 'POST', body: params || {} });
       case 'app/path/selectGaRoot':
@@ -114,7 +109,7 @@
       case 'list_continuable_sessions':
         return { sessions: [] };
       case 'restore_session':
-        throw new Error('restore_session is not implemented in the desktop bridge');
+        throw new Error('restore_session is not implemented in web2 bridge');
       default:
         throw new Error(`Unknown RPC method: ${method}`);
     }

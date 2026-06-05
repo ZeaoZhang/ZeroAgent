@@ -1,30 +1,5 @@
 window.process = window.process || { platform: navigator.platform.toLowerCase().includes('mac') ? 'darwin' : 'win32' };
-// ZeroAgent Desktop renderer logic.
-
-const UI = Object.freeze({
-  APP_NAME: 'ZeroAgent',
-  DEFAULT_SESSION_TITLE: 'New chat',
-  CHAT_PLACEHOLDER: 'Ask ZeroAgent to work on something',
-  WELCOME_TITLE: 'Ready',
-  WELCOME_SUBTITLE: 'No active run',
-});
-
-const COMMANDS = Object.freeze([
-  { command: '/help', description: 'Show available commands' },
-  { command: '/new', description: 'Start a new session' },
-  { command: '/clear', description: 'Clear current session display' },
-  { command: '/stop', description: 'Cancel the current request' },
-  { command: '/settings', description: 'Open model and config settings' },
-  { command: '/theme light', description: 'Switch to light theme' },
-  { command: '/theme dark', description: 'Switch to dark theme' },
-  { command: '/theme auto', description: 'Follow system theme' },
-  { command: '/cwd ', description: 'Create a session in a directory' },
-]);
-
-for (const el of document.querySelectorAll('[data-ui="app-name"]')) el.textContent = UI.APP_NAME;
-for (const el of document.querySelectorAll('[data-ui="welcome-title"]')) el.textContent = UI.WELCOME_TITLE;
-for (const el of document.querySelectorAll('[data-ui="welcome-subtitle"]')) el.textContent = UI.WELCOME_SUBTITLE;
-for (const el of document.querySelectorAll('[data-ui="chat-placeholder"]')) el.placeholder = UI.CHAT_PLACEHOLDER;
+// GenericAgent Desktop — Renderer Logic
 // Handles UI state, sessions, streaming, slash commands.
 
 'use strict';
@@ -38,6 +13,7 @@ const state = {
   modelProfiles: [],
   restartingBridge: false,
   bridgeNoticeMessage: null,
+  mykeyReady: true,
   runtimeBySessionId: new Map(),
 };
 
@@ -60,11 +36,6 @@ const sessionListEl = $('session-list');
 const sessionTitleEl = $('session-title');
 const statusBadge = $('status-badge');
 const statusText = $('status-text');
-const sidebarActiveTitleEl = $('sidebar-active-title');
-const sidebarStatusEl = $('sidebar-status');
-const sidebarSessionListEl = $('sidebar-session-list');
-const sidebarModelEl = $('sidebar-model');
-const commandPaletteEl = $('command-palette');
 const settingsModal = $('settings-modal');
 const errorBanner = $('error-banner');
 const diagnosticsPanel = $('diagnostics-panel');
@@ -108,13 +79,11 @@ function renderDiagnostics() {
 }
 
 function openDiagnostics() {
-  if (!diagnosticsPanel) return;
   renderDiagnostics();
   diagnosticsPanel.classList.remove('hidden');
 }
 
 function closeDiagnostics() {
-  if (!diagnosticsPanel) return;
   diagnosticsPanel.classList.add('hidden');
 }
 
@@ -198,7 +167,7 @@ function detectStructuredKind(line) {
   const m = trimmed.match(/^(TOOL_RECALL|TOOL_REQUEST|TOOL_RESPONSE|COWORK|TUNR|TURN|ACTION|OBSERVATION|THOUGHT|TOOL)[\s:_-]*(.*)$/i);
   if (m) return { kind: m[1].toUpperCase(), rest: (m[2] || '').trim() };
 
-  // ZeroAgent streams tool calls/results as plain
+  // GenericAgent's ACP bridge currently streams tool calls/results as plain
   // assistant text, not as ACP `tool_call` notifications. Recognize the real
   // XML-ish markers so streamed code_run/file_read/etc. blocks are folded.
   if (/^<function_calls\b[^>]*>/i.test(trimmed) || /^<invoke\b[^>]*\bname=["'][^"']+["'][^>]*>/i.test(trimmed)) {
@@ -657,18 +626,13 @@ function isUntitledSessionTitle(title) {
   return !title || /^new\s+chat$/i.test(String(title).trim());
 }
 
-function createLocalSession(id, title, bridgeSessionId = id, metadata = {}) {
-  const now = Date.now() / 1000;
+function createLocalSession(id, title, bridgeSessionId = id) {
   const sess = {
-    id, bridgeSessionId, title: title || UI.DEFAULT_SESSION_TITLE, messages: [], cwd: null,
+    id, bridgeSessionId, title: title || 'New chat', messages: [], cwd: null,
     untitled: isUntitledSessionTitle(title),
     config: { ...state.defaultConfig },
     diagnostics: [],
-    createdAt: Number(metadata.createdAt || metadata.created_at || now),
-    updatedAt: Number(metadata.updatedAt || metadata.updated_at || now),
-    status: metadata.status || 'idle',
   };
-  if (Array.isArray(metadata.messages)) sess.messages = metadata.messages;
   getSessionRuntime(sess);
   // Keep freshly-created chats visually quiet: the empty state is enough guidance.
   state.sessions.set(id, sess);
@@ -686,7 +650,6 @@ function setActiveSession(id) {
   const sess = state.sessions.get(id);
   if (!sess) return;
   sessionTitleEl.textContent = sess.title;
-  if (sidebarActiveTitleEl) sidebarActiveTitleEl.textContent = sess.title;
   renderMessages();
   renderSessionList();
   renderDiagnostics();
@@ -709,7 +672,7 @@ function setActiveSession(id) {
       // Do an immediate one-shot poll to refresh the view right now.
       (async () => {
         try {
-          const res = await window.ga.pollSession(sess.bridgeSessionId || sess.id, runtime.lastPolledMessageId || 0);
+          const res = await GaBridge.pollSession(sess.bridgeSessionId || sess.id, runtime.lastPolledMessageId || 0);
           if (res?.error) return;
           const result = res.result || res;
           for (const msg of (result.messages || [])) upsertPolledMessage(sess, msg, { partial: false });
@@ -786,9 +749,6 @@ function renderSessionList() {
     item.addEventListener('click', () => setActiveSession(sess.id));
     sessionListEl.insertBefore(item, newBtn);
   }
-  renderSidebarSessions();
-  const active = state.sessions.get(state.activeId);
-  if (active && sidebarActiveTitleEl) sidebarActiveTitleEl.textContent = active.title;
 }
 
 // ─── Tab drag reorder helper ─────────────────────────────────────────────────
@@ -801,78 +761,6 @@ function reorderSession(draggedId, targetId) {
   entries.splice(toIdx, 0, moved);
   state.sessions = new Map(entries);
   renderSessionList();
-}
-
-function hasUserMessages(sess) {
-  return !!sess && Array.isArray(sess.messages) && sess.messages.some((msg) => msg.role === 'user');
-}
-
-function sessionUpdatedAt(sess) {
-  return Number(sess?.updatedAt || sess?.updated_at || sess?.createdAt || sess?.created_at || Date.now() / 1000);
-}
-
-function createSidebarSessionButton(sess) {
-  const item = document.createElement('button');
-  item.type = 'button';
-  item.className = 'sidebar-session-item' + (sess.id === state.activeId ? ' active' : '');
-  item.setAttribute('data-session-id', sess.id);
-  item.title = sess.title;
-  item.disabled = sess.id === state.activeId;
-  const dot = document.createElement('span');
-  dot.className = 'tab-dot';
-  const runtime = getSessionRuntime(sess);
-  if (runtime && runtime.busy) dot.classList.add('busy');
-  const label = document.createElement('span');
-  label.className = 'sidebar-session-label';
-  label.textContent = sess.title;
-  item.appendChild(dot);
-  item.appendChild(label);
-  item.addEventListener('click', () => setActiveSession(sess.id));
-  return item;
-}
-
-function renderSidebarSessions() {
-  if (!sidebarSessionListEl) return;
-  sidebarSessionListEl.textContent = '';
-  const sessions = [...state.sessions.values()]
-    .filter(hasUserMessages)
-    .sort((a, b) => sessionUpdatedAt(b) - sessionUpdatedAt(a));
-  if (!sessions.length) {
-    const empty = document.createElement('div');
-    empty.className = 'sidebar-empty';
-    empty.textContent = 'No saved sessions yet. Start a conversation first.';
-    sidebarSessionListEl.appendChild(empty);
-    return;
-  }
-  for (const sess of sessions.slice(0, 40)) {
-    sidebarSessionListEl.appendChild(createSidebarSessionButton(sess));
-  }
-}
-
-function renderCommandPalette() {
-  if (!commandPaletteEl) return;
-  const raw = inputEl.value.trim();
-  if (!raw.startsWith('/')) {
-    commandPaletteEl.classList.add('hidden');
-    commandPaletteEl.textContent = '';
-    return;
-  }
-  const matches = COMMANDS.filter((entry) => entry.command.startsWith(raw) || raw === '/').slice(0, 7);
-  commandPaletteEl.textContent = '';
-  for (const entry of matches) {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = 'command-item';
-    item.innerHTML = `<code>${escapeHtml(entry.command)}</code><span>${escapeHtml(entry.description)}</span>`;
-    item.addEventListener('click', () => {
-      inputEl.value = entry.command.endsWith(' ') ? entry.command : `${entry.command} `;
-      inputEl.focus();
-      updateSendButton();
-      renderCommandPalette();
-    });
-    commandPaletteEl.appendChild(item);
-  }
-  commandPaletteEl.classList.toggle('hidden', matches.length === 0);
 }
 
 function closeSession(id) {
@@ -925,7 +813,7 @@ async function newSession() {
 }
 
 async function getCwd() {
-  // Use ZeroAgent root as default cwd.
+  // Use GA root as default cwd
   const status = await window.ga.checkStatus();
   return status.gaRoot;
 }
@@ -1588,26 +1476,6 @@ async function cancelPrompt() {
   }
 }
 
-async function forceStopActiveSession() {
-  const ok = await cancelPrompt();
-  showSystem(ok ? 'Stop requested.' : 'No active run to stop.');
-}
-
-async function reinjectTools() {
-  const sess = state.sessions.get(state.activeId);
-  if (!sess) {
-    showSystem('No active session.');
-    return;
-  }
-  try {
-    const sessionId = await ensureBridgeSession(sess);
-    await window.ga.rpc('session/reinject-tools', { sessionId });
-    showSystem('Tools will be reinjected on the next turn.');
-  } catch (err) {
-    showError('Failed to reinject tools: ' + (err.message || err));
-  }
-}
-
 // ─── Slash commands ──────────────────────────────────────────────────────
 async function handleSlash(cmd) {
   const [name, ...rest] = cmd.trim().slice(1).split(/\s+/);
@@ -1694,7 +1562,6 @@ function updateBridgeNotice(text) {
 function setStatus(kind, text) {
   statusBadge.className = 'badge ' + kind;
   statusText.textContent = text;
-  if (sidebarStatusEl) sidebarStatusEl.textContent = text;
   // Update per-tab dot for active session
   updateTabDot(state.activeId, kind);
 }
@@ -1804,10 +1671,6 @@ async function loadModelProfiles() {
     const result = await window.ga.getModelProfiles();
     state.modelProfiles = Array.isArray(result && result.profiles) ? result.profiles : [];
     renderModelOptions();
-    const activeProfile = state.modelProfiles.find((profile) => profile.active) || state.modelProfiles[0];
-    if (sidebarModelEl && activeProfile) {
-      sidebarModelEl.textContent = activeProfile.name || activeProfile.model || 'Default / Auto';
-    }
   } catch (err) {
     addDiagnostic('warn', 'Failed to load model names', err);
     renderModelOptions();
@@ -1902,13 +1765,12 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
         // Restore each session from bridge
         for (const bSess of existingSessions) {
           const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-          const sess = createLocalSession(localId, bSess.title || 'Restored', bSess.id || bSess.sessionId, bSess);
+          const sess = createLocalSession(localId, bSess.title || 'Restored', bSess.id || bSess.sessionId);
           // Fetch full messages for this session
           const sid = bSess.id || bSess.sessionId;
           const msgRes = await fetch(`${bridgeUrl}/session/${sid}/messages?after=0&limit=9999`).then(r => r.json()).catch(() => null);
           if (msgRes?.messages) {
             sess.messages = msgRes.messages;
-            sess.updatedAt = Number(msgRes.updatedAt || sess.updatedAt || Date.now() / 1000);
             // Initialize polling state so we don't re-fetch these messages
             const runtime = getSessionRuntime(sess);
             runtime.seenBridgeMessageIds = new Set();
@@ -1983,7 +1845,6 @@ inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
   updateSendButton();
-  renderCommandPalette();
 });
 
 // IME composition fix - triple guard for CJK input methods (macOS especially)
@@ -2092,15 +1953,11 @@ sendBtn.addEventListener('click', () => {
 
 // ─── Buttons ─────────────────────────────────────────────────────────────
 $('new-session-btn').addEventListener('click', newSession);
-$('sidebar-new-btn').addEventListener('click', newSession);
 $('settings-btn').addEventListener('click', openSettings);
-$('sidebar-settings-btn').addEventListener('click', openSettings);
-$('sidebar-stop-btn').addEventListener('click', forceStopActiveSession);
-$('sidebar-tools-btn').addEventListener('click', reinjectTools);
 $('close-settings').addEventListener('click', closeSettings);
 $('cancel-settings').addEventListener('click', closeSettings);
 $('save-settings').addEventListener('click', saveSettings);
-$('open-mykey').addEventListener('click', () => openConfigFile(window.ga.openMykey, 'config.yaml'));
+$('open-mykey').addEventListener('click', () => openConfigFile(window.ga.openMykey, 'mykey.py'));
 $('error-dismiss').addEventListener('click', hideError);
 
 settingsModal.querySelector('.modal-backdrop').addEventListener('click', closeSettings);

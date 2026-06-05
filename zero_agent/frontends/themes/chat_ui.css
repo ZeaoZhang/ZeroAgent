@@ -3,12 +3,6 @@
 /* ===== Global ===== */
 body, [data-testid="stAppViewContainer"] {
     background-color: var(--za-bg) !important;
-    background-image:
-        radial-gradient(circle at 18% 8%, color-mix(in srgb, var(--za-primary) 13%, transparent) 0 13%, transparent 36%),
-        radial-gradient(circle at 82% 0%, color-mix(in srgb, var(--za-accent) 12%, transparent) 0 11%, transparent 32%),
-        linear-gradient(90deg, color-mix(in srgb, var(--za-border) 34%, transparent) 1px, transparent 1px),
-        linear-gradient(0deg, color-mix(in srgb, var(--za-border) 24%, transparent) 1px, transparent 1px) !important;
-    background-size: 100% 100%, 100% 100%, 48px 48px, 48px 48px !important;
     color: var(--za-text) !important;
     font-family: var(--za-font) !important;
 }
@@ -22,9 +16,8 @@ p, li, div[data-testid="stMarkdownContainer"] p {
 
 /* ===== Header / Top bar ===== */
 [data-testid="stHeader"], header[data-testid="stHeader"] {
-    background-color: color-mix(in srgb, var(--za-bg) 82%, transparent) !important;
-    border-bottom: 1px solid color-mix(in srgb, var(--za-border) 72%, transparent) !important;
-    backdrop-filter: blur(20px) !important;
+    background-color: var(--za-bg) !important;
+    border-bottom: 1px solid var(--za-border) !important;
 }
 [data-testid="stToolbar"] { visibility: hidden !important; }
 [data-testid="stDecoration"], #MainMenu { display: none !important; visibility: hidden !important; }
@@ -36,29 +29,22 @@ p, li, div[data-testid="stMarkdownContainer"] p {
 }
 button[data-testid="stExpandSidebarButton"] {
     visibility: visible !important;
-    background: var(--za-bg-secondary) !important; border: 1px solid var(--za-border) !important;
-    color: var(--za-text) !important; border-radius: 10px !important; box-shadow: none !important;
+    background: #F4F1EA !important; border: none !important;
+    color: #3B2F2A !important; border-radius: 10px !important; box-shadow: none !important;
 }
 button[data-testid="stExpandSidebarButton"]:hover {
-    background: var(--za-bg) !important;
+    background: #EAE4D9 !important;
 }
 button[data-testid="stExpandSidebarButton"],
 button[data-testid="stExpandSidebarButton"] *,
 button[data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"] {
-    color: var(--za-text) !important; fill: var(--za-text) !important; stroke: var(--za-text) !important;
+    color: #3B2F2A !important; fill: #3B2F2A !important; stroke: #3B2F2A !important;
 }
 
 /* ===== Sidebar ===== */
 [data-testid="stSidebar"], section[data-testid="stSidebar"] {
     background-color: var(--za-sidebar-bg) !important;
-    background-image:
-        linear-gradient(180deg, color-mix(in srgb, var(--za-primary) 8%, transparent), transparent 36%),
-        linear-gradient(90deg, color-mix(in srgb, var(--za-border) 32%, transparent) 1px, transparent 1px) !important;
-    background-size: 100% 100%, 32px 32px !important;
-    border-right: 1px solid color-mix(in srgb, var(--za-border) 76%, transparent) !important;
-}
-[data-testid="stSidebar"] > div {
-    padding-top: 1.1rem !important;
+    border-right: 1px solid var(--za-border) !important;
 }
 [data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] p,
 [data-testid="stSidebar"] span, [data-testid="stSidebar"] label {
@@ -66,54 +52,25 @@ button[data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"] {
 }
 [data-testid="stSidebar"] hr { border-color: var(--za-border) !important; }
 
-.za-sidebar-brand {
-    border-bottom: 1px solid var(--za-border);
-    padding: 0.15rem 0 0.8rem;
-    margin-bottom: 0.7rem;
-}
-.za-sidebar-kicker {
-    color: var(--za-primary);
-    font-family: var(--za-mono);
-    font-size: 0.72rem;
-    letter-spacing: 0;
-    text-transform: uppercase;
-    margin-bottom: 0.35rem;
-}
-.za-sidebar-active {
-    color: var(--za-text);
-    font-size: 1rem;
-    font-weight: 650;
-    line-height: 1.22;
-    word-break: break-word;
-}
-
 /* Sidebar header */
 [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
     font-size: 0.85rem !important; font-weight: 600 !important;
-    letter-spacing: 0 !important; text-transform: uppercase !important;
+    letter-spacing: 0.04em !important; text-transform: uppercase !important;
     color: var(--za-text-secondary) !important; margin-bottom: 0.5rem !important;
 }
 
 /* Sidebar buttons — grouped cards */
 [data-testid="stSidebar"] .stButton > button {
-    min-height: 34px !important;
-    background-color: color-mix(in srgb, var(--za-surface) 68%, transparent) !important;
-    border: 1px solid color-mix(in srgb, var(--za-border) 84%, transparent) !important;
-    border-radius: 7px !important; padding: 0.38rem 0.62rem !important;
-    font-size: 0.82rem !important; font-weight: 500 !important;
+    background-color: var(--za-bg) !important;
+    border: 1px solid var(--za-border) !important;
+    border-radius: 8px !important; padding: 0.45rem 0.75rem !important;
+    font-size: 0.85rem !important; font-weight: 450 !important;
     transition: all 0.15s ease !important; text-align: left !important;
-    box-shadow: none !important;
 }
 [data-testid="stSidebar"] .stButton > button:hover {
     border-color: var(--za-primary) !important;
-    background-color: color-mix(in srgb, var(--za-primary) 10%, var(--za-bg-secondary)) !important;
+    background-color: var(--za-bg-secondary) !important;
     color: var(--za-text) !important;
-}
-[data-testid="stSidebar"] .stButton > button:disabled {
-    opacity: 1 !important;
-    background-color: color-mix(in srgb, var(--za-primary) 82%, var(--za-bg)) !important;
-    border-color: var(--za-primary) !important;
-    font-weight: 600 !important;
 }
 
 /* Sidebar selectbox — subtle pill */
@@ -140,82 +97,10 @@ button[data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"] {
 
 /* ===== Headings ===== */
 h1, .stTitle, [data-testid="stHeading"] h1 {
-    color: var(--za-text) !important; font-weight: 600 !important; letter-spacing: 0 !important;
+    color: var(--za-text) !important; font-weight: 600 !important; letter-spacing: -0.02em !important;
 }
 h2, h3, h4, h5, h6 {
     color: var(--za-text) !important; font-weight: 500 !important;
-}
-
-/* ===== Main workbench frame ===== */
-.main .block-container,
-[data-testid="stAppViewContainer"] .block-container {
-    max-width: 940px !important;
-    padding-top: 4rem !important;
-    padding-bottom: 6.5rem !important;
-}
-.za-topline {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 0.1rem 0 1.1rem;
-    border-bottom: 1px solid var(--za-border);
-    margin: 3.5rem 0 1.15rem;
-}
-.za-kicker {
-    color: var(--za-primary);
-    font-family: var(--za-mono);
-    font-size: 0.72rem;
-    letter-spacing: 0;
-    text-transform: uppercase;
-    margin-bottom: 0.25rem;
-}
-.za-topline h1 {
-    margin: 0 !important;
-    color: var(--za-text) !important;
-    font-size: 2rem !important;
-    line-height: 1.02 !important;
-    letter-spacing: 0 !important;
-    font-weight: 700 !important;
-}
-.za-runtime-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.45rem;
-    max-width: 42%;
-    min-height: 30px;
-    border: 1px solid var(--za-border);
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--za-surface) 86%, transparent);
-    padding: 0.25rem 0.6rem;
-    color: var(--za-text-secondary);
-    font-family: var(--za-mono);
-    font-size: 0.72rem;
-    white-space: nowrap;
-}
-.za-runtime-pill span {
-    width: 0.42rem;
-    height: 0.42rem;
-    border-radius: 999px;
-    background: var(--za-success);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--za-success) 18%, transparent);
-    flex: 0 0 auto;
-}
-.za-runtime-pill strong,
-.za-runtime-pill em {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    font-style: normal;
-    font-weight: 500;
-}
-.za-runtime-pill em {
-    color: var(--za-primary);
-}
-[data-testid="stAppViewContainer"] .block-container,
-.st-emotion-cache-z5fcl4,
-.st-emotion-cache-13ln4jf {
-    background: transparent !important;
 }
 
 /* ===== Buttons ===== */
@@ -226,11 +111,11 @@ h2, h3, h4, h5, h6 {
     font-weight: 500 !important; transition: all 0.2s ease !important;
 }
 .stButton > button:hover {
-    background-color: var(--za-primary) !important; color: var(--za-on-primary) !important;
+    background-color: var(--za-primary) !important; color: white !important;
     border-color: var(--za-primary) !important;
 }
 .stButton > button[kind="primary"] {
-    background-color: var(--za-primary) !important; color: var(--za-on-primary) !important;
+    background-color: var(--za-primary) !important; color: white !important;
     border-color: var(--za-primary) !important;
 }
 .stButton > button[kind="primary"]:hover {
@@ -244,44 +129,27 @@ h2, h3, h4, h5, h6 {
 }
 [data-testid="stChatInput"] { margin-bottom: 12px !important; }
 [data-testid="stChatInput"] textarea, [data-testid="stChatInputTextArea"] {
-    color: var(--za-text) !important; background-color: transparent !important;
+    color: var(--za-text) !important; background-color: var(--za-bg) !important;
     caret-color: var(--za-text) !important;
 }
 [data-testid="stChatInput"] textarea::placeholder {
     color: var(--za-text-secondary) !important; opacity: 0.7 !important;
 }
 [data-testid="stChatInput"] > div {
-    border: 1px solid color-mix(in srgb, var(--za-border) 86%, transparent) !important; border-radius: 8px !important;
+    border: 1px solid var(--za-border) !important; border-radius: 12px !important;
     min-height: 48px !important; padding: 0.25rem 0.4rem 0.25rem 0.7rem !important;
     align-items: center !important; gap: 0.4rem !important;
-    background: color-mix(in srgb, var(--za-surface) 86%, transparent) !important;
-    box-shadow: 0 16px 48px var(--za-shadow) !important;
-    backdrop-filter: blur(18px) !important;
 }
 [data-testid="stChatInput"] > div:focus-within {
     border-color: var(--za-primary) !important;
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--za-primary) 24%, transparent) !important;
+    box-shadow: 0 0 0 2px rgba(212, 162, 127, 0.2) !important;
 }
 [data-testid="stChatInput"] textarea, [data-testid="stChatInputTextArea"] {
     min-height: 1.5rem !important; padding: 0.35rem 0 !important; line-height: 1.5 !important;
 }
-[data-testid="stChatInput"] > div > div,
-[data-testid="stChatInput"] > div > div > div,
-[data-testid="stChatInput"] [data-testid="stChatInputTextArea"] {
-    background-color: transparent !important;
-    background: transparent !important;
-}
-[data-testid="stChatInput"] > div div {
-    background-color: transparent !important;
-    background: transparent !important;
-}
-[data-testid="stChatInput"] > div > div,
-[data-testid="stChatInput"] > div > div > div {
-    border-color: transparent !important;
-}
 [data-testid="stChatInput"] button, [data-testid="stChatInputSubmitButton"] {
-    background-color: var(--za-primary) !important; color: var(--za-on-primary) !important;
-    border-radius: 8px !important; width: 48px !important; height: 48px !important;
+    background-color: var(--za-primary) !important; color: white !important;
+    border-radius: 10px !important; width: 48px !important; height: 48px !important;
     min-width: 48px !important; min-height: 48px !important; padding: 0 !important;
     display: inline-flex !important; align-items: center !important;
     justify-content: center !important; flex-shrink: 0 !important;
@@ -310,8 +178,8 @@ h2, h3, h4, h5, h6 {
     box-shadow: 0 2px 8px rgba(0,0,0,0.12) !important; white-space: nowrap !important;
 }
 [data-testid="stVerticalBlock"]:has(.stop-btn-anchor):not(:has([data-testid="stChatMessage"])) [data-testid="stButton"] > button[kind="primary"] {
-    background-color: var(--za-primary) !important;
-    border-color: var(--za-primary) !important;
+    background-color: rgba(212, 162, 127, 0.95) !important;
+    border-color: rgba(212, 162, 127, 0.95) !important;
 }
 [data-testid="stVerticalBlock"]:has(.stop-btn-anchor):not(:has([data-testid="stChatMessage"])) [data-testid="stButton"] > button:hover {
     transform: translateY(-1px) !important; box-shadow: 0 3px 12px rgba(0,0,0,0.15) !important;
@@ -319,16 +187,15 @@ h2, h3, h4, h5, h6 {
 
 /* ===== Chat messages ===== */
 [data-testid="stChatMessage"] {
-    background-color: transparent !important; border: none !important;
-    border-radius: 12px !important; padding: 0.55rem 0.7rem !important; margin-bottom: 0.22rem !important;
+    background-color: var(--za-bg) !important; border: none !important;
+    border-radius: 12px !important; padding: 0.5rem 1rem !important; margin-bottom: 0.3rem !important;
     transition: box-shadow 0.15s ease !important;
 }
 [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) {
-    background-color: color-mix(in srgb, var(--za-surface) 78%, transparent) !important;
-    border: 1px solid color-mix(in srgb, var(--za-border) 70%, transparent) !important;
+    background-color: var(--za-surface) !important;
 }
 [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
-    background-color: color-mix(in srgb, var(--za-surface) 72%, transparent) !important; border: 1px solid var(--za-border) !important;
+    background-color: var(--za-bg) !important; border: 1px solid var(--za-border) !important;
     border-left: 2px solid var(--za-primary) !important;
     border-radius: 12px !important; box-shadow: 0 1px 3px var(--za-shadow) !important;
 }
@@ -340,7 +207,7 @@ h2, h3, h4, h5, h6 {
 .msg-timestamp {
     text-align: left; font-size: 0.73rem; color: var(--za-text-secondary);
     margin-top: -0.3rem; margin-bottom: 0.2rem; opacity: 0.55;
-    font-family: var(--za-mono); letter-spacing: 0;
+    font-family: var(--za-mono); letter-spacing: 0.02em;
 }
 
 /* ===== Avatars ===== */
@@ -355,17 +222,17 @@ h2, h3, h4, h5, h6 {
 [data-testid*="chatAvatar"][data-testid*="user"],
 [data-testid*="stChatMessageAvatar"][data-testid*="User"],
 [data-testid*="stChatMessageAvatar"][data-testid*="user"] {
-    background: var(--za-primary) !important;
-    border: 1px solid var(--za-primary) !important;
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.20), 0 2px 6px var(--za-shadow) !important;
+    background: linear-gradient(145deg, #D8B08A 0%, #B98259 100%) !important;
+    border: 1px solid rgba(150, 102, 67, 0.22) !important;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.34), 0 2px 6px rgba(104, 76, 54, 0.10) !important;
 }
 [data-testid*="chatAvatar"][data-testid*="assistant"],
 [data-testid*="stChatMessageAvatar"][data-testid*="Assistant"],
 [data-testid*="stChatMessageAvatar"][data-testid*="assistant"],
 [data-testid="stChatMessageAvatarContainer"] > div {
-    background: var(--za-bg-secondary) !important;
-    border: 1px solid var(--za-border) !important;
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.40), 0 2px 6px var(--za-shadow) !important;
+    background: linear-gradient(145deg, #F6F1E9 0%, #E5D7C7 100%) !important;
+    border: 1px solid rgba(187, 165, 141, 0.50) !important;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.72), 0 2px 6px rgba(104, 76, 54, 0.08) !important;
 }
 
 /* ===== Code ===== */
@@ -444,185 +311,20 @@ a:hover { color: var(--za-primary-hover) !important; }
 
 /* ===== Improved welcome/empty state ===== */
 .za-welcome {
-    position: relative;
-    min-height: 340px;
-    overflow: hidden;
-    padding: 0;
-    max-width: 860px;
-    margin: 1.8rem auto 2rem;
-    border: 1px solid color-mix(in srgb, var(--za-border) 72%, transparent);
-    border-radius: 0;
-    background:
-        radial-gradient(circle at 75% 18%, color-mix(in srgb, var(--za-primary) 12%, transparent) 0 8%, transparent 30%),
-        linear-gradient(135deg, color-mix(in srgb, var(--za-surface) 96%, transparent), color-mix(in srgb, var(--za-bg-secondary) 88%, transparent));
-    box-shadow: 0 28px 90px var(--za-shadow);
-    display: grid;
-    grid-template-columns: repeat(12, minmax(0, 1fr));
-    grid-template-rows: repeat(5, minmax(54px, 1fr));
-    grid-auto-flow: dense;
+    text-align: center; padding: 2rem 1rem; max-width: 480px; margin: 0 auto;
 }
-.za-welcome::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background-image:
-        linear-gradient(90deg, color-mix(in srgb, var(--za-text) 5%, transparent) 1px, transparent 1px),
-        linear-gradient(0deg, color-mix(in srgb, var(--za-text) 4%, transparent) 1px, transparent 1px);
-    background-size: 34px 34px;
-    mask-image: linear-gradient(135deg, transparent 0%, #000 18%, #000 68%, transparent 100%);
-    opacity: 0.46;
-    pointer-events: none;
-}
-.za-welcome::after {
-    content: "";
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 0;
-    height: 2px;
-    background: linear-gradient(90deg, transparent, var(--za-primary), transparent);
-    opacity: 0.9;
-}
-.za-welcome-copy,
-.za-welcome-visual,
-.za-welcome-status {
-    position: relative;
-    z-index: 1;
-    min-width: 0;
-    min-height: 0;
-    border-right: 1px solid color-mix(in srgb, var(--za-border) 78%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--za-border) 78%, transparent);
-    background: color-mix(in srgb, var(--za-surface) 72%, transparent);
-}
-.za-welcome-copy {
-    grid-column: 1 / 8;
-    grid-row: 1 / 6;
-    display: flex;
-    flex-direction: column;
-    justify-content: flex-end;
-    padding: 1.9rem;
-}
-.za-welcome-brand {
-    width: max-content;
-    max-width: 100%;
-    margin-bottom: 0.9rem;
-    padding: 0.3rem 0.5rem;
-    border: 1px solid color-mix(in srgb, var(--za-primary) 42%, var(--za-border));
-    background: color-mix(in srgb, var(--za-primary) 11%, transparent);
-    color: var(--za-primary);
+.za-welcome p { color: var(--za-text-secondary); font-size: 0.95rem; }
+.za-welcome .za-hint {
+    margin-top: 1rem; font-size: 0.82rem; opacity: 0.65;
     font-family: var(--za-mono);
-    font-size: 0.72rem;
-    line-height: 1;
-    text-transform: uppercase;
-}
-.za-welcome h2 {
-    position: relative;
-    z-index: 1;
-    color: var(--za-text) !important;
-    font-size: clamp(4rem, 8vw, 6.5rem) !important;
-    line-height: 0.86 !important;
-    letter-spacing: 0 !important;
-    margin: 0 0 1.1rem !important;
-    font-weight: 780 !important;
-}
-.za-welcome p {
-    color: var(--za-text-secondary) !important;
-    font-family: var(--za-mono);
-    font-size: 0.76rem !important;
-    margin: 0 !important;
-}
-.za-welcome p::before {
-    content: "";
-    display: inline-block;
-    width: 0.44rem;
-    height: 0.44rem;
-    margin-right: 0.5rem;
-    border-radius: 999px;
-    background: var(--za-primary);
-    box-shadow: 0 0 0 0.32rem color-mix(in srgb, var(--za-primary) 14%, transparent);
-}
-.za-welcome-visual {
-    grid-column: 8 / 13;
-    grid-row: 1 / 4;
-    overflow: hidden;
-    background:
-        radial-gradient(circle at 36% 38%, color-mix(in srgb, var(--za-primary) 18%, transparent) 0 8%, transparent 33%),
-        linear-gradient(145deg, color-mix(in srgb, var(--za-bg-secondary) 82%, transparent), color-mix(in srgb, var(--za-surface) 72%, transparent));
-}
-.za-welcome-visual::before {
-    content: "";
-    position: absolute;
-    left: -20%;
-    right: -20%;
-    top: 44%;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--za-primary) 84%, transparent), transparent);
-    box-shadow: 0 0 30px color-mix(in srgb, var(--za-primary) 36%, transparent);
-    animation: za-scanline 4.8s ease-in-out infinite;
-}
-.za-welcome-frame {
-    position: absolute;
-    inset: 1.9rem;
-    display: grid;
-    grid-template-columns: 1.5fr 0.8fr;
-    grid-template-rows: 1fr 0.75fr;
-    gap: 0.5rem;
-}
-.za-welcome-frame span {
-    border: 1px solid color-mix(in srgb, var(--za-primary) 24%, var(--za-border));
-    background: color-mix(in srgb, var(--za-bg) 38%, transparent);
-}
-.za-welcome-frame span:first-child { grid-row: span 2; }
-.za-welcome-frame span:nth-child(2) {
-    background:
-        linear-gradient(90deg, transparent 47%, color-mix(in srgb, var(--za-primary) 28%, transparent) 48% 52%, transparent 53%),
-        linear-gradient(0deg, transparent 47%, color-mix(in srgb, var(--za-primary) 28%, transparent) 48% 52%, transparent 53%),
-        color-mix(in srgb, var(--za-bg) 34%, transparent);
-}
-.za-welcome-frame span:nth-child(3) {
-    background:
-        repeating-linear-gradient(0deg, color-mix(in srgb, var(--za-primary) 22%, transparent) 0 1px, transparent 1px 9px),
-        color-mix(in srgb, var(--za-bg) 34%, transparent);
-}
-.za-welcome-status {
-    grid-column: 8 / 13;
-    grid-row: 4 / 6;
-    display: grid;
-    grid-template-rows: repeat(3, 1fr);
-    border-bottom: 0;
-}
-.za-welcome-status div {
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1.1rem;
-    padding: 0 1.35rem;
-    border-bottom: 1px solid color-mix(in srgb, var(--za-border) 70%, transparent);
-}
-.za-welcome-status div:last-child { border-bottom: 0; }
-.za-welcome-status span,
-.za-welcome-status strong {
-    display: block;
-    height: 0.44rem;
-    background: color-mix(in srgb, var(--za-text) 13%, transparent);
-}
-.za-welcome-status span { width: 42%; }
-.za-welcome-status strong {
-    width: 18%;
-    background: color-mix(in srgb, var(--za-primary) 62%, transparent);
-}
-@keyframes za-scanline {
-    0%, 100% { transform: translateY(-42px); opacity: 0.12; }
-    50% { transform: translateY(42px); opacity: 0.85; }
 }
 
-/* ===== Button contrast fix ===== */
+/* ===== Button contrast fix (dark text on warm buttons) ===== */
 .stButton > button[kind="primary"] {
-    color: var(--za-on-primary) !important;
+    color: #1A1714 !important;
 }
 [data-testid="stChatInput"] button, [data-testid="stChatInputSubmitButton"] {
-    color: var(--za-on-primary) !important;
+    color: #1A1714 !important;
 }
 
 /* ===== Focus-visible ===== */
@@ -631,7 +333,7 @@ a:hover { color: var(--za-primary-hover) !important; }
     outline-offset: 2px !important;
 }
 [data-testid="stChatInput"] > div:focus-within {
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--za-primary) 24%, transparent) !important;
+    box-shadow: 0 0 0 3px rgba(212, 162, 127, 0.25) !important;
 }
 
 /* ===== Reduced motion ===== */
@@ -640,50 +342,5 @@ a:hover { color: var(--za-primary-hover) !important; }
         animation-duration: 0.01ms !important;
         animation-iteration-count: 1 !important;
         transition-duration: 0.01ms !important;
-    }
-}
-
-@media (max-width: 760px) {
-    .main .block-container,
-    [data-testid="stAppViewContainer"] .block-container {
-        padding-left: 0.8rem !important;
-        padding-right: 0.8rem !important;
-        padding-top: 3rem !important;
-    }
-    .za-topline {
-        display: block;
-        margin-top: 2.6rem;
-    }
-    .za-topline h1 {
-        font-size: 1.55rem !important;
-    }
-    .za-runtime-pill {
-        max-width: 100%;
-        margin-top: 0.75rem;
-    }
-    .za-welcome {
-        min-height: 430px;
-        margin-top: 2rem;
-        grid-template-columns: repeat(6, minmax(0, 1fr));
-        grid-template-rows: 2.1fr 1.35fr 1fr;
-    }
-    .za-welcome-copy {
-        grid-column: 1 / 7;
-        grid-row: 1 / 2;
-        padding: 1.35rem;
-    }
-    .za-welcome-visual {
-        grid-column: 1 / 7;
-        grid-row: 2 / 3;
-    }
-    .za-welcome-status {
-        grid-column: 1 / 7;
-        grid-row: 3 / 4;
-    }
-    .za-welcome-frame {
-        inset: 1.25rem;
-    }
-    .za-welcome h2 {
-        font-size: 3.1rem !important;
     }
 }

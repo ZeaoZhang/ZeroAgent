@@ -20,6 +20,15 @@ fn project_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn find_bridge_script() -> PathBuf {
+    // exe is at frontends/GenericAgent.exe
+    // bridge is at frontends/desktop_bridge.py
+    std::env::current_exe()
+        .expect("cannot get exe path")
+        .parent().expect("cannot get exe dir")
+        .join("desktop_bridge.py")
+}
+
 /// Find python executable:
 /// 1. .portable/uv-python/ 下找 python.exe (Windows) 或 python3 (Unix)
 /// 2. Fallback to system PATH
@@ -60,7 +69,7 @@ fn find_python() -> String {
     { "python3".to_string() }
 }
 
-/// Find project directory by searching upward from exe for the ZeroAgent package.
+/// Find project directory by searching upward from exe for agentmain.py
 fn find_project_dir() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let mut dir = exe.parent();
@@ -68,7 +77,7 @@ fn find_project_dir() -> Option<String> {
     for _ in 0..8 {
         match dir {
             Some(d) => {
-                if d.join("zero_agent").exists() && d.join("zero_agent").join("frontends").join("desktop_bridge.py").exists() {
+                if d.join("agentmain.py").exists() {
                     return Some(d.to_string_lossy().to_string());
                 }
                 dir = d.parent();
@@ -79,11 +88,11 @@ fn find_project_dir() -> Option<String> {
     None
 }
 
-/// Settings file path: ~/.zeroagent_desktop_settings.json
+/// Settings file path: ~/.ga_desktop_settings.json
 fn settings_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".zeroagent_desktop_settings.json")
+        .join(".ga_desktop_settings.json")
 }
 
 /// Read config from settings file, or auto-discover and save
@@ -140,6 +149,52 @@ fn wait_for_port(port: u16, timeout: Duration) -> bool {
     false
 }
 
+fn start_bridge() {
+    let script = find_bridge_script();
+    if !script.exists() {
+        eprintln!("[tauri] bridge script not found: {:?}", script);
+        return;
+    }
+
+    let python = find_python();
+    eprintln!("[tauri] using python: {}", python);
+
+    let show_console = std::env::args().any(|a| a == "--console");
+
+    let mut cmd = Command::new(&python);
+    cmd.arg(&script)
+       .current_dir(script.parent().unwrap());
+
+    #[cfg(windows)]
+    if !show_console {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    match cmd.spawn() {
+        Ok(child) => {
+            eprintln!("[tauri] started bridge PID={}", child.id());
+            *BRIDGE_PROCESS.lock().unwrap() = Some(child);
+        }
+        Err(e) => {
+            eprintln!("[tauri] failed to start bridge: {} (python={})", e, python);
+            return;
+        }
+    }
+
+    if !wait_for_port(14168, Duration::from_secs(15)) {
+        eprintln!("[tauri] WARNING: bridge did not become ready within 15s");
+    }
+}
+
+fn ensure_bridge_running() {
+    if is_bridge_running() {
+        eprintln!("[tauri] bridge already running on 127.0.0.1:14168; reusing it");
+        return;
+    }
+    start_bridge();
+}
+
 #[tauri::command]
 fn start_bridge_with_config(app_handle: tauri::AppHandle, python_path: String, project_dir: String) -> Result<(), String> {
     // Save to settings
@@ -148,21 +203,20 @@ fn start_bridge_with_config(app_handle: tauri::AppHandle, python_path: String, p
     std::fs::write(&path, serde_json::to_string_pretty(&obj).unwrap())
         .map_err(|e| format!("Failed to write settings: {}", e))?;
 
-    // Start bridge only if it is not already accepting connections.
+    // Start bridge
+    let py = PathBuf::from(&python_path);
     let dir = PathBuf::from(&project_dir);
-    let script = dir.join("zero_agent").join("frontends").join("desktop_bridge.py");
+    let script = dir.join("frontends").join("desktop_bridge.py");
     if !script.exists() {
         return Err(format!("desktop_bridge.py not found at {:?}", script));
     }
 
-    if !is_bridge_running() {
-        let mut cmd = Command::new(&python_path);
-        cmd.arg(&script).current_dir(&dir);
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        let child = cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?;
-        *BRIDGE_PROCESS.lock().unwrap() = Some(child);
-    }
+    let mut cmd = Command::new(&py);
+    cmd.arg(&script).current_dir(&dir);
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    let child = cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?;
+    *BRIDGE_PROCESS.lock().unwrap() = Some(child);
 
     // Wait for port
     if !wait_for_port(14168, Duration::from_secs(15)) {
@@ -173,7 +227,7 @@ fn start_bridge_with_config(app_handle: tauri::AppHandle, python_path: String, p
     if let Some(main_win) = app_handle.get_webview_window("main") {
         let url = tauri::Url::parse("http://127.0.0.1:14168/").unwrap();
         let _ = main_win.navigate(url);
-        // Small delay for the bridge page to start rendering.
+        // Small delay for page to start loading
         thread::sleep(Duration::from_millis(300));
         let _ = main_win.show();
         let _ = main_win.set_focus();
@@ -201,8 +255,9 @@ pub fn run() {
     if !bridge_ok && !no_autostart {
         // Try to start bridge with saved/discovered config
         let (py_str, dir_str) = get_or_discover_config();
+        let py = PathBuf::from(&py_str);
         let dir = PathBuf::from(&dir_str);
-        let script = dir.join("zero_agent").join("frontends").join("desktop_bridge.py");
+        let script = dir.join("frontends").join("desktop_bridge.py");
         if script.exists() {
             let mut cmd = Command::new(&py_str);
             cmd.arg(&script).current_dir(&dir);
@@ -232,6 +287,7 @@ pub fn run() {
             };
             let bridge_ready = wait_for_port(14168, bridge_wait);
             if bridge_ready {
+                // Show main window (loads bridge HTTP)
                 if let Some(w) = app.get_webview_window("main") {
                     if dev_mode {
                         w.open_devtools();

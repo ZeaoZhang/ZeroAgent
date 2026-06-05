@@ -2,36 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>ZeroAgent</title>
+  <title>GenericAgent</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div id="app">
-    <aside id="sidebar" aria-label="Workspace">
-      <div class="sidebar-brand">
-        <div class="sidebar-kicker">ZEROAGENT</div>
-        <div id="sidebar-active-title" class="sidebar-title" data-ui="app-name">ZeroAgent</div>
-      </div>
-      <button id="sidebar-new-btn" class="sidebar-primary" type="button">New chat</button>
-      <section class="sidebar-section" aria-labelledby="sidebar-sessions-title">
-        <div id="sidebar-sessions-title" class="sidebar-section-title">Sessions</div>
-        <div id="sidebar-session-list" class="sidebar-session-list"></div>
-      </section>
-      <section class="sidebar-section sidebar-settings" aria-labelledby="sidebar-settings-title">
-        <div id="sidebar-settings-title" class="sidebar-heading">Settings</div>
-        <div class="sidebar-model-card">
-          <span>Model</span>
-          <strong id="sidebar-model">Default / Auto</strong>
-        </div>
-        <button id="sidebar-settings-btn" class="sidebar-action" type="button">Settings</button>
-        <button id="sidebar-stop-btn" class="sidebar-action" type="button">Force Stop</button>
-        <button id="sidebar-tools-btn" class="sidebar-action" type="button">Reinject Tools</button>
-      </section>
-      <div class="sidebar-footer" aria-live="polite">
-        <span id="sidebar-status" class="sidebar-status">Starting...</span>
-      </div>
-    </aside>
-
     <!-- Main area -->
     <main id="main">
       <header id="topbar">
@@ -45,7 +20,7 @@
           </div>
         </div>
         <div class="topbar-right">
-          <h1 id="session-title" class="sr-only" data-ui="app-name">ZeroAgent</h1>
+          <h1 id="session-title" class="sr-only">GenericAgent</h1>
           <span id="status-badge" class="badge">
             <span class="status-dot"></span>
             <span id="status-text">Starting…</span>
@@ -54,25 +29,24 @@
       </header>
 
       <div id="search-bar" class="search-bar hidden">
-        <input id="search-input" type="text" placeholder="Search messages..." aria-label="Search messages">
+        <input id="search-input" type="text" placeholder="Search messages…" aria-label="Search messages">
         <span id="search-count" class="search-count"></span>
-        <button id="search-prev" class="search-nav-btn" title="Previous (Shift+Enter)" aria-label="Previous match">↑</button>
-        <button id="search-next" class="search-nav-btn" title="Next (Enter)" aria-label="Next match">↓</button>
-        <button id="search-close" class="search-nav-btn" title="Close (Escape)" aria-label="Close search">×</button>
+        <button id="search-prev" class="search-nav-btn" title="Previous (Shift+Enter)" aria-label="Previous match">▲</button>
+        <button id="search-next" class="search-nav-btn" title="Next (Enter)" aria-label="Next match">▼</button>
+        <button id="search-close" class="search-nav-btn" title="Close (Escape)" aria-label="Close search">✕</button>
       </div>
 
       <section id="messages" class="empty">
         <div class="empty-state">
-          <div class="empty-title" data-ui="welcome-title">Ready</div>
-          <div class="empty-sub" data-ui="welcome-subtitle">No active run</div>
+          <div class="empty-title">New task</div>
+          <div class="empty-sub">Task me anything. Type <code>/help</code> for commands.</div>
         </div>
       </section>
 
       <div id="composer-wrap">
         <div id="composer">
           <div id="image-previews" class="image-previews"></div>
-          <textarea id="input" rows="1" placeholder="Ask ZeroAgent to work on something" data-ui="chat-placeholder"></textarea>
-          <div id="command-palette" class="command-palette hidden" role="listbox" aria-label="Command suggestions"></div>
+          <textarea id="input" rows="1" placeholder="Type a message, or /help"></textarea>
           <div class="composer-bottom">
             <div class="composer-hints">
               <button id="settings-btn" class="icon-btn ghost" title="Settings" aria-label="Settings">
@@ -108,14 +82,14 @@
             <select id="cfg-llm">
               <option value="0">Default / Auto</option>
             </select>
-            <small>Select a backend from the active ZeroAgent config.</small>
+            <small>Select the LLM profile from mykey.py.</small>
           </div>
           <div class="form-row">
             <label>API keys</label>
             <div class="btn-row">
-              <button class="btn" id="open-mykey">Open config</button>
+              <button class="btn" id="open-mykey">Open mykey.py</button>
             </div>
-            <small>Configure API keys in <code>config.yaml</code> or environment variables.</small>
+            <small>Configure API keys in <code>mykey.py</code> at the GA project root.</small>
           </div>
         </div>
         <div class="modal-footer">

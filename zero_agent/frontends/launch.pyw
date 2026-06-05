@@ -3,7 +3,6 @@ import webview, threading, subprocess, sys, time, os, ctypes, atexit, socket, ra
 WINDOW_WIDTH, WINDOW_HEIGHT, RIGHT_PADDING, TOP_PADDING = 600, 900, 0, 100
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-repo_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
 
 def find_free_port(lo=18501, hi=18599):
     ports = list(range(lo, hi+1)); random.shuffle(ports)
@@ -24,11 +23,7 @@ def get_screen_width():
 def start_streamlit(port):
     global proc
     cmd = [sys.executable, "-m", "streamlit", "run", os.path.join(script_dir, "stapp.py"), "--server.port", str(port), "--server.address", "localhost", "--server.headless", "true", "--client.toolbarMode", "viewer"]
-    env = os.environ.copy()
-    local_config = os.path.join(repo_root, "config.yaml")
-    if os.path.isfile(local_config):
-        env.setdefault("ZA_CONFIG_PATH", local_config)
-    proc = subprocess.Popen(cmd, env=env)
+    proc = subprocess.Popen(cmd)
     atexit.register(proc.kill)
 
 def inject(text):

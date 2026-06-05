@@ -4,7 +4,7 @@
 
 运行桌面宠物：
 ```bash
-python3 desktop_pet.pyw
+python3 desktop_pet_v2.pyw
 ```
 
 ## 功能特性
@@ -30,13 +30,13 @@ python3 desktop_pet.pyw
 ### 4. HTTP 远程控制
 ```bash
 # 显示消息
-curl "http://127.0.0.1:41983/?msg=Hello"
+curl "http://127.0.0.1:51983/?msg=Hello"
 
 # 切换动画状态
-curl "http://127.0.0.1:41983/?state=run"
+curl "http://127.0.0.1:51983/?state=run"
 
 # POST 消息
-curl -X POST -d "任务完成" http://127.0.0.1:41983/
+curl -X POST -d "任务完成" http://127.0.0.1:51983/
 ```
 
 ## 添加新皮肤
@@ -172,4 +172,4 @@ cp -r ai-bubu-main/packages/app/public/skins/tard frontends/skins/
 - 基于 Tkinter + PIL/Pillow
 - 支持透明背景（#01FF01 色键）
 - 窗口置顶、无边框
-- HTTP 服务器端口：41983
+- HTTP 服务器端口：51983

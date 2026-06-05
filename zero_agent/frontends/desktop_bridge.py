@@ -1,6 +1,6 @@
 """ZeroAgent Desktop Bridge — HTTP/WS session management server.
 
-ZeroAgent bridge implementation, backed by AgentRunner.
+替代 GenericAgent 的 desktop_bridge.py, 使用 ZeroAgent + AgentRunner。
 
 HTTP API: GET /status, /config, /sessions, /session/{id}/messages
           POST /session/new, /session/{id}/prompt, /session/{id}/cancel
@@ -28,26 +28,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-try:
-    from aiohttp import web, WSMsgType
-except ModuleNotFoundError:  # pragma: no cover - exercised in minimal installs.
-    web = None
-    WSMsgType = None
+from aiohttp import web, WSMsgType
 
-from zero_agent.core.config import AgentConfig, default_config_path, load_default_config
-from zero_agent.core.exceptions import ConfigError
-from zero_agent.frontends.ui_contract import DEFAULT_SESSION_TITLE
+from zero_agent.core.agent import ZeroAgent
+from zero_agent.adapters.agent_runner import AgentRunner
 
 APP_DIR = Path(__file__).resolve().parent
-
-
-def require_aiohttp():
-    if web is None or WSMsgType is None:
-        raise RuntimeError(
-            "ZeroAgent desktop web UI requires aiohttp. "
-            "Install UI extras with: pip install -e \".[ui]\""
-        )
-    return web
 
 
 def find_default_za_root() -> Path:
@@ -65,32 +51,12 @@ def find_default_za_root() -> Path:
 DEFAULT_ZA_ROOT = find_default_za_root()
 
 
-def load_agent_config() -> AgentConfig:
-    """Load the desktop config from the project default path."""
-    return load_default_config()
-
-
-def find_config_path() -> Path:
-    return default_config_path()
-
-
-def validate_runnable_config(config: AgentConfig) -> None:
-    """Validate config fields needed before importing the LLM runtime."""
-    if not config.llm_backends:
-        raise ConfigError("没有配置任何 LLM 后端")
-    for backend in config.llm_backends.values():
-        if not backend.api_key:
-            raise ConfigError(f"LLM 后端 '{backend.name}' 缺少 api_key")
-        if not backend.model:
-            raise ConfigError(f"LLM 后端 '{backend.name}' 缺少 model")
-
-
 # —— Session & AgentManager ——
 
 @dataclass
 class Session:
     id: str
-    title: str = DEFAULT_SESSION_TITLE
+    title: str = "New chat"
     cwd: str = ""
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -115,24 +81,14 @@ class AgentManager:
 
     @property
     def mykey_path(self) -> str:
-        return str(self.config_path)
-
-    @property
-    def config_path(self) -> Path:
-        return find_config_path()
+        return str(Path(self.za_root) / "mykey.json")
 
     def make_agent(self, sess: Session):
-        config = load_agent_config()
-        validate_runnable_config(config)
-
-        from zero_agent.adapters.agent_runner import AgentRunner
-        from zero_agent.core.agent import ZeroAgent
-
         old_cwd = os.getcwd()
         try:
             if sess.cwd:
                 os.chdir(sess.cwd)
-            za = ZeroAgent(config=config)
+            za = ZeroAgent()
             runner = AgentRunner(za)
             runner.verbose = False
             return za, runner
@@ -141,34 +97,12 @@ class AgentManager:
                 os.chdir(old_cwd)
 
     def list_model_profiles(self):
+        za = ZeroAgent()
+        runner = AgentRunner(za)
         try:
-            config = load_agent_config()
-            validate_runnable_config(config)
-            active_name = config.default_backend
-            if active_name not in config.llm_backends:
-                active_name = next(iter(config.llm_backends.keys()))
-            profiles = []
-            for i, (name, backend) in enumerate(config.llm_backends.items()):
-                display = f"{name}/{backend.model}"
-                profiles.append({
-                    "id": i,
-                    "llmNo": i,
-                    "name": display,
-                    "model": backend.model,
-                    "active": name == active_name,
-                    "configured": True,
-                })
-            return profiles
-        except ConfigError as e:
             return [
-                {
-                    "id": 0,
-                    "llmNo": 0,
-                    "name": "Default / Auto",
-                    "active": True,
-                    "configured": False,
-                    "error": str(e),
-                }
+                {"id": i, "name": name, "active": active}
+                for i, name, active in runner.list_llms()
             ]
         except Exception as e:
             print(f"get model profiles failed: {e}", file=sys.stderr)
@@ -197,7 +131,7 @@ class AgentManager:
         msg.update(extra)
         sess.messages.append(msg)
         sess.updated_at = time.time()
-        if role == "user" and content.strip() and sess.title == DEFAULT_SESSION_TITLE:
+        if role == "user" and content.strip() and sess.title == "New chat":
             sess.title = content.strip().replace("\n", " ")[:40]
         return msg
 
@@ -219,14 +153,6 @@ class AgentManager:
                     content_type="application/json",
                 )
             return sess
-
-    def activate_session(self, sid: str) -> dict:
-        sess = self.get_session(sid)
-        with self.lock:
-            self.active_session_id = sid
-            sess.updated_at = time.time()
-        emit_session_state(sess, "active")
-        return {"ok": True, "sessionId": sid, "activeSessionId": sid}
 
     def delete_session(self, sid: str) -> dict:
         with self.lock:
@@ -332,13 +258,6 @@ class AgentManager:
                 sess.status = "idle"
                 sess.last_error = ""
             emit_session_state(sess, "idle")
-        except ConfigError as e:
-            with self.lock:
-                sess.partial = None
-                sess.status = "error"
-                sess.last_error = str(e)
-                self.add_message(sess, "error", str(e))
-            emit_session_state(sess, "error")
         except Exception as e:
             tb = traceback.format_exc()
             with self.lock:
@@ -386,20 +305,6 @@ class AgentManager:
             sess.partial = None
             sess.updated_at = time.time()
         emit_session_state(sess, "cancelled")
-        return {"ok": True, "sessionId": sid}
-
-    def reinject_tools(self, sid: str) -> dict:
-        with self.lock:
-            sess = self.sessions.get(sid)
-            if not sess:
-                raise web.HTTPNotFound(
-                    text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False),
-                    content_type="application/json",
-                )
-            if sess.runner and getattr(sess.runner, "za", None):
-                with contextlib.suppress(Exception):
-                    sess.runner.za.client.last_tools = ""
-        emit_session_state(sess, "tools-reset")
         return {"ok": True, "sessionId": sid}
 
 
@@ -509,7 +414,6 @@ def emit_session_state(sess: Session, state_name: str):
 
 
 async def ws_handler(request):
-    require_aiohttp()
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
     hub.websockets.add(ws)
@@ -540,17 +444,14 @@ def cors_headers():
     }
 
 
-async def _cors_middleware_impl(request, handler):
-    require_aiohttp()
+@web.middleware
+async def cors_middleware(request, handler):
     if request.method == "OPTIONS":
         return web.Response(status=204, headers=cors_headers())
     resp = await handler(request)
     for k, v in cors_headers().items():
         resp.headers[k] = v
     return resp
-
-
-cors_middleware = web.middleware(_cors_middleware_impl) if web is not None else _cors_middleware_impl
 
 
 def json_ok(data: dict, status: int = 200):
@@ -611,10 +512,6 @@ async def get_session_handler(request):
     sess = manager.get_session(sid)
     return json_ok({"sessionId": sid, "session": manager.snapshot(sess), "messages": list(sess.messages), "partial": sess.partial})
 
-async def activate_session_handler(request):
-    sid = request.match_info["sid"]
-    return json_ok(manager.activate_session(sid))
-
 async def delete_session_handler(request):
     sid = request.match_info["sid"]
     return json_ok(manager.delete_session(sid))
@@ -636,19 +533,11 @@ async def cancel_handler(request):
     sid = request.match_info["sid"]
     return json_ok(manager.cancel(sid))
 
-
-async def reinject_tools_handler(request):
-    sid = request.match_info["sid"]
-    return json_ok(manager.reinject_tools(sid))
-
-
 async def path_open_handler(request):
     data = await read_json(request)
     kind = data.get("kind", "")
-    if kind in ("config", "mykey"):
-        target = manager.config_path
-    elif kind == "configDir":
-        target = manager.config_path.parent
+    if kind == "mykey":
+        target = Path(manager.za_root) / "mykey.json"
     else:
         target = Path(data.get("path") or data.get("target") or manager.za_root)
     target = target.resolve()
@@ -665,7 +554,6 @@ async def path_open_handler(request):
 
 
 def create_app():
-    require_aiohttp()
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/status", status_handler)
@@ -675,12 +563,10 @@ def create_app():
     app.router.add_get("/sessions", list_sessions_handler)
     app.router.add_post("/session/new", new_session_handler)
     app.router.add_get("/session/{sid}", get_session_handler)
-    app.router.add_post("/session/{sid}/activate", activate_session_handler)
     app.router.add_delete("/session/{sid}", delete_session_handler)
     app.router.add_post("/session/{sid}/prompt", prompt_handler)
     app.router.add_get("/session/{sid}/messages", messages_handler)
     app.router.add_post("/session/{sid}/cancel", cancel_handler)
-    app.router.add_post("/session/{sid}/reinject-tools", reinject_tools_handler)
     app.router.add_post("/path/open", path_open_handler)
 
     static_dir = APP_DIR / "desktop" / "static"

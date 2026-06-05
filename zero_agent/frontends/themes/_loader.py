@@ -24,7 +24,7 @@ def load_theme_css(theme: str = "light", app: str = "stapp") -> str:
 
     Args:
         theme: "light", "dark", or "auto"
-        app: "stapp"
+        app: "stapp" or "stapp2"
 
     Returns:
         Complete <style>...</style> string for Streamlit injection.
@@ -44,42 +44,34 @@ def load_theme_css(theme: str = "light", app: str = "stapp") -> str:
     return f"<style>\n{''.join(css_parts)}</style>"
 
 
-def theme_toggle_js(theme: str = "dark") -> str:
-    """JavaScript for theme toggle via parent document + localStorage.
+def theme_toggle_js() -> str:
+    """JavaScript for theme toggle via iframe's own DOM + localStorage.
 
-    Runs inside a Streamlit components.v1.html iframe and targets
-    window.parent.document (the Streamlit app document) where the CSS lives.
-    Sets [data-theme] attribute so CSS selectors like [data-theme="dark"] work.
+    Must target document.documentElement (the iframe's <html>), NOT
+    window.parent.document — CSS [data-theme] selectors can't cross iframe boundaries.
 
     Supports three modes: "light", "dark", "auto" (follows prefers-color-scheme).
-
-    Args:
-        theme: Current theme from st.session_state — used as the initial
-               data-theme value so the attribute stays in sync with the
-               CSS variables loaded by load_theme_css().
     """
-    return f"""<script>
-(function(){{
-    var doc = window.parent.document;
-    function apply(t) {{
-        if (t === 'auto') {{
+    return """<script>
+(function(){
+    var doc = document;
+    function apply(t) {
+        if (t === 'auto') {
             t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-        }}
-        if (doc && doc.documentElement) {{
-            doc.documentElement.setAttribute('data-theme', t);
-        }}
-    }}
-    function saved() {{
-        try {{ return localStorage.getItem('za-theme'); }} catch(e) {{ return null; }}
-    }}
-    function save(t) {{
-        try {{ localStorage.setItem('za-theme', t); }} catch(e) {{}}
-    }}
-    var current = saved() || '{theme}';
+        }
+        doc.documentElement.setAttribute('data-theme', t);
+    }
+    function saved() {
+        try { return localStorage.getItem('za-theme'); } catch(e) { return null; }
+    }
+    function save(t) {
+        try { localStorage.setItem('za-theme', t); } catch(e) {}
+    }
+    var current = saved() || 'light';
     apply(current);
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function(e) {{
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function(e) {
         if (saved() === 'auto') apply(e.matches ? 'dark' : 'light');
-    }});
-    window.__zaSetTheme = function(t) {{ save(t); apply(t); }};
-}})();
+    });
+    window.__zaSetTheme = function(t) { save(t); apply(t); };
+})();
 </script>"""
