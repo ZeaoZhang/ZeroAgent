@@ -16,6 +16,7 @@ import litellm
 from zero_agent.core.config import LLMBackendConfig
 from zero_agent.core.exceptions import LLMError
 from zero_agent.llm.base import MockResponse
+from zero_agent.llm.converters import msgs_claude_to_openai
 
 
 class LiteLLMSession:
@@ -61,6 +62,7 @@ class LiteLLMSession:
         self.temperature = config.temperature
         self.max_tokens = config.max_tokens
         self.tools: Optional[List[Dict[str, Any]]] = None
+        self._last_tools_json = ""
 
         # 资源使用追踪
         self._total_input_tokens: int = 0
@@ -321,6 +323,10 @@ class LiteLLMSession:
         Returns:
             litellm.completion() 的关键字参数字典.
         """
+        if tools:
+            messages = self._with_tool_instruction(messages, tools)
+        messages = self._provider_messages(messages)
+
         kwargs: Dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
@@ -387,6 +393,81 @@ class LiteLLMSession:
             kwargs["api_mode"] = self.config.api_mode
 
         return kwargs
+
+    def _with_tool_instruction(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Inject GA-compatible per-call tool protocol while tools are mounted."""
+        instruction = self._prepare_tool_instruction(tools)
+        if not instruction:
+            return messages
+
+        patched = [dict(msg) for msg in messages]
+        for msg in patched:
+            if str(msg.get("role", "")).lower() == "system":
+                content = str(msg.get("content") or "")
+                msg["content"] = f"{content}\n\n{instruction}" if content else instruction
+                return patched
+
+        return [{"role": "system", "content": instruction}, *patched]
+
+    def _prepare_tool_instruction(self, tools: List[Dict[str, Any]]) -> str:
+        """Build the same always-on interaction protocol GA adds at call time."""
+        if not tools:
+            return ""
+
+        tools_json = json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
+        lang = (os.environ.get("ZA_LANG") or os.environ.get("GA_LANG") or "").lower()
+        use_en = lang == "en"
+
+        if self._last_tools_json == tools_json:
+            return (
+                "### Tools: still active, ready to call. Protocol unchanged.\n"
+                "**If the user's request is not yet complete, tool calls are required!**"
+                if use_en
+                else "### 工具库状态：持续有效（code_run/file_read等），可正常调用。调用协议沿用。\n"
+                "**若用户需求未完成，必须进行工具调用！**"
+            )
+
+        self._last_tools_json = tools_json
+        if use_en:
+            return (
+                "### Interaction Protocol (must follow strictly, always in effect)\n"
+                "Follow these steps to think and act:\n"
+                "1. Think: analyze the current situation and strategy inside "
+                "`<thinking>` tags.\n"
+                "2. Summarize: output a minimal one-line (<30 words) physical "
+                "snapshot in `<summary>`: new info from last tool result + current "
+                "tool call intent. This goes into long-term working memory. Must "
+                "contain real information, no filler.\n"
+                "3. Act: if the user's request is not yet complete, tool calls are "
+                "required. Output one or more `<tool_use>` blocks, then stop.\n\n"
+                'Format: ```<tool_use>{"name":"tool_name","arguments":{...}}</tool_use>```\n\n'
+                f"### Tools (mounted, always in effect):\n{tools_json}"
+            )
+
+        return (
+            "### 交互协议 (必须严格遵守，持续有效)\n"
+            "请按照以下步骤思考并行动：\n"
+            "1. **思考**: 在 `<thinking>` 标签中先进行思考，分析现状和策略。\n"
+            "2. **总结**: 在 `<summary>` 中输出极为简短的单行（<30字）物理快照，"
+            "包括上次工具调用结果产生的新信息+本次工具调用意图。此内容将进入长期工作记忆，"
+            "严禁输出无实际信息增量的描述。\n"
+            "3. **行动**: 若用户需求未完成，必须进行工具调用。请在回复正文之后输出一个"
+            "或多个 `<tool_use>` 块，然后结束。\n\n"
+            'Format: ```<tool_use>{"name":"tool_name","arguments":{...}}</tool_use>```\n\n'
+            f"### Tools (mounted, always in effect):\n{tools_json}"
+        )
+
+    def _provider_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Return messages in the wire format expected by the configured API."""
+        provider = (self.config.provider or "").lower()
+        api_mode = self.config.api_mode or "chat_completions"
+        if api_mode == "chat_completions" and provider != "anthropic":
+            return self._fix_messages(msgs_claude_to_openai(messages))
+        return messages
 
     def _build_messages(self) -> List[Dict[str, Any]]:
         """从历史构建完整的消息列表，包含 system prompt.
@@ -651,13 +732,15 @@ class LiteLLMSession:
         # 模式 4: 裸 JSON 对象（无 XML 包装）
         # 检测 {"name": ..., "arguments": ...} 格式
         if '"name":' in text and '"arguments":' in text:
-            json_match = _re.search(
-                r'\{[^{}]*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[^{}]*\}[^{}]*\}',
-                text, _re.DOTALL,
-            )
-            if json_match:
+            decoder = _json.JSONDecoder()
+            for match in _re.finditer(r"\{", text):
                 try:
-                    data = _json.loads(json_match.group(0))
+                    data, _ = decoder.raw_decode(text[match.start():])
+                except _json.JSONDecodeError:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                try:
                     func_name = (
                         data.get('name') or data.get('function')
                         or data.get('tool')
@@ -675,7 +758,7 @@ class LiteLLMSession:
                                 "id", f"text_fallback_{len(results)}"
                             ),
                         })
-                except _json.JSONDecodeError:
+                except (AttributeError, TypeError):
                     pass
 
         return results
@@ -852,18 +935,21 @@ class LiteLLMSession:
                     continue
             merged.append(msg)
 
-        # 2. 修复孤立的 tool_result: 收集所有 tool_use ids
-        tool_use_ids = set()
-        for msg in merged:
-            if msg.get("role") == "assistant":
-                for tc in msg.get("tool_calls", []):
-                    tc_id = tc.get("id", "")
-                    if tc_id:
-                        tool_use_ids.add(tc_id)
+        # 2. 修复孤立的 tool_result: 收集所有 tool_use ids.
+        tool_use_ids = {
+            tc_id
+            for msg in merged
+            if msg.get("role") == "assistant"
+            for tc in (msg.get("tool_calls") or [])
+            for tc_id in [tc.get("id", "")]
+            if tc_id
+        }
 
-        # 3. 修复孤立的 tool_use: 检查未匹配的 tool_result
+        # 3. 修复孤立 / 不完整的 tool_use 序列.
         fixed = []
-        for msg in merged:
+        i = 0
+        while i < len(merged):
+            msg = merged[i]
             if msg.get("role") == "tool":
                 tc_id = msg.get("tool_call_id", "")
                 if tc_id and tc_id not in tool_use_ids:
@@ -873,21 +959,47 @@ class LiteLLMSession:
                         "role": "user",
                         "content": f"(error) orphan tool_result id={tc_id}: {content}",
                     })
+                    i += 1
                     continue
             elif msg.get("role") == "assistant":
                 tool_calls = msg.get("tool_calls", [])
-                orphan_tools = [
-                    tc for tc in tool_calls
-                    if tc.get("id") not in tool_use_ids and tc.get("id")
+                expected_ids = [
+                    str(tc.get("id") or "")
+                    for tc in tool_calls
+                    if tc.get("id")
                 ]
-                if orphan_tools and not msg.get("content"):
-                    # 孤立的 tool_use 转为纯文本
-                    fixed.append({
-                        "role": "assistant",
-                        "content": f"[orphan tool_calls: {orphan_tools}]",
-                    })
+                if expected_ids:
+                    fixed.append(msg)
+                    i += 1
+                    seen_ids: set[str] = set()
+                    while i < len(merged) and merged[i].get("role") == "tool":
+                        tool_msg = merged[i]
+                        tc_id = str(tool_msg.get("tool_call_id") or "")
+                        if tc_id in expected_ids and tc_id not in seen_ids:
+                            fixed.append(tool_msg)
+                            seen_ids.add(tc_id)
+                        elif tc_id and tc_id not in tool_use_ids:
+                            fixed.append({
+                                "role": "user",
+                                "content": (
+                                    f"(error) orphan tool_result id={tc_id}: "
+                                    f"{tool_msg.get('content', '')}"
+                                ),
+                            })
+                        i += 1
+                    for missing_id in expected_ids:
+                        if missing_id not in seen_ids:
+                            fixed.append({
+                                "role": "tool",
+                                "tool_call_id": missing_id,
+                                "content": (
+                                    "[tool_result missing: previous tool call "
+                                    "was interrupted before a result was recorded]"
+                                ),
+                            })
                     continue
             fixed.append(msg)
+            i += 1
 
         # 4. 确保首条消息为 user/system
         if fixed and fixed[0].get("role") not in ("user", "system"):
