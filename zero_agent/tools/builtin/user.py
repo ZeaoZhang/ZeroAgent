@@ -83,7 +83,6 @@ def register_user_tools(registry: ToolRegistry, config: AgentConfig) -> None:
                     ),
                 },
             },
-            "required": ["question"],
         },
         handler=_make_ask_user_handler(config),
         category="user",

@@ -63,7 +63,7 @@ packages = [
     "*.md",
 ]
 "zero_agent.frontends.themes" = ["*.css"]
-"zero_agent.assets" = ["code_run_header.py", "tmwd_cdp_bridge/*"]
+"zero_agent.assets" = ["code_run_header.py", "sys_prompt*.txt", "tmwd_cdp_bridge/*"]
 "zero_agent.memory.sops" = ["*.md", "*.py", "**/*.md", "**/*.py", "**/*.txt"]
 
 [tool.pytest.ini_options]

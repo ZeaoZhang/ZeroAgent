@@ -63,7 +63,6 @@ def register_memory_tools(registry: ToolRegistry, config: AgentConfig) -> None:
                     ),
                 },
             },
-            "required": ["key_info"],
         },
         handler=_make_update_working_checkpoint_handler(config),
         category="memory",

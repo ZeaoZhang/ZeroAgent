@@ -217,18 +217,26 @@ def register_code_tools(registry: ToolRegistry, config: AgentConfig) -> None:
             "properties": {
                 "type": {
                     "type": "string",
-                    "enum": ["python", "bash", "powershell", "inline_eval"],
+                    "enum": ["python", "bash", "powershell"],
                     "description": _t(
                         "代码类型: python(默认) / bash / powershell",
                         "Code type: python(default) / bash / powershell",
                         lang,
                     ),
                 },
+                "script": {
+                    "type": "string",
+                    "description": _t(
+                        "[互斥] 代码文本。使用回复代码块时不要传此参数。",
+                        "[Mutually exclusive] Code text. Do not use when providing a reply code block.",
+                        lang,
+                    ),
+                },
                 "code": {
                     "type": "string",
                     "description": _t(
-                        "待执行的代码文本",
-                        "Code text to execute",
+                        "script 的兼容别名。优先使用 script 或回复代码块。",
+                        "Compatibility alias for script. Prefer script or a reply code block.",
                         lang,
                     ),
                 },
@@ -248,8 +256,15 @@ def register_code_tools(registry: ToolRegistry, config: AgentConfig) -> None:
                         lang,
                     ),
                 },
+                "inline_eval": {
+                    "type": "boolean",
+                    "description": _t(
+                        "仅在明确需要进程内自省调试时使用。",
+                        "Use only when explicitly needed for in-process introspection/debugging.",
+                        lang,
+                    ),
+                },
             },
-            "required": ["code"],
         },
         handler=_make_code_run_handler(config),
         category="builtin",
@@ -282,7 +297,7 @@ def _make_code_run_handler(config: AgentConfig):
                 raise ToolError("缺少 code 或 script 参数，且回复中未找到代码块")
 
         # inline_eval: 在进程内执行 Python 代码（用于自省/调试）
-        if code_type == "inline_eval":
+        if code_type == "inline_eval" or (code_type == "python" and args.get("inline_eval")):
             yield f"[Action] Running inline_eval\n"
             try:
                 local_ns = {

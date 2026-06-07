@@ -355,7 +355,6 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
                     ),
                 },
             },
-            "required": ["script"],
         },
         handler=_make_web_execute_js_handler(config),
         category="browser",
@@ -411,11 +410,13 @@ def _make_web_execute_js_handler(config: AgentConfig):
         if not script:
             return {"status": "error", "msg": "缺少 script 参数"}
 
-        # 支持从文件读取脚本
         import os
-        if os.path.isfile(script.strip()):
+        # 支持从工作目录读取脚本文件，兼容 GenericAgent 行为。
+        script_ref = script.strip()
+        candidate = script_ref if os.path.isabs(script_ref) else os.path.join(config.workspace_dir, script_ref)
+        if os.path.isfile(candidate):
             try:
-                with open(script.strip(), "r", encoding="utf-8") as f:
+                with open(candidate, "r", encoding="utf-8") as f:
                     script = f.read()
             except Exception:
                 pass
@@ -449,6 +450,7 @@ def _make_web_execute_js_handler(config: AgentConfig):
         yield f"JS 执行结果:\n{show}\n"
 
         maxlen = 8000 // max(args.get("_tool_num", 1), 1)
-        output = json.dumps(result, ensure_ascii=False)
-        return {"status": result.get("status", "success"), "output": smart_format(output, max_str_len=maxlen)}
+        if "js_return" in result and isinstance(result["js_return"], str):
+            result["js_return"] = smart_format(result["js_return"], max_str_len=maxlen)
+        return result
     return _handler
