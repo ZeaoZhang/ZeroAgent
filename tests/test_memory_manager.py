@@ -94,8 +94,7 @@ class TestMemoryManager:
             assert "sop_b.md" in sops
             assert "utils.py" in sops
             assert "notes.txt" not in sops
-            # init_memory() 复制了 package 内置 SOP, 所以总数 > 3
-            assert len(sops) > 3
+            assert len(sops) == 4
 
     def test_list_sops_nonexistent_dir(self) -> None:
         mgr = MemoryManager(memory_dir="/nonexistent/path")

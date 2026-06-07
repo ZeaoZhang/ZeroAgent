@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from zero_agent.core.agent import ZeroAgent
@@ -62,12 +63,17 @@ def test_default_system_prompt_loads_ga_compatible_asset(mock_config, monkeypatc
     assert str(mock_config.workspace_dir) in prompt
 
 
-def test_sop_resources_do_not_contain_generated_python_cache_artifacts() -> None:
-    sops_dir = Path(__file__).resolve().parents[1] / "zero_agent" / "memory" / "sops"
+def test_memory_resources_do_not_contain_generated_python_cache_artifacts() -> None:
+    root = Path(__file__).resolve().parents[1]
+    tracked = subprocess.check_output(
+        ["git", "ls-files", "zero_agent/memory"],
+        cwd=root,
+        text=True,
+    ).splitlines()
     generated = [
         path
-        for path in sops_dir.rglob("*")
-        if path.name == "__pycache__" or path.suffix == ".pyc"
+        for path in tracked
+        if "__pycache__" in Path(path).parts or Path(path).suffix == ".pyc"
     ]
 
     assert generated == []

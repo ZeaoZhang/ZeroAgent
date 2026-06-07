@@ -41,7 +41,6 @@ packages = [
     "zero_agent.tools",
     "zero_agent.tools.builtin",
     "zero_agent.memory",
-    "zero_agent.memory.sops",
     "zero_agent.runners",
     "zero_agent.utils",
     "zero_agent.reflect",
@@ -64,7 +63,7 @@ packages = [
 ]
 "zero_agent.frontends.themes" = ["*.css"]
 "zero_agent.assets" = ["code_run_header.py", "sys_prompt*.txt", "tmwd_cdp_bridge/*"]
-"zero_agent.memory.sops" = ["*.md", "*.py", "**/*.md", "**/*.py", "**/*.txt"]
+"zero_agent.memory" = ["*.md", "*.py", "*.txt", "**/*.md", "**/*.py", "**/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -423,12 +423,13 @@ class BaseHandler:
         # Plan mode: 拦截未验证的完成声明
         plan_mode_complete_kw = [
             "任务完成", "全部完成", "已完成所有",
-            "All tasks complete", "All done", "finished all",
+            "🏁", "All tasks complete", "All done", "finished all",
         ]
         if self._in_plan_mode() and any(kw in content for kw in plan_mode_complete_kw):
             if (
                 "VERDICT" not in content
                 and "[VERIFY]" not in content
+                and "验证subagent" not in content
             ):
                 yield self._tl(
                     "[Warn] Plan 模式完成声明拦截.\n",

@@ -25,14 +25,7 @@ def _render_prompt(user_request: str) -> str:
     """加载 /review inline prompt 并注入 user_request."""
     lang = os.environ.get("GA_LANG", "").strip().lower()
     fname = _INLINE_PROMPT_EN if lang == "en" else _INLINE_PROMPT_ZH
-    # 先在 memory/sops/ 下查找, 回退到 package sops
-    for search_dir in (
-        os.path.join(_PROJECT_ROOT, "memory", "sops", _PROMPT_DIR),
-        os.path.join(os.path.dirname(__file__), "..", "memory", "sops", _PROMPT_DIR),
-    ):
-        fpath = os.path.join(search_dir, fname)
-        if os.path.isfile(fpath):
-            break
+    fpath = os.path.join(_PROJECT_ROOT, "memory", _PROMPT_DIR, fname)
     ga_root = _PROJECT_ROOT.replace("\\", "/")
     try:
         with open(fpath, "r", encoding="utf-8") as f:
@@ -51,7 +44,7 @@ def _help_text() -> str:
         "  `/review 我刚改了 review_cmd.py, 关注 prompt 注入`\n"
         "  `/review 审 frontends 目录下所有改过的文件`\n\n"
         "产出: 直接对话 markdown(不写文件、不开 subagent)。\n"
-        "协议: `memory/sops/review_sop/review_inline_prompt.txt` + `memory/code_review_principles.md`"
+        "协议: `memory/review_sop/review_inline_prompt.txt` + `memory/code_review_principles.md`"
     )
 
 
