@@ -192,8 +192,10 @@ class TestBaseHandlerWorking:
     def test_default_next_prompt_with_key_info(self, mock_handler: BaseHandler) -> None:
         mock_handler.working["key_info"] = "Important context"
         prompt = mock_handler._default_next_prompt({})
+        assert prompt.startswith("\n### [WORKING MEMORY]")
         assert "Important context" in prompt
         assert "<key_info>" in prompt
+        assert "<history>\n\n</history>" in prompt
 
     def test_default_next_prompt_skip(self, mock_handler: BaseHandler) -> None:
         """_index > 0 时仅返回工作记忆，不含 Continue 提示."""
@@ -207,9 +209,19 @@ class TestBaseHandlerWorking:
         mock_handler.history_info = ["[Agent] did something"]
         mock_handler.working["key_info"] = "test ctx"
         anchor = mock_handler._build_anchor_prompt()
+        assert anchor.startswith("\n### [WORKING MEMORY]")
         assert "did something" in anchor
         assert "<key_info>test ctx</key_info>" in anchor
         assert "<history>" in anchor
+
+    def test_fold_history_keeps_ga_compatible_tail_limit(self) -> None:
+        lines = [f"[USER] task {i}" for i in range(75)]
+        folded = BaseHandler._fold_history(lines)
+        folded_lines = folded.splitlines()
+
+        assert "[USER] task 4" not in folded_lines
+        assert "[USER] task 5" in folded_lines
+        assert "[USER] task 74" in folded_lines
 
     def test_fold_history_compresses(self, mock_handler: BaseHandler) -> None:
         """_fold_history 压缩连续 agent 轮次."""

@@ -32,6 +32,8 @@ from zero_agent.core.agent import ZeroAgent
 from zero_agent.adapters.agent_runner import AgentRunner
 from zero_agent.bots.common import AgentBotMixin, FILE_HINT, split_text, load_keys
 
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 try:
     import lark_oapi as lark
     from lark_oapi.api.im.v1 import (

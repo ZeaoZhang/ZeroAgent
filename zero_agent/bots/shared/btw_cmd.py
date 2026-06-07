@@ -1,8 +1,8 @@
 """/btw 命令: side question — 不打断主 Agent 的临时 subagent 问答。
 
 适配 ZeroAgent/AgentRunner。与 GenericAgent 版本不同, ZeroAgent 的 litellm session
-不暴露 raw_ask/make_messages 内部接口, 因此 /btw 通过提交一个独立的单轮任务到
-AgentRunner 实现, 使用简化的系统提示词限制 subagent 行为。
+不暴露 raw_ask/make_messages 内部接口, 因此 /btw 创建独立的 side runner,
+避免把临时插问排入主 runner 的串行任务队列。
 """
 
 from __future__ import annotations
@@ -10,6 +10,9 @@ from __future__ import annotations
 import os
 import queue
 import time
+
+from zero_agent.adapters.agent_runner import AgentRunner
+from zero_agent.core.agent import ZeroAgent
 
 
 _WRAPPER_ZH = """<system-reminder>
@@ -67,11 +70,23 @@ def _format(question: str, body: str, took: float) -> str:
     return head + (body.strip() or "*(空回复)*") + f"\n\n*({took:.1f}s)*"
 
 
-def _run(runner, question: str, deadline: float) -> str:
-    """通过 AgentRunner.put_task 提交单轮 btw 子任务, 等待完成."""
+def _make_side_runner(runner) -> AgentRunner:
+    """Create an independent side runner from main config and history snapshot."""
+    config = runner.config_snapshot() if hasattr(runner, "config_snapshot") else runner.config
+    history = runner.history_snapshot() if hasattr(runner, "history_snapshot") else list(getattr(runner, "history", []) or [])
+    side_runner = AgentRunner(ZeroAgent(config=config))
+    if hasattr(side_runner, "replace_history"):
+        side_runner.replace_history(history)
+    return side_runner
+
+
+def _run(runner, question: str, deadline: float, side_runner_factory=None) -> str:
+    """Run /btw on an independent side runner, never on the main queue."""
     try:
         prompt = _wrapper().format(question=question)
-        dq = runner.put_task(prompt, source="btw-sidequest")
+        side_runner_factory = side_runner_factory or _make_side_runner
+        side_runner = side_runner_factory(runner)
+        dq = side_runner.put_task(prompt, source="btw-sidequest")
         text_parts: list[str] = []
         while time.time() < deadline:
             try:

@@ -325,6 +325,59 @@ class TestAgentLoop:
         assert client.calls[1][0]["tool_call_id"] == "call_0"
         assert "tool_results" not in client.calls[1][1]
 
+    def test_loop_records_initial_user_input_in_handler_history(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        client = _make_mock_client([
+            MockResponse(content="Done."),
+        ])
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=5,
+            verbose=False,
+        )
+
+        _exhaust(loop.run("system prompt", "inspect context"))
+
+        assert mock_handler.history_info[0] == "[USER]: inspect context"
+
+    def test_unknown_tool_prompt_clears_tool_protocol_cache(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        client = _make_mock_client([
+            MockResponse(
+                content="",
+                tool_calls=[
+                    MockToolCall(
+                        function=MockFunction(
+                            name="missing_tool", arguments="{}",
+                        ),
+                        id="call_1",
+                    ),
+                ],
+            ),
+            MockResponse(content="Done."),
+        ])
+        client.last_tools = "cached"
+        client._last_tools_json = "cached-json"
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=5,
+            verbose=False,
+        )
+
+        exit_reason = _exhaust(loop.run("system prompt", "task"))
+
+        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        assert client.last_tools == ""
+        assert client._last_tools_json == ""
+
     def test_multi_tool_results_are_sent_as_separate_messages(
         self,
         mock_handler: BaseHandler,

@@ -1,12 +1,14 @@
-"""AgentRunner — ZeroAgent 后台线程包装器.
+"""AgentRunner — ZeroAgent UI adapter.
 
-将 ZeroAgent 的 generator-based run() 包装为兼容 GenericAgent 的
-queue-based put_task() 接口，使现有 Bot/Conductor/Desktop Bridge 等
-消费者无需改动即可对接 ZeroAgent.
+Wraps ZeroAgent's generator-based run() behind a queue-based task API and a
+small frontend-facing contract for model profiles, cancellation, logs, config,
+and history helpers. Legacy GenericAgent-style aliases remain only for callers
+that have not yet migrated.
 """
 
 from __future__ import annotations
 
+import copy
 import queue
 import os
 import threading
@@ -15,10 +17,96 @@ from typing import Any, Dict, List, Optional
 from zero_agent.core.agent import ZeroAgent
 
 
+_FORWARDED_RUNTIME_ATTRS = {
+    "task_dir",
+}
+
+
+class _BackendCompat:
+    """GenericAgent-style backend facade for frontend code."""
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    @property
+    def name(self) -> str:
+        return getattr(self._session, "name", None) or getattr(
+            getattr(self._session, "config", None), "name", "unknown"
+        )
+
+    @property
+    def model(self) -> str:
+        return getattr(getattr(self._session, "config", None), "model", "")
+
+    @property
+    def history(self) -> list:
+        return getattr(self._session, "history", [])
+
+    @history.setter
+    def history(self, value: list) -> None:
+        setattr(self._session, "history", value)
+
+    @property
+    def raw_msgs(self) -> list:
+        return getattr(self._session, "raw_msgs", [])
+
+    @raw_msgs.setter
+    def raw_msgs(self, value: list) -> None:
+        setattr(self._session, "raw_msgs", value)
+
+    def ask(self, prompt: str):
+        """GenericAgent health-check compatible ask() wrapper."""
+        if hasattr(self._session, "ask"):
+            return self._session.ask(prompt)
+
+        old_history = copy.deepcopy(getattr(self._session, "history", []))
+        try:
+            gen = self._session.chat([{"role": "user", "content": prompt}], tools=None)
+            return "".join(str(chunk) for chunk in gen if isinstance(chunk, str))
+        finally:
+            if hasattr(self._session, "history"):
+                self._session.history = old_history
+
+
+class _LLMClientCompat:
+    """GenericAgent-style ToolClient facade for frontend code."""
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+        self.backend = _BackendCompat(session)
+        self.log_path = None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    @property
+    def name(self) -> str:
+        return self.backend.name
+
+    @property
+    def history(self) -> list:
+        return self.backend.history
+
+    @history.setter
+    def history(self, value: list) -> None:
+        self.backend.history = value
+
+    @property
+    def last_tools(self) -> str:
+        return getattr(self._session, "last_tools", "")
+
+    @last_tools.setter
+    def last_tools(self, value: str) -> None:
+        setattr(self._session, "last_tools", value)
+
+
 class AgentRunner:
     """在后台线程中运行 ZeroAgent, 提供 queue 风格的任务接口.
 
-    与 GenericAgent 的 put_task() / display_queue 模式兼容.
+    Frontends should use this adapter instead of touching ZeroAgent internals.
     put_task() 非阻塞, 立即返回消费者可读的 queue.Queue.
 
     Usage:
@@ -41,7 +129,34 @@ class AgentRunner:
         self._running = False
         self._stop_sig = False
         self._worker_thread: Optional[threading.Thread] = None
+        self.inc_out = False
+        self.no_print = False
         self._configure_shared_session_commands()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._agent, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if (
+            name in _FORWARDED_RUNTIME_ATTRS
+            or (
+                name.startswith("_")
+                and name not in {
+                    "_agent",
+                    "_task_queue",
+                    "_lock",
+                    "_running",
+                    "_stop_sig",
+                    "_worker_thread",
+                    "_handle_slash_cmd",
+                }
+            )
+        ):
+            agent = self.__dict__.get("_agent")
+            if agent is not None:
+                setattr(agent, name, value)
+                return
+        object.__setattr__(self, name, value)
 
     # —— 兼容 GenericAgent 的公开属性 ——
 
@@ -76,11 +191,64 @@ class AgentRunner:
         return self._agent.handler
 
     @property
+    def task_queue(self):
+        """GenericAgent-compatible queue handle used by older frontends."""
+        return self._task_queue
+
+    @property
     def history(self):
         try:
             return self._agent.client.history
         except AttributeError:
             return []
+
+    @property
+    def llmclients(self) -> List[_LLMClientCompat]:
+        return [
+            _LLMClientCompat(session)
+            for session in getattr(self._agent, "_sessions", {}).values()
+        ]
+
+    def history_snapshot(self) -> list:
+        """Return a deep-copy snapshot of the active LLM history."""
+        return copy.deepcopy(list(self.history or []))
+
+    def replace_history(self, history: list | None) -> None:
+        """Replace the active LLM history without exposing client internals."""
+        target = list(history or [])
+        client = getattr(self._agent, "client", None)
+        if client is not None and hasattr(client, "history"):
+            client.history = copy.deepcopy(target)
+
+    def clear_history(self) -> None:
+        """Clear active conversation history."""
+        self.replace_history([])
+
+    def append_history_entries(self, entries: list) -> None:
+        """Append history entries to the active LLM history."""
+        client = getattr(self._agent, "client", None)
+        if client is not None and hasattr(client, "history"):
+            client.history.extend(copy.deepcopy(list(entries or [])))
+
+    def clear_last_tools(self) -> None:
+        """Clear the active client's last_tools marker when the backend has one."""
+        client = getattr(self._agent, "client", None)
+        if client is not None and hasattr(client, "last_tools"):
+            client.last_tools = ""
+
+    def config_snapshot(self):
+        """Return a deep-copy snapshot of the ZeroAgent config."""
+        return copy.deepcopy(self._agent.config)
+
+    def set_runtime_attr(self, name: str, value: Any) -> None:
+        """Set a runtime-only attribute on the wrapped ZeroAgent."""
+        setattr(self._agent, name, value)
+
+    def set_turn_end_hook(self, name: str, hook) -> None:
+        """Install or replace a turn-end hook on the wrapped ZeroAgent."""
+        if not hasattr(self._agent, "_turn_end_hooks"):
+            self._agent._turn_end_hooks = {}
+        self._agent._turn_end_hooks[name] = hook
 
     @property
     def llm_no(self) -> int:
@@ -90,6 +258,11 @@ class AgentRunner:
             if active:
                 return i
         return 0
+
+    @llm_no.setter
+    def llm_no(self, value: int) -> None:
+        """Switch active LLM by index for legacy frontends that assign llm_no."""
+        self.next_llm(int(value))
 
     @property
     def verbose(self) -> bool:
@@ -102,7 +275,17 @@ class AgentRunner:
     @property
     def llmclient(self):
         """兼容 GenericAgent 的 llmclient 检查 (非 None 表示已配置)."""
-        return self._agent.client
+        client = getattr(self._agent, "client", None)
+        return _LLMClientCompat(client) if client is not None else None
+
+    @llmclient.setter
+    def llmclient(self, value) -> None:
+        session = getattr(value, "_session", value)
+        for name, candidate in getattr(self._agent, "_sessions", {}).items():
+            if candidate is session:
+                self._agent.switch_backend(name)
+                return
+        self._agent.client = session
 
     def _configure_shared_session_commands(self) -> None:
         """让 /continue 等共享命令使用当前配置里的 sessions_dir."""
@@ -117,13 +300,28 @@ class AgentRunner:
 
     # —— LLM 管理 (兼容 GenericAgent bot /list_llms + /llm n) ——
 
+    def list_llm_profiles(self) -> List[Dict[str, Any]]:
+        """列出所有可用后端, 返回前端可消费的 profile DTO."""
+        profiles: List[Dict[str, Any]] = []
+        for index, (name, model, active) in enumerate(self._agent.list_backends()):
+            display_name = f"{name}/{model}" if model else str(name)
+            profiles.append({
+                "index": index,
+                "llmNo": index,
+                "id": name,
+                "name": name,
+                "model": model,
+                "displayName": display_name,
+                "active": active,
+            })
+        return profiles
+
     def list_llms(self) -> List[tuple]:
-        """列出所有可用后端. 返回 [(index, display_name, is_active), ...]."""
-        result: List[tuple] = []
-        backends = self._agent.list_backends()
-        for i, (name, model, active) in enumerate(backends):
-            result.append((i, f"{name}/{model}", active))
-        return result
+        """Legacy tuple alias: [(index, display_name, is_active), ...]."""
+        return [
+            (profile["index"], profile["displayName"], profile["active"])
+            for profile in self.list_llm_profiles()
+        ]
 
     def next_llm(self, n: int = -1) -> None:
         """切换到下一个 (或指定) LLM 后端.
@@ -141,6 +339,76 @@ class AgentRunner:
             n = n % len(backends)
         target_name = backends[n][0]
         self._agent.switch_backend(target_name)
+
+    def switch_llm(self, index_or_id: int | str) -> None:
+        """Switch backend by index, numeric string, backend id, or backend name."""
+        backends = self._agent.list_backends()
+        if not backends:
+            raise ValueError("没有可用的 LLM 后端")
+
+        if isinstance(index_or_id, int):
+            self.next_llm(index_or_id)
+            return
+
+        value = str(index_or_id).strip()
+        if value.lstrip("-").isdigit():
+            self.next_llm(int(value))
+            return
+
+        for name, _, _ in backends:
+            if name == value:
+                self._agent.switch_backend(name)
+                return
+
+        available = ", ".join(name for name, _, _ in backends)
+        raise ValueError(f"后端 '{value}' 不存在。可用后端: {available}")
+
+    def check_llm_health(self, index_or_id: int | str, prompt: str = "你好") -> bool:
+        """Check whether a backend can answer a small prompt without switching UI state."""
+        backends = self._agent.list_backends()
+        if not backends:
+            return False
+
+        target_name: str | None = None
+        if isinstance(index_or_id, int):
+            if not 0 <= index_or_id < len(backends):
+                return False
+            target_name = backends[index_or_id][0]
+        else:
+            value = str(index_or_id).strip()
+            if value.lstrip("-").isdigit():
+                idx = int(value)
+                if not 0 <= idx < len(backends):
+                    return False
+                target_name = backends[idx][0]
+            else:
+                for name, _, _ in backends:
+                    if name == value:
+                        target_name = name
+                        break
+        if not target_name:
+            return False
+
+        session = getattr(self._agent, "_sessions", {}).get(target_name)
+        if session is None:
+            return False
+
+        backend = _BackendCompat(session)
+        try:
+            reply = backend.ask(prompt)
+            if hasattr(reply, "__iter__") and not isinstance(reply, str):
+                reply = "".join(str(block) for block in reply if isinstance(block, str))
+            text = str(reply).strip() if reply else ""
+            ok = bool(text) and not text.startswith("Error") and not text.startswith("[")
+        except Exception:
+            ok = False
+
+        if hasattr(backend, "raw_msgs") and backend.raw_msgs:
+            backend.raw_msgs = [
+                msg for msg in backend.raw_msgs
+                if msg.get("prompt") != prompt
+            ]
+        return ok
 
     def get_llm_name(self) -> str:
         """返回当前活跃 LLM 的 display 名称."""
@@ -168,6 +436,37 @@ class AgentRunner:
     def taskloop(self, prompt: str):
         """执行任务并逐块 yield 结果 (兼容前端 stapp 的 generator 迭代模式)."""
         return self._agent.run(prompt)
+
+    def _handle_slash_cmd(self, raw_query: str, display_queue: queue.Queue):
+        """GenericAgent-style slash-command hook for legacy frontend patches.
+
+        Legacy command modules monkey-patch this method and either return a
+        replacement prompt, return ``None`` after pushing a system response, or
+        fall through to the original implementation. The base implementation
+        simply says "not handled" by returning the original query.
+        """
+        return raw_query
+
+    def run(self, user_input: Optional[str] = None, *args, **kwargs):
+        """GenericAgent-compatible run entrypoint.
+
+        GA frontends start ``agent.run`` in a background thread, then submit
+        work through ``put_task``. ZeroAgent's native ``run`` executes one
+        prompt, so no-arg calls become the queue worker loop while prompted
+        calls delegate to the wrapped ZeroAgent.
+        """
+        if user_input is not None:
+            return self._agent.run(user_input, *args, **kwargs)
+
+        current = threading.current_thread()
+        with self._lock:
+            existing = self._worker_thread
+            if existing and existing.is_alive() and existing is not current:
+                return None
+            self._worker_thread = current
+            self._stop_sig = False
+        self._worker_loop()
+        return None
 
     # —— 任务接口 (兼容 GenericAgent.put_task) ——
 
@@ -244,9 +543,20 @@ class AgentRunner:
             except queue.Empty:
                 continue
 
+            if task == "EXIT":
+                self._task_queue.task_done()
+                break
+
             query = task["query"]
             source = task["source"]
             display_queue = task["output"]
+
+            if isinstance(query, str) and query.strip().startswith("/"):
+                handled = self._handle_slash_cmd(query, display_queue)
+                if handled is None:
+                    self._task_queue.task_done()
+                    continue
+                query = handled
 
             with self._lock:
                 self._running = True
@@ -265,7 +575,7 @@ class AgentRunner:
                     chunk_str = str(chunk)
                     full_resp += chunk_str
                     display_queue.put({
-                        "next": full_resp,
+                        "next": chunk_str if self.inc_out else full_resp,
                         "source": source,
                         "turn": curr_turn,
                     })

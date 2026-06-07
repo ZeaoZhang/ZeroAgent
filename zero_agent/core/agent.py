@@ -211,6 +211,8 @@ class ZeroAgent:
         Raises:
             RuntimeError: 当前有任务正在运行（不支持并发）.
         """
+        self.handler.reset_code_stop_signal()
+
         # 创建工作目录和记忆目录
         os.makedirs(self.config.workspace_dir, exist_ok=True)
         self.memory.init_memory()
@@ -243,7 +245,7 @@ class ZeroAgent:
         设置 code_stop_signal 通知 code_run 等工具停止执行.
         """
         if self.handler is not None:
-            self.handler.code_stop_signal.append(1)
+            self.handler.request_code_stop()
 
     def switch_backend(self, name: str) -> None:
         """切换到指定的 LLM 后端.

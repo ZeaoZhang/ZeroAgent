@@ -1,4 +1,4 @@
-/* GenericAgent Desktop — Minimal Codex-inspired styling */
+/* ZeroAgent Desktop — Minimal Codex-inspired styling */
 
 :root {
   --bg: #ffffff;
@@ -496,6 +496,7 @@ body.platform-darwin .tab-strip {
 #composer-wrap {
   padding: 8px 20px 16px;
   background: var(--bg);
+  position: relative;
 }
 
 #composer {
@@ -514,10 +515,11 @@ body.platform-darwin .tab-strip {
 
 #input {
   width: 100%;
+  min-height: 72px;
   border: 0;
   outline: 0;
   resize: none;
-  padding: 12px 14px 4px;
+  padding: 14px 14px 8px;
   background: transparent;
   color: var(--text);
   font-family: var(--font);
@@ -607,6 +609,55 @@ body.platform-darwin .tab-strip {
 }
 .hint-label {
   font-size: 11px;
+  color: var(--text-muted);
+}
+
+.command-palette {
+  max-width: 780px;
+  margin: 0 auto 8px;
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  box-shadow: var(--shadow-md);
+}
+.command-palette.hidden {
+  display: none;
+}
+.command-item {
+  display: grid;
+  grid-template-columns: minmax(118px, 170px) 1fr;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.command-item:last-child {
+  border-bottom: 0;
+}
+.command-item:hover,
+.command-item.active {
+  background: var(--bg-hover);
+}
+.command-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.command-desc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
   color: var(--text-muted);
 }
 

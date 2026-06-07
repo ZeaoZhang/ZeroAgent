@@ -11,22 +11,29 @@ use std::os::windows::process::CommandExt;
 
 static BRIDGE_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 
-/// Get project root (parent of frontends/)
+/// Get project root (parent of zero_agent/)
 fn project_root() -> PathBuf {
     std::env::current_exe()
         .expect("cannot get exe path")
-        .parent().expect("cannot get exe dir")   // frontends/
+        .parent().expect("cannot get exe dir")
         .parent().expect("cannot get project root") // project root
         .to_path_buf()
 }
 
+fn bridge_script_for_project(project_dir: &PathBuf) -> PathBuf {
+    let source_layout = project_dir.join("zero_agent").join("frontends").join("desktop_bridge.py");
+    if source_layout.exists() {
+        return source_layout;
+    }
+    let packaged_layout = project_dir.join("frontends").join("desktop_bridge.py");
+    if packaged_layout.exists() {
+        return packaged_layout;
+    }
+    project_dir.join("desktop_bridge.py")
+}
+
 fn find_bridge_script() -> PathBuf {
-    // exe is at frontends/GenericAgent.exe
-    // bridge is at frontends/desktop_bridge.py
-    std::env::current_exe()
-        .expect("cannot get exe path")
-        .parent().expect("cannot get exe dir")
-        .join("desktop_bridge.py")
+    bridge_script_for_project(&project_root())
 }
 
 /// Find python executable:
@@ -69,7 +76,7 @@ fn find_python() -> String {
     { "python3".to_string() }
 }
 
-/// Find project directory by searching upward from exe for agentmain.py
+/// Find project directory by searching upward for ZeroAgent project markers.
 fn find_project_dir() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let mut dir = exe.parent();
@@ -77,7 +84,9 @@ fn find_project_dir() -> Option<String> {
     for _ in 0..8 {
         match dir {
             Some(d) => {
-                if d.join("agentmain.py").exists() {
+                let pyproject = d.join("pyproject.toml");
+                let package_dir = d.join("zero_agent");
+                if package_dir.is_dir() && pyproject.exists() {
                     return Some(d.to_string_lossy().to_string());
                 }
                 dir = d.parent();
@@ -88,11 +97,42 @@ fn find_project_dir() -> Option<String> {
     None
 }
 
-/// Settings file path: ~/.ga_desktop_settings.json
+/// Settings file path: ~/.zero_agent_desktop_settings.json
 fn settings_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
+        .join(".zero_agent_desktop_settings.json")
+}
+
+/// Legacy settings path, read for compatibility only.
+fn legacy_settings_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
         .join(".ga_desktop_settings.json")
+}
+
+fn read_settings(path: &PathBuf) -> Option<(String, String)> {
+    if !path.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(path).ok()?;
+    let val = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+    let python = val.get("python_path")
+        .or_else(|| val.get("pythonPath"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let project = val.get("project_dir")
+        .or_else(|| val.get("workspaceDir"))
+        .or_else(|| val.get("projectDir"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if !python.is_empty() && !project.is_empty() {
+        Some((python, project))
+    } else {
+        None
+    }
 }
 
 /// Read config from settings file, or auto-discover and save
@@ -100,22 +140,11 @@ pub fn get_or_discover_config() -> (String, String) {
     let path = settings_path();
 
     // Try reading existing settings
-    if path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                let python = val.get("python_path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let project = val.get("project_dir")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if !python.is_empty() && !project.is_empty() {
-                    return (python, project);
-                }
-            }
-        }
+    if let Some(config) = read_settings(&path) {
+        return config;
+    }
+    if let Some(config) = read_settings(&legacy_settings_path()) {
+        return config;
     }
 
     // Auto-discover
@@ -126,7 +155,9 @@ pub fn get_or_discover_config() -> (String, String) {
     if !python.is_empty() && !project.is_empty() {
         let json = serde_json::json!({
             "python_path": python,
-            "project_dir": project
+            "pythonPath": python,
+            "project_dir": project,
+            "workspaceDir": project
         });
         let _ = std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap());
     }
@@ -163,7 +194,8 @@ fn start_bridge() {
 
     let mut cmd = Command::new(&python);
     cmd.arg(&script)
-       .current_dir(script.parent().unwrap());
+       .current_dir(script.parent().unwrap())
+       .env("ZA_DESKTOP_BRIDGE_NO_BROWSER", "1");
 
     #[cfg(windows)]
     if !show_console {
@@ -199,36 +231,43 @@ fn ensure_bridge_running() {
 fn start_bridge_with_config(app_handle: tauri::AppHandle, python_path: String, project_dir: String) -> Result<(), String> {
     // Save to settings
     let path = settings_path();
-    let obj = serde_json::json!({"python_path": python_path, "project_dir": project_dir});
+    let obj = serde_json::json!({
+        "python_path": python_path,
+        "pythonPath": python_path,
+        "project_dir": project_dir,
+        "workspaceDir": project_dir
+    });
     std::fs::write(&path, serde_json::to_string_pretty(&obj).unwrap())
         .map_err(|e| format!("Failed to write settings: {}", e))?;
 
-    // Start bridge
-    let py = PathBuf::from(&python_path);
-    let dir = PathBuf::from(&project_dir);
-    let script = dir.join("frontends").join("desktop_bridge.py");
-    if !script.exists() {
-        return Err(format!("desktop_bridge.py not found at {:?}", script));
-    }
+    // Start bridge only if it is not already accepting connections.
+    if !is_bridge_running() {
+        let py = PathBuf::from(&python_path);
+        let dir = PathBuf::from(&project_dir);
+        let script = bridge_script_for_project(&dir);
+        if !script.exists() {
+            return Err(format!("desktop_bridge.py not found at {:?}", script));
+        }
 
-    let mut cmd = Command::new(&py);
-    cmd.arg(&script).current_dir(&dir);
-    #[cfg(windows)]
-    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    let child = cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?;
-    *BRIDGE_PROCESS.lock().unwrap() = Some(child);
+        let mut cmd = Command::new(&py);
+        cmd.arg(&script)
+            .current_dir(script.parent().unwrap_or(&dir))
+            .env("ZA_DESKTOP_BRIDGE_NO_BROWSER", "1");
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        let child = cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?;
+        *BRIDGE_PROCESS.lock().unwrap() = Some(child);
+    }
 
     // Wait for port
-    if !wait_for_port(14168, Duration::from_secs(15)) {
-        return Err("Bridge did not become ready within 15s".into());
+    if !wait_for_port(14168, Duration::from_secs(20)) {
+        return Err("Bridge did not become ready within 20s".into());
     }
 
-    // Navigate main window to bridge URL and show it, hide setup
+    // Navigate main window to bridge URL after the bridge is ready, then show it.
     if let Some(main_win) = app_handle.get_webview_window("main") {
         let url = tauri::Url::parse("http://127.0.0.1:14168/").unwrap();
         let _ = main_win.navigate(url);
-        // Small delay for page to start loading
-        thread::sleep(Duration::from_millis(300));
         let _ = main_win.show();
         let _ = main_win.set_focus();
     }
@@ -255,12 +294,13 @@ pub fn run() {
     if !bridge_ok && !no_autostart {
         // Try to start bridge with saved/discovered config
         let (py_str, dir_str) = get_or_discover_config();
-        let py = PathBuf::from(&py_str);
         let dir = PathBuf::from(&dir_str);
-        let script = dir.join("frontends").join("desktop_bridge.py");
+        let script = bridge_script_for_project(&dir);
         if script.exists() {
             let mut cmd = Command::new(&py_str);
-            cmd.arg(&script).current_dir(&dir);
+            cmd.arg(&script)
+                .current_dir(script.parent().unwrap_or(&dir))
+                .env("ZA_DESKTOP_BRIDGE_NO_BROWSER", "1");
             #[cfg(windows)]
             cmd.creation_flags(0x08000000);
             if let Ok(child) = cmd.spawn() {
@@ -281,14 +321,17 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![start_bridge_with_config, get_config])
         .setup(move |app| {
             let bridge_wait = if spawned_bridge {
-                Duration::from_secs(15)
+                Duration::from_secs(20)
             } else {
-                Duration::from_secs(1)
+                Duration::from_secs(2)
             };
             let bridge_ready = wait_for_port(14168, bridge_wait);
             if bridge_ready {
-                // Show main window (loads bridge HTTP)
+                // Navigate to bridge HTTP only after it is ready; the window starts on loading.html
+                // so WebView never caches an early "connection refused" error page.
                 if let Some(w) = app.get_webview_window("main") {
+                    let url = tauri::Url::parse("http://127.0.0.1:14168/").unwrap();
+                    let _ = w.navigate(url);
                     if dev_mode {
                         w.open_devtools();
                     } else {

@@ -12,15 +12,30 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ui = ["streamlit>=1.28", "pywebview>=4.0", "aiohttp>=3.9"]
-qt = ["PySide6>=6.6", "markdown>=3.5"]
+ui = [
+    "streamlit>=1.28",
+    "pywebview>=4.0",
+    "aiohttp>=3.9",
+    "textual>=0.70",
+    "prompt_toolkit>=3.0,<4",
+    "rich>=13.0",
+    "Pillow>=10.0",
+]
 browser = ["beautifulsoup4>=4.12", "bottle>=0.12", "simple-websocket-server>=0.4"]
 memory = ["rapidocr-onnxruntime>=1.3", "Pillow>=10.0"]
 plot = ["matplotlib>=3.7"]
 telegram = ["python-telegram-bot>=20.0"]
 discord = ["discord.py>=2.3"]
-bots = ["zero-agent[telegram,discord]"]
-all-extras = ["zero-agent[ui,qt,browser,memory,plot,bots]"]
+bots = [
+    "zero-agent[telegram,discord]",
+    "qq-botpy>=1.0",
+    "pycryptodome>=3.19",
+    "qrcode>=7.4",
+    "lark-oapi>=1.0",
+    "wecom-aibot-sdk>=1.0",
+    "dingtalk-stream>=0.20",
+]
+all-extras = ["zero-agent[ui,browser,memory,plot,bots]"]
 
 [project.scripts]
 zero-agent = "zero_agent.runners.cli:main"
@@ -46,7 +61,6 @@ packages = [
     "zero_agent.reflect",
     "zero_agent.plugins",
     "zero_agent.frontends",
-    "zero_agent.frontends.themes",
     "zero_agent.vendor",
     "zero_agent.vendor.genericagent",
     "zero_agent.assets",
@@ -57,11 +71,12 @@ packages = [
     "desktop/static/*",
     "desktop/static/vendor/*",
     "skins/**/*",
+    "conductor_im_plugins/*",
     "*.gif",
+    "*.html",
     "*.png",
     "*.md",
 ]
-"zero_agent.frontends.themes" = ["*.css"]
 "zero_agent.assets" = ["code_run_header.py", "sys_prompt*.txt", "tmwd_cdp_bridge/*"]
 "zero_agent.memory" = ["*.md", "*.py", "*.txt", "**/*.md", "**/*.py", "**/*.txt"]
 

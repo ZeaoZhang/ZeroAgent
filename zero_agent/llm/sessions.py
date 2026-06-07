@@ -553,27 +553,35 @@ class LiteLLMSession:
     def _trim_history(self) -> None:
         """裁剪历史消息，防止超出上下文窗口.
 
-        混合策略:
-            1. 先对早期消息做标签级压缩 (compress_history_tags).
-            2. 再按消息数量裁剪，保留最近的 N 条.
+        与 GenericAgent.trim_messages_history 对齐：
+        先按固定间隔压缩旧标签；超过 context_window * 3 字符预算时强制
+        压缩旧标签；仍超过 target 时从最早消息开始删到 user 边界。
         """
-        max_messages = self._context_window // 100  # 粗略估算
-        if len(self.history) <= max_messages:
+        cap = self._context_window * 3
+        target = int(cap * getattr(self, "_trim_keep_rate", 0.6))
+
+        def cost() -> int:
+            return sum(len(json.dumps(m, ensure_ascii=False)) for m in self.history)
+
+        self._compress_history_tags(
+            self.history,
+            interval=getattr(self, "_cut_msg_interval", 5),
+        )
+        print(f"[Debug] Current context: {cost()} chars, {len(self.history)} messages.")
+        if cost() <= cap:
             return
 
-        # 步骤 1: 对早期消息做标签级压缩
-        if len(self.history) > max_messages * 0.5:
-            keep_recent = int(max_messages * 0.3)
-            older = self.history[:-keep_recent] if keep_recent > 0 else []
-            recent = self.history[-keep_recent:] if keep_recent > 0 else self.history
-            if older:
-                older = self._compress_history_tags(older)
-            self.history = older + recent
+        self._compress_history_tags(self.history, keep_recent=4, force=True)
+        if cost() <= target:
+            return
 
-        # 步骤 2: 如果仍然超限，裁剪到保留比例
-        if len(self.history) > max_messages:
-            keep = max(int(max_messages * self._trim_keep_rate), 2)
-            self.history = self.history[-keep:]
+        while len(self.history) > 9 and cost() > target:
+            self.history.pop(0)
+            while self.history and self.history[0].get("role") != "user":
+                self.history.pop(0)
+            if self.history and self.history[0].get("role") == "user":
+                self.history[0] = self._sanitize_leading_user_msg(self.history[0])
+        print(f"[Debug] Trimmed context, current: {cost()} chars, {len(self.history)} messages.")
 
     def _record_assistant(self, mock: MockResponse) -> None:
         """将助手响应追加到历史.
@@ -845,51 +853,103 @@ class LiteLLMSession:
     # ---- 历史压缩 ----
 
     @staticmethod
-    def _compress_history_tags(history: list[dict]) -> list[dict]:
-        """压缩历史消息中过长的标签内容.
-
-        对 <thinking>, <tool_use>, <tool_result> 标签做头尾截断，
-        保留关键信息同时减少 token 消耗.
-
-        Args:
-            history: 原始历史消息列表.
-
-        Returns:
-            压缩后的历史消息列表（浅拷贝，仅修改 content 字段）.
-        """
+    def _compress_history_tags(
+        history: list[dict],
+        keep_recent: int = 10,
+        max_len: int = 800,
+        force: bool = False,
+        interval: int = 5,
+    ) -> list[dict]:
+        """Compress old history tags exactly like GenericAgent."""
         import re as _re
 
-        TAIL = 400
-        TAG_TRUNC = " ... [TRUNCATED] "
+        cd = getattr(LiteLLMSession._compress_history_tags, "_cd", 0) + 1
+        if force:
+            cd = 0
+        LiteLLMSession._compress_history_tags._cd = cd
+        if cd % interval != 0:
+            return history
 
-        def _compress(text: str) -> str:
-            if not text or len(text) <= 1000:
-                return text
+        before = sum(len(json.dumps(m, ensure_ascii=False)) for m in history)
+        pats = {
+            tag: _re.compile(rf"(<{tag}>)([\s\S]*?)(</{tag}>)")
+            for tag in ("thinking", "think", "tool_use", "tool_result")
+        }
+        hist_pat = _re.compile(r"<(history|key_info|earlier_context)>[\s\S]*?</\1>")
 
-            for tag in ("thinking", "think", "tool_use", "tool_result",
-                        "history", "key_info", "earlier_context"):
-                pattern = _re.compile(
-                    rf"<{tag}>(.*?)</{tag}>", _re.DOTALL
+        def _trunc_str(s: Any) -> Any:
+            return (
+                s[:max_len // 2] + "\n...[Truncated]...\n" + s[-max_len // 2:]
+                if isinstance(s, str) and len(s) > max_len
+                else s
+            )
+
+        def _trunc(text: str) -> str:
+            text = hist_pat.sub(lambda m: f"<{m.group(1)}>[...]</{m.group(1)}>", text)
+            for pat in pats.values():
+                text = pat.sub(
+                    lambda m: m.group(1) + _trunc_str(m.group(2)) + m.group(3),
+                    text,
                 )
-                def _replacer(m: _re.Match, t=tag) -> str:
-                    body = m.group(1)
-                    if len(body) <= TAIL * 2 + 100:
-                        return m.group(0)
-                    return f"<{t}>{body[:TAIL]}{TAG_TRUNC}{body[-TAIL:]}</{t}>"
-                text = pattern.sub(_replacer, text)
-
             return text
 
-        result = []
-        for msg in history:
-            content = msg.get("content", "")
-            if isinstance(content, str) and content:
-                compressed = _compress(content)
-                if compressed != content:
-                    msg = {**msg, "content": compressed}
-            result.append(msg)
+        for i, msg in enumerate(history):
+            if i >= len(history) - keep_recent:
+                break
+            content = msg.get("content")
+            if isinstance(content, str):
+                msg["content"] = _trunc(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type")
+                    if block_type == "text" and isinstance(block.get("text"), str):
+                        block["text"] = _trunc(block["text"])
+                    elif block_type == "tool_result":
+                        tool_content = block.get("content")
+                        if isinstance(tool_content, str):
+                            block["content"] = _trunc_str(tool_content)
+                        elif isinstance(tool_content, list):
+                            for sub in tool_content:
+                                if isinstance(sub, dict) and sub.get("type") == "text":
+                                    sub["text"] = _trunc_str(sub.get("text"))
+                    elif block_type == "tool_use" and isinstance(block.get("input"), dict):
+                        for key, value in block["input"].items():
+                            block["input"][key] = _trunc_str(value)
 
-        return result
+        print(
+            "[Cut] "
+            f"{before} -> {sum(len(json.dumps(m, ensure_ascii=False)) for m in history)}"
+        )
+        return history
+
+    @staticmethod
+    def _sanitize_leading_user_msg(msg: dict) -> dict:
+        """Rewrite leading user tool_result blocks as text, matching GA behavior."""
+        msg = dict(msg)
+        content = msg.get("content")
+        if not isinstance(content, list):
+            return msg
+        texts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_result":
+                block_content = block.get("content", "")
+                if isinstance(block_content, list):
+                    texts.extend(
+                        str(b.get("text", ""))
+                        for b in block_content
+                        if isinstance(b, dict)
+                    )
+                else:
+                    texts.append(str(block_content))
+            elif block.get("type") == "text":
+                texts.append(str(block.get("text", "")))
+
+        msg["content"] = [{"type": "text", "text": "\n".join(t for t in texts if t)}]
+        return msg
 
     # ---- 消息格式修复 ----
 

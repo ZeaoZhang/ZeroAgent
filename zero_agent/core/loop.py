@@ -102,6 +102,7 @@ class AgentLoop:
 
         turn = 0
         self.handler.max_turns = self.max_turns
+        self._record_user_history(initial_content)
 
         self._trigger_hook("agent_before", {
             "task": user_input,
@@ -220,6 +221,9 @@ class AgentLoop:
                     }
                     break
 
+                if self._is_unknown_tool_prompt(outcome.next_prompt):
+                    self._clear_tool_cache()
+
                 if outcome.data is not None and tool_name != "no_tool":
                     datastr = (
                         json.dumps(
@@ -292,6 +296,42 @@ class AgentLoop:
         return final_reason
 
     # ---- dispatch 消费 ----
+
+    def _record_user_history(self, content: Any) -> None:
+        """Mirror GA's compact [USER] entry in handler.history_info."""
+        if not isinstance(getattr(self.handler, "history_info", None), list):
+            return
+        text = self._message_text(content).strip()
+        if text:
+            self.handler.history_info.append(f"[USER]: {text}")
+
+    @staticmethod
+    def _message_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if text is not None:
+                        parts.append(str(text))
+                else:
+                    parts.append(str(item))
+            return "\n".join(parts)
+        return str(content)
+
+    @staticmethod
+    def _is_unknown_tool_prompt(prompt: str) -> bool:
+        stripped = (prompt or "").lstrip()
+        return stripped.startswith("未知工具") or stripped.startswith("Unknown tool")
+
+    def _clear_tool_cache(self) -> None:
+        """Force full tool protocol resend after tool routing failures."""
+        if hasattr(self.client, "last_tools"):
+            self.client.last_tools = ""
+        if hasattr(self.client, "_last_tools_json"):
+            self.client._last_tools_json = ""
 
     @staticmethod
     def _build_next_messages(

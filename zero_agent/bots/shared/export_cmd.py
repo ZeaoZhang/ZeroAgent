@@ -25,14 +25,18 @@ def last_assistant_text(runner) -> str | None:
 
     Returns None when the backend history is empty or the log is unreadable.
     """
-    try:
-        client = runner.llmclient
-    except AttributeError:
-        return None
-    if client is None:
-        return None
-    backend = getattr(client, "backend", None) or client
-    if not getattr(backend, "history", None):
+    if hasattr(runner, "history_snapshot"):
+        history = runner.history_snapshot()
+    else:
+        try:
+            client = runner.llmclient
+        except AttributeError:
+            return None
+        if client is None:
+            return None
+        backend = getattr(client, "backend", None) or client
+        history = getattr(backend, "history", None)
+    if not history:
         return None
 
     log_path = _resolve_log_path(runner)

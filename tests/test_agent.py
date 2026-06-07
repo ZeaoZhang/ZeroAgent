@@ -219,6 +219,55 @@ class TestZeroAgentHooks:
         tool_after_ctx = next(ctx for event, ctx in events if event == "tool_after")
         assert tool_after_ctx["result"] == {"result": "hello"}
 
+    def test_abort_signal_does_not_poison_next_code_run(self, tmp_path, monkeypatch) -> None:
+        """一次 abort 不应让后续任务的 code_run 被立刻杀死."""
+        config = AgentConfig(
+            llm_backends={
+                "default": LLMBackendConfig(
+                    name="default",
+                    provider="openai",
+                    api_key="test-key",
+                    api_base="https://api.openai.com/v1",
+                    model="test-model",
+                ),
+            },
+            default_backend="default",
+            max_turns=5,
+            workspace_dir=str(tmp_path / "workspace"),
+            memory_dir=str(tmp_path / "memory"),
+        )
+        fake_client = _FakeClient(
+            config.llm_backends["default"],
+            [
+                MockResponse(
+                    content="",
+                    tool_calls=[
+                        MockToolCall(
+                            function=MockFunction(
+                                name="code_run",
+                                arguments='{"type": "python", "script": "print(\\"after abort\\")"}',
+                            ),
+                            id="call_code",
+                        ),
+                    ],
+                ),
+                MockResponse(content="Done. <summary>done</summary>"),
+            ],
+        )
+        monkeypatch.setattr(
+            "zero_agent.core.agent.LLMFactory.create_all_sessions",
+            lambda _config: {"default": fake_client},
+        )
+
+        agent = ZeroAgent(config=config)
+        agent.abort()
+        exit_reason = _exhaust(agent.run("run code after abort"))
+
+        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        assert fake_client.calls[1][0]["role"] == "tool"
+        assert "after abort" in fake_client.calls[1][0]["content"]
+        assert '"status": "success"' in fake_client.calls[1][0]["content"]
+
 
 class _FakeClient:
     """Minimal LLM client for ZeroAgent.run() tests."""
@@ -231,8 +280,10 @@ class _FakeClient:
         self.history = []
         self._responses = list(responses)
         self._call_count = 0
+        self.calls = []
 
     def chat(self, messages, tools=None):
+        self.calls.append(messages)
         if self._call_count >= len(self._responses):
             yield "Done."
             return MockResponse(content="Done. <summary>done</summary>")

@@ -2,5 +2,5 @@
 需要时read L2 或 ls ../memory/ 查L3
 L0(META-SOP): memory_management_sop
 L2: 现空
-L3: (暂无)
+L3: stock_analysis_sop.md — 股票分析技能(3 tools: analyze_stock, get_stock_quote, analyze_trend)
 L4: L4_raw_sessions/ 历史会话

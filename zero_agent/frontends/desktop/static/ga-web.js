@@ -1,4 +1,4 @@
-// GenericAgent Web2 browser bridge adapter.
+// ZeroAgent Web2 browser bridge adapter.
 // HTTP is the command/data channel. WebSocket only carries small state events.
 (() => {
   'use strict';
@@ -83,6 +83,18 @@
         return http('/config', { method: 'POST', body: params || {} });
       case 'get/model-profiles':
         return http('/model-profiles');
+      case 'slash/commands':
+        return http('/slash/commands');
+      case 'slash/resolve':
+        return http('/slash/resolve', { method: 'POST', body: params || {} });
+      case 'scheduler/status':
+        return http('/scheduler');
+      case 'scheduler/start':
+        return http('/scheduler/start', { method: 'POST', body: params || {} });
+      case 'history/sessions':
+        return http(`/history/sessions?limit=${encodeURIComponent(params.limit ?? 10)}`);
+      case 'history/resume':
+        return http('/history/resume', { method: 'POST', body: params || {} });
       case 'session/new':
         return http('/session/new', { method: 'POST', body: params || {} });
       case 'session/prompt': {
@@ -123,9 +135,14 @@
     getConfig: () => rpc('app/config/get', {}),
     saveConfig: (cfg) => rpc('app/config/save', cfg || {}),
     getModelProfiles: () => rpc('get/model-profiles', {}),
+    getSlashCommands: () => rpc('slash/commands', {}),
+    resolveSlash: (command, args = '') => rpc('slash/resolve', { command, args }),
+    listResumeSessions: (limit = 10) => rpc('history/sessions', { limit }),
+    resumeSession: (sessionId, index) => rpc('history/resume', { sessionId, index }),
     selectGaRoot: () => rpc('app/path/selectGaRoot', {}),
-    openMykeyTemplate: () => rpc('app/path/open', { kind: 'mykeyTemplate' }),
-    openMykey: () => rpc('app/path/open', { kind: 'mykey' }),
+    openConfig: () => rpc('app/path/open', { kind: 'config' }),
+    openMykeyTemplate: () => rpc('app/path/open', { kind: 'config' }),
+    openMykey: () => rpc('app/path/open', { kind: 'config' }),
     pollSession: (sessionId, afterId = 0) => rpc('session/poll', { sessionId, afterId }),
     rpc,
     onBridgeMessage: (cb) => on('bridge-message', cb),

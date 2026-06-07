@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>GenericAgent</title>
+  <title>ZeroAgent</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -20,7 +20,7 @@
           </div>
         </div>
         <div class="topbar-right">
-          <h1 id="session-title" class="sr-only">GenericAgent</h1>
+          <h1 id="session-title" class="sr-only">ZeroAgent</h1>
           <span id="status-badge" class="badge">
             <span class="status-dot"></span>
             <span id="status-text">Starting…</span>
@@ -44,6 +44,7 @@
       </section>
 
       <div id="composer-wrap">
+        <div id="command-palette" class="command-palette hidden" role="listbox" aria-label="Command suggestions"></div>
         <div id="composer">
           <div id="image-previews" class="image-previews"></div>
           <textarea id="input" rows="1" placeholder="Type a message, or /help"></textarea>
@@ -55,6 +56,24 @@
                   <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                 </svg>
                 <span class="hint-label">Settings</span>
+              </button>
+              <button id="goal-mode-btn" class="icon-btn ghost" title="Goal mode" aria-label="Goal mode">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="8"/>
+                  <circle cx="12" cy="12" r="3"/>
+                  <path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>
+                </svg>
+                <span class="hint-label">Goal</span>
+              </button>
+              <button id="auto-run-btn" class="icon-btn ghost" title="Autonomous action" aria-label="Autonomous action">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M9 7v10l8-5-8-5z"/>
+                  <path d="M4 12a8 8 0 0 1 13.7-5.7"/>
+                  <path d="M18 3v4h-4"/>
+                  <path d="M20 12a8 8 0 0 1-13.7 5.7"/>
+                  <path d="M6 21v-4h4"/>
+                </svg>
+                <span class="hint-label">Auto</span>
               </button>
 
             </div>
@@ -82,14 +101,14 @@
             <select id="cfg-llm">
               <option value="0">Default / Auto</option>
             </select>
-            <small>Select the LLM profile from mykey.py.</small>
+            <small>Select the LLM profile from ZeroAgent config.</small>
           </div>
           <div class="form-row">
-            <label>API keys</label>
+            <label>Runtime config</label>
             <div class="btn-row">
-              <button class="btn" id="open-mykey">Open mykey.py</button>
+              <button class="btn" id="open-config">Open config.yaml</button>
             </div>
-            <small>Configure API keys in <code>mykey.py</code> at the GA project root.</small>
+            <small>Configure providers, API keys, workspace, and runtime defaults in <code>config.yaml</code>.</small>
           </div>
         </div>
         <div class="modal-footer">
@@ -110,7 +129,7 @@
   </div>
 
   <script src="vendor/marked.min.js"></script>
-  <script src="ga-web.js?v=14168-2"></script>
-  <script src="app.js?v=poll-fold-7"></script>
+  <script src="ga-web.js?v=za-slash-1"></script>
+  <script src="app.js?v=za-slash-1"></script>
 </body>
 </html>

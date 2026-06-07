@@ -373,6 +373,16 @@ def _resolve_path(path: str, config: AgentConfig) -> str:
     return os.path.normpath(os.path.join(config.workspace_dir, path))
 
 
+def _is_under_dir(path: str, directory: str) -> bool:
+    """Return True when path is inside directory or is directory itself."""
+    try:
+        return os.path.commonpath(
+            [os.path.abspath(path), os.path.abspath(directory)]
+        ) == os.path.abspath(directory)
+    except ValueError:
+        return False
+
+
 def _make_file_read_handler(config: AgentConfig):
     """创建 file_read 的 ToolHandler 适配器."""
     def _handler(
@@ -395,9 +405,9 @@ def _make_file_read_handler(config: AgentConfig):
         if " ... [TRUNCATED]" in result:
             result += "\n\n（某些行被截断，如需完整内容可改用 code_run 读取）"
         # SOP 读取提示
-        if "/memory/" in path and not result.startswith("Error:"):
+        if _is_under_dir(path, config.memory_dir) and not result.startswith("Error:"):
             from zero_agent.utils.memory_stats import log_memory_access
-            log_memory_access(path)
+            log_memory_access(path, stats_dir=config.memory_dir)
             result += (
                 "\n\n[SYSTEM TIPS] 请严格遵循已读取的 SOP 内容执行对应操作，"
                 "切勿自行发挥或偏离文档指引。"

@@ -6,6 +6,8 @@ try: sys.stdout.reconfigure(errors='replace')
 except: pass
 try: sys.stderr.reconfigure(errors='replace')
 except: pass
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import streamlit as st
 try:
     from streamlit import iframe as _st_iframe  # 1.56+
@@ -14,13 +16,648 @@ except (ImportError, AttributeError):
     from streamlit.components.v1 import html as _embed_html  # ≤1.55
 import time, json, re, threading, queue
 from datetime import datetime
-from zero_agent.core.agent import ZeroAgent
-from zero_agent.adapters.agent_runner import AgentRunner
+try:
+    from .za_adapter import GeneraticAgent
+except ImportError:
+    from za_adapter import GeneraticAgent
 
 st.set_page_config(page_title="Cowork", layout="wide")
 
 # ─── Anthropic Light Theme CSS ───
-from zero_agent.frontends.themes import load_theme_css, theme_toggle_js
+ANTHROPIC_CSS = """
+<style>
+/* ===== Root variables ===== */
+:root {
+    --anthropic-primary: #D4A27F;
+    --anthropic-primary-hover: #C4895F;
+    --anthropic-bg: #FAF9F6;
+    --anthropic-bg-secondary: #EEECE2;
+    --anthropic-code-bg: #F4F1EB;
+    --anthropic-text: #1A1714;
+    --anthropic-text-secondary: #6B6560;
+    --anthropic-border: #D5CEC5;
+    --anthropic-sidebar-bg: #F0EDE4;
+    --anthropic-accent: #CC785C;
+    --anthropic-success: #5A8A5E;
+    --anthropic-warning: #C4885A;
+    --anthropic-error: #C45A5A;
+    --anthropic-info: #5A7A8A;
+    --anthropic-font: 'Source Sans Pro', sans-serif;
+    --anthropic-mono: 'Source Code Pro', monospace;
+}
+
+/* ===== Global ===== */
+body, [data-testid="stAppViewContainer"] {
+    background-color: var(--anthropic-bg) !important;
+    color: var(--anthropic-text) !important;
+}
+
+.stApp {
+    background-color: var(--anthropic-bg) !important;
+}
+
+/* ===== Header / Top bar ===== */
+[data-testid="stHeader"], header[data-testid="stHeader"] {
+    background-color: var(--anthropic-bg) !important;
+    border-bottom: 1px solid var(--anthropic-border) !important;
+}
+/* Hide default Streamlit toolbar buttons (deploy, hamburger, etc.) */
+[data-testid="stToolbar"] {
+    visibility: hidden !important;
+}
+[data-testid="stDecoration"],
+#MainMenu {
+    display: none !important;
+    visibility: hidden !important;
+}
+/* Restore sidebar expand button (lives inside stToolbar) */
+[data-testid="stExpandSidebarButton"],
+[data-testid="stExpandSidebarButton"] * {
+    visibility: visible !important;
+}
+/* Only restore ancestor divs that contain the sidebar button */
+[data-testid="stToolbar"] div:has([data-testid="stExpandSidebarButton"]) {
+    visibility: visible !important;
+}
+/* Make top-left settings/sidebar toggle darker and easier to see */
+button[data-testid="stExpandSidebarButton"] {
+    visibility: visible !important;
+    background: #F4F1EA !important;
+    background-color: #F4F1EA !important;
+    border: none !important;
+    color: #3B2F2A !important;
+    border-radius: 10px !important;
+    box-shadow: none !important;
+}
+button[data-testid="stExpandSidebarButton"]:hover {
+    background: #EAE4D9 !important;
+    background-color: #EAE4D9 !important;
+    border-color: transparent !important;
+}
+button[data-testid="stExpandSidebarButton"],
+button[data-testid="stExpandSidebarButton"] *,
+button[data-testid="stExpandSidebarButton"] [data-testid="stIconMaterial"] {
+    color: #3B2F2A !important;
+    fill: #3B2F2A !important;
+    stroke: #3B2F2A !important;
+}
+/* Hide other toolbar buttons (deploy, etc.) */
+button[kind="header"] {
+    visibility: hidden !important;
+}
+
+/* ===== Sidebar ===== */
+[data-testid="stSidebar"], section[data-testid="stSidebar"] {
+    background-color: var(--anthropic-sidebar-bg) !important;
+    border-right: 1px solid var(--anthropic-border) !important;
+}
+
+[data-testid="stSidebar"] .stMarkdown,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] span,
+[data-testid="stSidebar"] label {
+    color: var(--anthropic-text) !important;
+}
+
+[data-testid="stSidebar"] hr {
+    border-color: var(--anthropic-border) !important;
+}
+
+/* ===== Sidebar Selectbox ===== */
+[data-testid="stSidebar"] [data-testid="stSelectbox"] {
+    width: fit-content !important;
+    max-width: 100% !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stSelectbox"] > div {
+    width: fit-content !important;
+    max-width: 100% !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stSelectbox"] label,
+[data-testid="stSidebar"] .stSelectbox label {
+    color: var(--anthropic-text-secondary) !important;
+    font-size: 0.9rem !important;
+    font-weight: 500 !important;
+}
+
+[data-testid="stSidebar"] [data-baseweb="select"] {
+    width: fit-content !important;
+    max-width: 100% !important;
+    display: inline-block !important;
+}
+
+[data-testid="stSidebar"] [data-baseweb="select"] > div {
+    width: fit-content !important;
+    max-width: 100% !important;
+    background: #F7F3EC !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 12px !important;
+    min-height: 42px !important;
+    padding-right: 1.6rem !important;
+    position: relative !important;
+}
+
+[data-testid="stSidebar"] [data-baseweb="select"] > div:hover,
+[data-testid="stSidebar"] [data-baseweb="select"] > div:focus-within {
+    background: #EFE9DE !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+[data-testid="stSidebar"] [data-baseweb="select"] input,
+[data-testid="stSidebar"] [data-baseweb="select"] span,
+[data-testid="stSidebar"] [data-baseweb="select"] div {
+    color: var(--anthropic-text) !important;
+}
+
+[data-testid="stSidebar"] [data-baseweb="select"] span {
+    white-space: nowrap !important;
+}
+
+[data-baseweb="popover"],
+[data-baseweb="menu"],
+[data-baseweb="popover"] > div,
+[data-baseweb="popover"] [role="presentation"],
+[data-baseweb="popover"] ul,
+[data-baseweb="popover"] li,
+[data-baseweb="popover"] [role="listbox"],
+[data-baseweb="popover"] [role="option"] {
+    background: #F7F3EC !important;
+    color: var(--anthropic-text) !important;
+}
+
+[role="listbox"] {
+    background: #F7F3EC !important;
+    border: 1px solid var(--anthropic-border) !important;
+    border-radius: 14px !important;
+    box-shadow: 0 10px 30px rgba(58, 47, 42, 0.12) !important;
+    padding: 0.35rem !important;
+    color: var(--anthropic-text) !important;
+}
+
+[role="option"] {
+    color: var(--anthropic-text) !important;
+    background: transparent !important;
+    border-radius: 10px !important;
+}
+
+[role="option"]:hover,
+[role="option"][aria-selected="true"] {
+    background: #EFE9DE !important;
+    color: var(--anthropic-text) !important;
+}
+
+/* ===== Title ===== */
+h1, .stTitle, [data-testid="stHeading"] h1 {
+    color: var(--anthropic-text) !important;
+    font-weight: 600 !important;
+    letter-spacing: -0.02em !important;
+}
+
+/* ===== Agent name input fixed in header bar ===== */
+[data-testid="stTextInput"] {
+    position: fixed !important;
+    top: 0 !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+    z-index: 999999 !important;
+    height: 60px !important;
+    display: flex !important;
+    align-items: center !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+/* Hide the empty container left behind */
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > [data-testid="stElementContainer"]:first-child {
+    height: 0 !important;
+    overflow: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+[data-testid="stTextInput"] > div {
+    background-color: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    position: relative !important;
+}
+[data-testid="stTextInput"] > label {
+    display: none !important;
+}
+[data-testid="stTextInput"] input[type="text"] {
+    font-size: 1.6rem !important;
+    font-weight: 600 !important;
+    letter-spacing: -0.02em !important;
+    color: var(--anthropic-text) !important;
+    background-color: var(--anthropic-bg) !important;
+    border: none !important;
+    border-radius: 0 !important;
+    padding: 0.3rem 1.8rem 0.3rem 0.5rem !important;
+    box-shadow: none !important;
+    width: 320px !important;
+    text-align: center !important;
+    transition: all 0.2s ease !important;
+    cursor: default !important;
+    caret-color: #1a1714 !important;
+}
+[data-testid="stTextInput"] input[type="text"]:hover {
+    background-color: var(--anthropic-bg-secondary) !important;
+    border-radius: 6px !important;
+}
+[data-testid="stTextInput"] input[type="text"]:focus {
+    background-color: var(--anthropic-bg-secondary) !important;
+    border-radius: 6px !important;
+    box-shadow: none !important;
+    cursor: text !important;
+    caret-color: #1a1714 !important;
+}
+/* Edit pencil icon - visible by default, semi-transparent on focus */
+[data-testid="stTextInput"] > div::after {
+    content: '✎' !important;
+    position: absolute !important;
+    right: 8px !important;
+    top: 50% !important;
+    transform: translateY(-50%) !important;
+    font-size: 0.9rem !important;
+    color: var(--anthropic-text-secondary) !important;
+    pointer-events: none !important;
+    opacity: 0.6 !important;
+    transition: opacity 0.2s ease !important;
+}
+[data-testid="stTextInput"] > div:hover::after {
+    opacity: 0.85 !important;
+}
+[data-testid="stTextInput"] > div:focus-within::after {
+    opacity: 0 !important;
+}
+
+h2, h3, h4, h5, h6 {
+    color: var(--anthropic-text) !important;
+    font-weight: 500 !important;
+}
+
+/* ===== Buttons ===== */
+.stButton > button {
+    background-color: var(--anthropic-bg-secondary) !important;
+    color: var(--anthropic-text) !important;
+    border: 1px solid var(--anthropic-border) !important;
+    border-radius: 8px !important;
+    padding: 0.4rem 1rem !important;
+    font-weight: 500 !important;
+    transition: all 0.2s ease !important;
+}
+
+.stButton > button:hover {
+    background-color: var(--anthropic-primary) !important;
+    color: white !important;
+    border-color: var(--anthropic-primary) !important;
+}
+
+.stButton > button[kind="primary"],
+.stButton > button[data-testid="stBaseButton-primary"] {
+    background-color: var(--anthropic-primary) !important;
+    color: white !important;
+    border-color: var(--anthropic-primary) !important;
+}
+
+.stButton > button[kind="primary"]:hover,
+.stButton > button[data-testid="stBaseButton-primary"]:hover {
+    background-color: var(--anthropic-primary-hover) !important;
+    border-color: var(--anthropic-primary-hover) !important;
+}
+
+/* ===== Chat input ===== */
+[data-testid="stChatInput"],
+[data-testid="stChatInput"] > div {
+    background-color: var(--anthropic-bg) !important;
+    border-color: var(--anthropic-border) !important;
+}
+
+[data-testid="stChatInput"] {
+    margin-bottom: 12px !important;
+}
+
+[data-testid="stChatInput"] textarea,
+[data-testid="stChatInputTextArea"] {
+    color: var(--anthropic-text) !important;
+    background-color: var(--anthropic-bg) !important;
+    caret-color: #1A1714 !important;
+}
+
+[data-testid="stChatInput"] textarea::placeholder {
+    color: var(--anthropic-text-secondary) !important;
+    opacity: 0.7 !important;
+}
+
+/* Chat input container border */
+[data-testid="stChatInput"] > div {
+    border: 1px solid var(--anthropic-border) !important;
+    border-radius: 12px !important;
+    min-height: 60px !important;
+    padding: 0.35rem 0.45rem 0.35rem 0.8rem !important;
+    align-items: center !important;
+    gap: 0.5rem !important;
+    transition: none !important;
+    animation: none !important;
+}
+
+[data-testid="stChatInput"] > div:focus-within {
+    border-color: var(--anthropic-primary) !important;
+    box-shadow: 0 0 0 2px rgba(212, 162, 127, 0.2) !important;
+}
+
+[data-testid="stChatInput"] textarea,
+[data-testid="stChatInputTextArea"] {
+    min-height: 1.5rem !important;
+    padding: 0.35rem 0 !important;
+    line-height: 1.5 !important;
+    transition: none !important;
+    animation: none !important;
+}
+
+/* Chat send button */
+[data-testid="stChatInput"] button,
+[data-testid="stChatInputSubmitButton"] {
+    background-color: var(--anthropic-primary) !important;
+    color: white !important;
+    border-radius: 12px !important;
+    width: 60px !important;
+    height: 60px !important;
+    min-width: 60px !important;
+    min-height: 60px !important;
+    padding: 0 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    flex-shrink: 0 !important;
+    transition: none !important;
+    animation: none !important;
+}
+
+[data-testid="stChatInput"] button svg,
+[data-testid="stChatInputSubmitButton"] svg,
+[data-testid="stChatInput"] button [data-testid="stIconMaterial"],
+[data-testid="stChatInputSubmitButton"] [data-testid="stIconMaterial"] {
+    width: 1.25rem !important;
+    height: 1.25rem !important;
+    font-size: 1.25rem !important;
+}
+
+[data-testid="stChatInput"] button:hover {
+    background-color: var(--anthropic-primary-hover) !important;
+}
+
+/* Stop streaming button - fixed at bottom center, above chat input */
+.stop-btn-anchor {
+    display: none !important;
+}
+
+/* Collapse the wrapper so it doesn't push chat bubbles */
+[data-testid="stElementContainer"]:has(.stop-btn-anchor) {
+    height: 0 !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+}
+
+[data-testid="stVerticalBlock"]:has(.stop-btn-anchor):not(:has([data-testid="stChatMessage"])) {
+    position: fixed !important;
+    bottom: 5.75rem !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+    z-index: 1000 !important;
+    width: auto !important;
+    background: transparent !important;
+    pointer-events: none !important;
+    gap: 0 !important;
+}
+
+[data-testid="stVerticalBlock"]:has(.stop-btn-anchor):not(:has([data-testid="stChatMessage"])) > * {
+    pointer-events: auto !important;
+}
+
+[data-testid="stVerticalBlock"]:has(.stop-btn-anchor):not(:has([data-testid="stChatMessage"])) [data-testid="stButton"] {
+    margin: 0 !important;
+}
+
+[data-testid="stVerticalBlock"]:has(.stop-btn-anchor):not(:has([data-testid="stChatMessage"])) [data-testid="stButton"] > button {
+    border-radius: 999px !important;
+    padding: 0.35rem 1.1rem !important;
+    min-height: 2rem !important;
+    font-size: 0.84rem !important;
+    font-weight: 500 !important;
+    line-height: 1 !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12) !important;
+    white-space: nowrap !important;
+}
+
+[data-testid="stVerticalBlock"]:has(.stop-btn-anchor):not(:has([data-testid="stChatMessage"])) [data-testid="stButton"] > button[kind="primary"],
+[data-testid="stVerticalBlock"]:has(.stop-btn-anchor):not(:has([data-testid="stChatMessage"])) [data-testid="stButton"] > button[data-testid="stBaseButton-primary"] {
+    background-color: rgba(212, 162, 127, 0.95) !important;
+    border-color: rgba(212, 162, 127, 0.95) !important;
+}
+
+[data-testid="stVerticalBlock"]:has(.stop-btn-anchor):not(:has([data-testid="stChatMessage"])) [data-testid="stButton"] > button:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 3px 12px rgba(0,0,0,0.15) !important;
+}
+
+/* ===== Chat messages ===== */
+[data-testid="stChatMessage"] {
+    background-color: var(--anthropic-bg) !important;
+    border: none !important;
+    border-radius: 12px !important;
+    padding: 1rem 1.2rem !important;
+    margin-bottom: 0.5rem !important;
+}
+
+/* Assistant messages - clean white like Anthropic */
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) {
+    background-color: var(--anthropic-bg) !important;
+}
+
+/* User messages - subtle bordered box */
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
+    background-color: var(--anthropic-bg) !important;
+    border: 1px solid var(--anthropic-border) !important;
+    border-radius: 12px !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04) !important;
+}
+
+/* Chat message text */
+[data-testid="stChatMessage"] p,
+[data-testid="stChatMessage"] .stMarkdown {
+    color: var(--anthropic-text) !important;
+    line-height: 1.6 !important;
+}
+
+/* Message timestamp */
+.msg-timestamp {
+    text-align: left;
+    font-size: 0.73rem;
+    color: var(--anthropic-text-secondary);
+    margin-top: -0.3rem;
+    margin-bottom: 0.2rem;
+    opacity: 0.55;
+    font-family: var(--anthropic-mono);
+    letter-spacing: 0.02em;
+}
+
+/* ===== Chat avatars ===== */
+[data-testid="stChatMessageAvatarContainer"] {
+    width: 36px !important;
+    height: 36px !important;
+}
+[data-testid="stChatMessageAvatarContainer"] > div,
+[data-testid*="stChatMessageAvatar"],
+[data-testid*="chatAvatar"] {
+    width: 36px !important;
+    height: 36px !important;
+    border-radius: 50% !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    overflow: hidden !important;
+}
+
+/* User avatar - warm brown gradient */
+[data-testid*="stChatMessageAvatar"]:has(svg),
+[data-testid*="chatAvatar"][data-testid*="user"],
+[data-testid*="stChatMessageAvatar"][data-testid*="User"],
+[data-testid*="stChatMessageAvatar"][data-testid*="user"] {
+    background: linear-gradient(145deg, #D8B08A 0%, #B98259 100%) !important;
+    border: 1px solid rgba(150, 102, 67, 0.22) !important;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.34), 0 2px 6px rgba(104, 76, 54, 0.10) !important;
+}
+/* Assistant avatar - cream gradient */
+[data-testid*="chatAvatar"][data-testid*="assistant"],
+[data-testid*="stChatMessageAvatar"][data-testid*="Assistant"],
+[data-testid*="stChatMessageAvatar"][data-testid*="assistant"],
+[data-testid="stChatMessageAvatarContainer"] > div {
+    background: linear-gradient(145deg, #F6F1E9 0%, #E5D7C7 100%) !important;
+    border: 1px solid rgba(187, 165, 141, 0.50) !important;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.72), 0 2px 6px rgba(104, 76, 54, 0.08) !important;
+}
+
+/* ===== Inline code (not inside pre/code blocks) ===== */
+:not(pre) > code {
+    background-color: var(--anthropic-code-bg) !important;
+    border: 1px solid var(--anthropic-border) !important;
+    border-radius: 4px !important;
+    padding: 0.15em 0.4em !important;
+    font-size: 0.9em !important;
+    color: var(--anthropic-text) !important;
+}
+
+/* ===== Code blocks (pre) ===== */
+pre, .stCodeBlock, .stCodeBlock pre {
+    background-color: var(--anthropic-code-bg) !important;
+    border: 1px solid var(--anthropic-border) !important;
+    border-radius: 8px !important;
+}
+
+/* Code inside pre blocks: no extra border/background */
+pre code,
+.stCodeBlock code,
+[data-testid="stChatMessage"] pre code,
+[data-testid="stChatMessage"] .stCodeBlock code {
+    background-color: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    font-size: inherit !important;
+    color: var(--anthropic-text) !important;
+}
+
+/* ===== Toast / Alerts ===== */
+[data-testid="stToast"] {
+    background-color: var(--anthropic-bg-secondary) !important;
+    border: 1px solid var(--anthropic-border) !important;
+    border-radius: 8px !important;
+    color: var(--anthropic-text) !important;
+}
+
+/* ===== Captions ===== */
+.stCaption, [data-testid="stCaptionContainer"] {
+    color: var(--anthropic-text-secondary) !important;
+}
+
+/* ===== Divider ===== */
+[data-testid="stHorizontalBlock"] hr,
+hr {
+    border-color: var(--anthropic-border) !important;
+}
+
+/* ===== Scrollbar ===== */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+::-webkit-scrollbar-track {
+    background: var(--anthropic-bg);
+}
+::-webkit-scrollbar-thumb {
+    background: var(--anthropic-border);
+    border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--anthropic-text-secondary);
+}
+
+/* ===== Links ===== */
+a {
+    color: var(--anthropic-accent) !important;
+}
+a:hover {
+    color: var(--anthropic-primary-hover) !important;
+}
+
+/* ===== Error/Warning/Info/Success ===== */
+[data-testid="stAlert"] {
+    border-radius: 8px !important;
+}
+
+/* ===== Bottom padding for chat ===== */
+[data-testid="stBottomBlockContainer"] {
+    background-color: var(--anthropic-bg) !important;
+}
+
+/* ===== Gear icon to open sidebar ===== */
+#sidebar-gear-toggle {
+    position: fixed !important;
+    top: 12px !important;
+    left: 12px !important;
+    z-index: 999999 !important;
+    width: 36px !important;
+    height: 36px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-size: 1.3rem !important;
+    color: var(--anthropic-text-secondary) !important;
+    background: var(--anthropic-bg-secondary) !important;
+    border: 1px solid var(--anthropic-border) !important;
+    border-radius: 8px !important;
+    cursor: pointer !important;
+    transition: all 0.2s ease !important;
+    opacity: 0.7 !important;
+    user-select: none !important;
+}
+#sidebar-gear-toggle:hover {
+    opacity: 1 !important;
+    color: var(--anthropic-primary) !important;
+    border-color: var(--anthropic-primary) !important;
+    transform: rotate(30deg) !important;
+}
+/* Hide gear when sidebar is open */
+body:has([data-testid="stSidebar"][aria-expanded="true"]) #sidebar-gear-toggle {
+    display: none !important;
+}
+</style>
+"""
 
 ANTHROPIC_SELECTBOX_SCRIPT = """
 <div></div>
@@ -165,12 +802,13 @@ ANTHROPIC_SELECTBOX_SCRIPT = """
 
 @st.cache_resource
 def init():
-    za = ZeroAgent()
-    runner = AgentRunner(za)
-    if runner.llmclient is None:
-        st.error("⚠️ 未配置任何可用的 LLM 接口，请检查 ~/.zero_agent/config.yaml 或环境变量后重启。")
+    agent = GeneraticAgent()
+    if agent.llmclient is None:
+        st.error("⚠️ 未配置任何可用的 LLM 接口，请在 mykey.py 中添加 sider_cookie 或 oai_apikey+oai_apibase 等信息后重启。")
         st.stop()
-    return runner
+    else:
+        threading.Thread(target=agent.run, daemon=True).start()
+    return agent
 
 
 def build_dynamic_font_css(scale_percent: float) -> str:
@@ -312,15 +950,14 @@ def init_session_state():
     for key, value in {
         'agent_name': 'GenericAgent', 'streaming': False, 'stopping': False, 'display_queue': None,
         'partial_response': '', 'reply_ts': '', 'current_prompt': '', 'selected_llm_idx': agent.llm_no,
-        'autonomous_enabled': False, 'messages': [], 'theme': 'light',
+        'autonomous_enabled': False, 'messages': [],
     }.items(): st.session_state.setdefault(key, value)
 
 init_session_state()
 
-# Inject theme CSS + toggle JS
-st.markdown(load_theme_css(st.session_state.get("theme", "light"), "stapp2"), unsafe_allow_html=True)
+# Inject Anthropic theme
+st.markdown(ANTHROPIC_CSS, unsafe_allow_html=True)
 st.markdown(build_dynamic_font_css(110.0), unsafe_allow_html=True)
-_embed_html(theme_toggle_js(), height=0, width=0)
 _embed_html(ANTHROPIC_SELECTBOX_SCRIPT, height=0, width=0)
 _embed_html(build_header_agent_badge_script(), height=0, width=0)
 
@@ -345,26 +982,8 @@ def render_sidebar():
         st.rerun()
     st.divider()
     if st.button("重新注入System Prompt"):
-        if hasattr(agent, 'za'):
-            agent.za.handler._last_tool_schemas_hash = None
+        agent.llmclient.last_tools = ''
         st.toast("下次将重新注入System Prompt")
-
-    st.divider()
-
-    # Theme toggle (at bottom)
-    theme_labels = {"light": "☀️ Light", "dark": "🌙 Dark", "auto": "🔄 Auto"}
-    current_theme = st.session_state.get("theme", "light")
-    theme_keys = list(theme_labels.keys())
-    theme_idx = theme_keys.index(current_theme) if current_theme in theme_keys else 0
-    selected_theme = st.selectbox(
-        "Theme",
-        theme_keys,
-        index=theme_idx,
-        format_func=lambda k: theme_labels[k],
-    )
-    if selected_theme != current_theme:
-        st.session_state.theme = selected_theme
-        st.rerun()
 
 with st.sidebar: render_sidebar()
 
@@ -430,4 +1049,3 @@ if prompt := st.chat_input("请输入指令", disabled=st.session_state.streamin
     st.session_state.messages.append({"role": "user", "content": prompt, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
     start_agent_task(prompt)
     st.rerun()
-

@@ -42,6 +42,8 @@ from zero_agent.bots.common import (
     strip_files,
 )
 
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 try:
     from wecom_aibot_sdk import WSClient, generate_req_id
 except ImportError:

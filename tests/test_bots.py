@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import tempfile
 from unittest.mock import MagicMock, patch
 
@@ -32,6 +33,7 @@ from zero_agent.bots.shared.continue_cmd import (
     handle_frontend_command,
 )
 from zero_agent.bots.shared.btw_cmd import _strip_cmd, _help_text
+from zero_agent.bots.shared.btw_cmd import handle_frontend_command as btw_handle_frontend_command
 from zero_agent.bots.shared.review_cmd import handle as review_handle
 from zero_agent.bots.shared.session_names import set_name, name_for, has_name, gc
 from zero_agent.bots.shared.export_cmd import (
@@ -190,6 +192,50 @@ class TestBtwCmd:
         text = _help_text()
         assert "/btw" in text
         assert "side question" in text.lower() or "临时" in text
+
+    def test_btw_uses_independent_side_runner_not_main_queue(self):
+        class MainRunner:
+            is_running = True
+            config = object()
+
+            def __init__(self):
+                self.history = [{"role": "user", "content": [{"type": "text", "text": "main"}]}]
+                self.put_task_called = False
+
+            def put_task(self, *_args, **_kwargs):
+                self.put_task_called = True
+                raise AssertionError("main put_task must not be called")
+
+            def config_snapshot(self):
+                return self.config
+
+            def history_snapshot(self):
+                return [{"role": "user", "content": [{"type": "text", "text": "main"}]}]
+
+        class SideRunner:
+            def __init__(self):
+                self.received = []
+
+            def put_task(self, prompt, source="user"):
+                self.received.append((prompt, source))
+                dq = queue.Queue()
+                dq.put({"done": "side answer", "source": source})
+                return dq
+
+        side_runner = SideRunner()
+        main_runner = MainRunner()
+
+        def factory(runner):
+            assert runner is main_runner
+            return side_runner
+
+        with patch("zero_agent.bots.shared.btw_cmd._make_side_runner", side_effect=factory):
+            result = btw_handle_frontend_command(main_runner, "/btw status?")
+
+        assert "side answer" in result
+        assert side_runner.received
+        assert main_runner.put_task_called is False
+        assert main_runner.history == [{"role": "user", "content": [{"type": "text", "text": "main"}]}]
 
 
 # —— review_cmd.py ——

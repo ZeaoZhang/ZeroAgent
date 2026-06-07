@@ -59,6 +59,17 @@ class BaseHandler:
         self._empty_ct: int = 0
         self.history_info: list = []  # 每轮摘要历史，用于上下文压缩
 
+    # ---- Stop Signal ----
+
+    def request_code_stop(self) -> None:
+        """请求当前正在执行的 code_run 停止."""
+        if not self.code_stop_signal:
+            self.code_stop_signal.append(1)
+
+    def reset_code_stop_signal(self) -> None:
+        """清除上一任务遗留的 code_run 停止信号."""
+        self.code_stop_signal.clear()
+
     # ---- Plan Mode ----
 
     def _in_plan_mode(self) -> bool:
@@ -561,7 +572,7 @@ class BaseHandler:
             格式化的锚点 prompt 字符串.
         """
         WINDOW = 30
-        parts: list[str] = []
+        parts: list[str] = ["\n### [WORKING MEMORY]"]
         h = self.history_info
 
         if len(h) > WINDOW:
@@ -571,9 +582,8 @@ class BaseHandler:
                     f"<earlier_context>\n{earlier}\n</earlier_context>"
                 )
 
-        if h:
-            recent = "\n".join(h[-WINDOW:])
-            parts.append(f"<history>\n{recent}\n</history>")
+        recent = "\n".join(h[-WINDOW:])
+        parts.append(f"<history>\n{recent}\n</history>")
 
         parts.append(
             self._tl(
@@ -632,7 +642,7 @@ class BaseHandler:
                 last = line
         flush()
 
-        return "\n".join(parts[-100:])
+        return "\n".join(parts[-70:])
 
     def turn_end_callback(
         self,
@@ -703,7 +713,8 @@ class BaseHandler:
         self.history_info.append(f"[Agent] {summary}")
 
         # ——— 2. 分级轮次警告 ———
-        if turn % 75 == 0:
+        plan_active = self._in_plan_mode()
+        if turn % 75 == 0 and not plan_active:
             next_prompt += self._tl(
                 f"\n\n[DANGER] 已连续执行第 {turn} 轮。"
                 "必须总结情况进行ask_user，不允许继续重试。",
@@ -730,7 +741,7 @@ class BaseHandler:
                     next_prompt += f"\n\n[Memory Refresh]\n{memory_ctx}"
 
         # ─── 3.5 Plan Mode 提示 ───
-        if self._in_plan_mode():
+        if plan_active:
             _plan = self.working.get("in_plan_mode", "")
             remaining = self._check_plan_completion()
             if remaining is not None and remaining > 0:
@@ -776,7 +787,7 @@ class BaseHandler:
                         else ""
                     )
                     next_prompt += extra
-                    self.code_stop_signal.append(1)
+                    self.request_code_stop()
                     if self.parent is not None:
                         try:
                             self.parent.abort()

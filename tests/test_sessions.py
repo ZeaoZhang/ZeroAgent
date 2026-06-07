@@ -243,6 +243,51 @@ def test_parse_text_tool_calls_accepts_bare_nested_json_object() -> None:
     ]
 
 
+def test_compress_history_tags_matches_ga_tag_replacement() -> None:
+    long_history = "<history>\n" + ("x" * 2000) + "\n</history>"
+    messages = [
+        {"role": "user", "content": f"old\n### [WORKING MEMORY]\n{long_history}"},
+        {"role": "assistant", "content": f"<thinking>{'y' * 2000}</thinking>"},
+        {"role": "user", "content": f"recent\n### [WORKING MEMORY]\n{long_history}"},
+    ]
+
+    compressed = LiteLLMSession._compress_history_tags(
+        messages,
+        keep_recent=1,
+        force=True,
+    )
+
+    assert "<history>[...]</history>" in compressed[0]["content"]
+    assert "...[Truncated]..." in compressed[1]["content"]
+    assert "<history>[...]</history>" not in compressed[2]["content"]
+
+
+def test_trim_history_matches_ga_character_budget_and_user_boundary() -> None:
+    session = _make_session()
+    session._context_window = 200
+    session._trim_keep_rate = 0.5
+    session.history = [
+        {"role": "assistant", "content": "orphan old assistant"},
+        {"role": "user", "content": "old user " + ("x" * 900)},
+        {"role": "assistant", "content": "old assistant " + ("x" * 900)},
+        {"role": "user", "content": "middle user " + ("x" * 900)},
+        {"role": "assistant", "content": "middle assistant " + ("x" * 900)},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u3"},
+        {"role": "assistant", "content": "a3"},
+        {"role": "user", "content": "u4"},
+    ]
+
+    session._trim_history()
+
+    assert len(session.history) <= 9
+    assert session.history[0]["role"] == "user"
+    assert all("old " not in str(msg.get("content")) for msg in session.history)
+
+
 def test_openai_completion_kwargs_convert_claude_tool_use_blocks() -> None:
     session = _make_session()
 

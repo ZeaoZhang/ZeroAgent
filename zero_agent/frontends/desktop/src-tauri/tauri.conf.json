@@ -1,7 +1,7 @@
 {
   "productName": "ZeroAgent",
   "version": "0.1.0",
-  "identifier": "com.zeroagent.app",
+  "identifier": "com.zeroagent.desktop",
   "build": {
     "frontendDist": "../static"
   },
@@ -18,7 +18,7 @@
         "height": 800,
         "resizable": true,
         "visible": false,
-        "url": "http://127.0.0.1:14168/"
+        "url": "loading.html"
       },
       {
         "title": "ZeroAgent — Setup",

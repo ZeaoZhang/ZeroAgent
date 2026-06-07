@@ -1,57 +1,71 @@
-"""ZeroAgent Desktop Bridge — HTTP/WS session management server.
-
-替代 GenericAgent 的 desktop_bridge.py, 使用 ZeroAgent + AgentRunner。
-
-HTTP API: GET /status, /config, /sessions, /session/{id}/messages
-          POST /session/new, /session/{id}/prompt, /session/{id}/cancel
-          DELETE /session/{id}
-WS API:   GET /ws → session-state 事件推送
-
-Usage:
-    python -m zero_agent.frontends.desktop_bridge
+#!/usr/bin/env python3
 """
+ZeroAgent Web2 Bridge.
 
+Clear split:
+1) AgentManager: owns AgentRunner instances, sessions and histories.
+2) Transport: HTTP is the command/data channel; WebSocket only pushes small
+   session-state notifications.
+
+HTTP API:
+  GET    /status
+  GET    /config
+  POST   /config
+  GET    /model-profiles
+  GET    /slash/commands
+  POST   /slash/resolve
+  GET    /history/sessions
+  POST   /history/resume
+  GET    /sessions
+  POST   /session/new
+  GET    /session/{sid}
+  DELETE /session/{sid}
+  POST   /session/{sid}/prompt
+  GET    /session/{sid}/messages?after=0&limit=200
+  POST   /session/{sid}/cancel
+
+WS API:
+  GET /ws -> events only, e.g.
+  {"type":"session-state","sessionId":"sess-...","state":"running","seq":3,"updatedAt":...}
+"""
 from __future__ import annotations
 
-import asyncio
-import contextlib
-import json
-import os
-import queue as _queue
-import re as _re_mod
-import sys
-import threading
-import time
-import traceback
-import uuid
+import asyncio, contextlib, copy, importlib, json, os, sys, webbrowser
+import threading, time, traceback, uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
-
+from typing import Any, Dict, List, Optional, Set
 from aiohttp import web, WSMsgType
 
-from zero_agent.core.agent import ZeroAgent
 from zero_agent.adapters.agent_runner import AgentRunner
+from zero_agent.core.agent import ZeroAgent
+from zero_agent.core.config import default_config_path, load_default_config
 
 APP_DIR = Path(__file__).resolve().parent
 
 
-def find_default_za_root() -> Path:
+def find_default_project_root() -> Path:
     candidates = [
         APP_DIR / "..",
         APP_DIR / ".." / "..",
     ]
     for p in candidates:
         root = p.resolve()
-        if (root / "zero_agent").exists():
+        if (root / "pyproject.toml").exists() and (root / "zero_agent").is_dir():
             return root
-    return APP_DIR.parent.resolve()
+    return APP_DIR.parent.parent.resolve()
 
 
-DEFAULT_ZA_ROOT = find_default_za_root()
+DEFAULT_PROJECT_ROOT = find_default_project_root()
+
+for _s in (sys.stdout, sys.stderr):
+    with contextlib.suppress(Exception):
+        _s.reconfigure(encoding="utf-8", errors="replace")
 
 
-# —— Session & AgentManager ——
+# ---------------------------------------------------------------------------
+# Agent management layer
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Session:
@@ -60,12 +74,11 @@ class Session:
     cwd: str = ""
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
-    messages: list[dict] = field(default_factory=list)
+    messages: List[dict] = field(default_factory=list)
     msg_seq: int = 0
     partial: Optional[dict] = None
-    status: str = "idle"
+    status: str = "idle"  # idle|running|error|cancelled
     agent: Any = None
-    runner: Any = None
     thread: Optional[threading.Thread] = None
     cancel_requested: bool = False
     last_error: str = ""
@@ -74,36 +87,46 @@ class Session:
 class AgentManager:
     def __init__(self):
         self.lock = threading.RLock()
-        self.za_root = str(DEFAULT_ZA_ROOT)
-        self.config: dict[str, Any] = {}
-        self.sessions: dict[str, Session] = {}
+        self.workspace_dir = str(DEFAULT_PROJECT_ROOT)
+        self.config_path = str(default_config_path())
+        self.config: Dict[str, Any] = {}
+        self.sessions: Dict[str, Session] = {}
         self.active_session_id: Optional[str] = None
 
     @property
+    def ga_root(self) -> str:
+        """Legacy compatibility field mapped to the ZeroAgent workspace root."""
+        return self.workspace_dir
+
+    @property
     def mykey_path(self) -> str:
-        return str(Path(self.za_root) / "mykey.json")
+        """Legacy compatibility field mapped to the ZeroAgent config path."""
+        return self.config_path
+
+    def ensure_project_import_path(self) -> Path:
+        root = Path(DEFAULT_PROJECT_ROOT).resolve()
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        return root
 
     def make_agent(self, sess: Session):
+        self.ensure_project_import_path()
         old_cwd = os.getcwd()
         try:
-            if sess.cwd:
-                os.chdir(sess.cwd)
-            za = ZeroAgent()
-            runner = AgentRunner(za)
-            runner.verbose = False
-            return za, runner
+            os.chdir(sess.cwd or self.workspace_dir)
+            config = copy.deepcopy(load_default_config())
+            config.workspace_dir = sess.cwd or config.workspace_dir
+            agent = ZeroAgent(config=config)
+            return AgentRunner(agent)
         finally:
             with contextlib.suppress(Exception):
                 os.chdir(old_cwd)
 
     def list_model_profiles(self):
-        za = ZeroAgent()
-        runner = AgentRunner(za)
+        self.ensure_project_import_path()
         try:
-            return [
-                {"id": i, "name": name, "active": active}
-                for i, name, active in runner.list_llms()
-            ]
+            runner = AgentRunner(ZeroAgent())
+            return runner.list_llm_profiles()
         except Exception as e:
             print(f"get model profiles failed: {e}", file=sys.stderr)
         return []
@@ -137,7 +160,7 @@ class AgentManager:
 
     def create_session(self, cwd: Optional[str] = None) -> Session:
         sid = "sess-" + uuid.uuid4().hex[:12]
-        sess = Session(id=sid, cwd=str(cwd or self.za_root))
+        sess = Session(id=sid, cwd=str(cwd or self.ga_root))
         with self.lock:
             self.sessions[sid] = sess
             self.active_session_id = sid
@@ -148,42 +171,101 @@ class AgentManager:
         with self.lock:
             sess = self.sessions.get(sid)
             if not sess:
-                raise web.HTTPNotFound(
-                    text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False),
-                    content_type="application/json",
-                )
+                raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
             return sess
 
     def delete_session(self, sid: str) -> dict:
         with self.lock:
             sess = self.sessions.pop(sid, None)
             if not sess:
-                raise web.HTTPNotFound(
-                    text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False),
-                    content_type="application/json",
-                )
+                raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
             if self.active_session_id == sid:
                 self.active_session_id = next(iter(self.sessions), None)
-            if sess.runner and hasattr(sess.runner, "abort"):
+            if sess.agent and hasattr(sess.agent, "abort"):
                 with contextlib.suppress(Exception):
-                    sess.runner.abort()
+                    sess.agent.abort()
         emit_session_state(sess, "closed")
         return {"ok": True, "sessionId": sid}
+
+    def list_resume_sessions(self, limit: int = 10) -> list[dict]:
+        self.ensure_project_import_path()
+        continue_cmd = importlib.import_module("zero_agent.bots.shared.continue_cmd")
+
+        continue_cmd.set_sessions_dir(str(Path(self.workspace_dir) / "workspace" / "sessions"))
+        sessions = continue_cmd.list_sessions(exclude_pid=os.getpid())
+        out: list[dict] = []
+        for idx, (path, mtime, preview, rounds) in enumerate(sessions[:limit], 1):
+            out.append({
+                "index": idx,
+                "path": path,
+                "mtime": mtime,
+                "preview": preview,
+                "rounds": rounds,
+                "name": os.path.basename(path),
+            })
+        return out
+
+    def resume_history(self, sid: str, index: int) -> dict:
+        with self.lock:
+            sess = self.sessions.get(sid)
+            if not sess:
+                raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
+            if sess.status == "running":
+                raise web.HTTPConflict(text=json.dumps({"error": "session is already running"}, ensure_ascii=False), content_type="application/json")
+            if sess.agent is None:
+                sess.agent = self.make_agent(sess)
+
+        self.ensure_project_import_path()
+        continue_cmd = importlib.import_module("zero_agent.bots.shared.continue_cmd")
+
+        continue_cmd.set_sessions_dir(str(Path(self.workspace_dir) / "workspace" / "sessions"))
+        sessions = continue_cmd.list_sessions(exclude_pid=os.getpid())
+        target_idx = index - 1
+        if not (0 <= target_idx < len(sessions)):
+            return {"ok": False, "error": f"索引越界（有效范围 1-{len(sessions)}）"}
+
+        path = sessions[target_idx][0]
+        summary, full = continue_cmd.restore(sess.agent, path)
+        ui_messages = continue_cmd.extract_ui_messages(path)
+
+        with self.lock:
+            sess.messages.clear()
+            sess.msg_seq = 0
+            sess.partial = None
+            sess.status = "idle"
+            sess.last_error = ""
+            for msg in ui_messages:
+                self.add_message(
+                    sess,
+                    str(msg.get("role") or "assistant"),
+                    str(msg.get("content") or ""),
+                )
+            self.add_message(sess, "system", summary)
+            if ui_messages:
+                first_user = next((m for m in ui_messages if m.get("role") == "user"), None)
+                if first_user:
+                    sess.title = str(first_user.get("content") or "Restored").replace("\n", " ")[:40]
+            sess.updated_at = time.time()
+
+        emit_session_state(sess, "resumed")
+        return {
+            "ok": True,
+            "sessionId": sess.id,
+            "path": path,
+            "message": summary,
+            "full": full,
+            "messages": list(sess.messages),
+            "session": self.snapshot(sess),
+        }
 
     def submit_prompt(self, sid: str, prompt: Any, images: Optional[list] = None) -> dict:
         prompt, image_ids = normalize_prompt(prompt, images)
         with self.lock:
             sess = self.sessions.get(sid)
             if not sess:
-                raise web.HTTPNotFound(
-                    text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False),
-                    content_type="application/json",
-                )
+                raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
             if sess.status == "running":
-                raise web.HTTPConflict(
-                    text=json.dumps({"error": "session is already running"}, ensure_ascii=False),
-                    content_type="application/json",
-                )
+                raise web.HTTPConflict(text=json.dumps({"error": "session is already running"}, ensure_ascii=False), content_type="application/json")
             extra = {}
             if image_ids:
                 extra["image_ids"] = image_ids
@@ -191,59 +273,55 @@ class AgentManager:
             sess.status = "running"
             sess.cancel_requested = False
             sess.last_error = ""
-            sess.partial = {
-                "id": sess.msg_seq + 1, "role": "assistant",
-                "content": "", "ts": time.time(), "partial": True,
-            }
-            t = threading.Thread(
-                target=self.run_agent_turn, args=(sess, prompt, None),
-                daemon=True, name=f"Turn-{sid}",
-            )
+            sess.partial = {"id": sess.msg_seq + 1, "role": "assistant", "content": "", "ts": time.time(), "partial": True}
+            t = threading.Thread(target=self.run_agent_turn, args=(sess, prompt, None), daemon=True, name=f"Turn-{sid}")
             sess.thread = t
             t.start()
             seq = sess.msg_seq
         emit_session_state(sess, "running")
-        return {
-            "ok": True, "sessionId": sid, "accepted": True,
-            "userMessageId": user_msg["id"], "seq": seq,
-        }
+        return {"ok": True, "sessionId": sid, "accepted": True, "userMessageId": user_msg["id"], "seq": seq}
 
     def run_agent_turn(self, sess: Session, prompt: str, images: Optional[list] = None):
         try:
             if sess.agent is None:
-                sess.agent, sess.runner = self.make_agent(sess)
-            runner = sess.runner
+                sess.agent = self.make_agent(sess)
+            agent = sess.agent
             full = ""
-            display_q = runner.put_task(prompt, source="desktop-bridge")
-            pieces = []
-            while True:
-                if sess.cancel_requested:
-                    break
-                try:
-                    item = display_q.get(timeout=1.0)
-                except _queue.Empty:
-                    continue
-                if isinstance(item, dict):
-                    if item.get("next"):
-                        text = str(item["next"])
-                        pieces.append(text)
-                        with self.lock:
-                            if sess.partial is not None:
-                                sess.partial["content"] = "".join(pieces)
-                                sess.partial["ts"] = time.time()
-                                sess.updated_at = time.time()
-                    if "done" in item:
-                        full = str(item.get("done") or "")
+            if hasattr(agent, "put_task"):
+                display_q = agent.put_task(prompt, images=images or [])
+                pieces = []
+                import queue as _queue
+                while True:
+                    if sess.cancel_requested:
                         break
-                else:
-                    pieces.append(str(item))
-            if not full and pieces:
-                full = "".join(pieces)
+                    try:
+                        item = display_q.get(timeout=1.0)
+                    except _queue.Empty:
+                        continue
+                    if isinstance(item, dict):
+                        if item.get("next"):
+                            text = str(item["next"])
+                            pieces.append(text)
+                            with self.lock:
+                                if sess.partial is not None:
+                                    sess.partial["content"] = "".join(pieces) if getattr(agent, "inc_out", False) else text
+                                    sess.partial["ts"] = time.time()
+                                    sess.updated_at = time.time()
+                        if "done" in item:
+                            full = str(item.get("done") or "")
+                            break
+                    else:
+                        pieces.append(str(item))
+                if not full and pieces:
+                    full = pieces[-1] if not getattr(agent, "inc_out", False) else "".join(pieces)
+            else:
+                full = "AgentRunner object has no put_task method"
             if not full:
                 full = "(completed)"
             if sess.cancel_requested:
                 with self.lock:
                     sess.partial = None
+                    # Ensure status stays cancelled (don't overwrite)
                     if sess.status != "cancelled":
                         sess.status = "cancelled"
                     sess.updated_at = time.time()
@@ -251,9 +329,9 @@ class AgentManager:
                 return
             with self.lock:
                 sess.partial = None
-                full = _re_mod.sub(
-                    r"\n*`{5}\n*\[Info\] Final response to user\.\n*`{5}\s*$", "", full,
-                )
+                # Strip trailing [Info] Final response to user. marker
+                import re as _re
+                full = _re.sub(r'\n*`{5}\n*\[Info\] Final response to user\.\n*`{5}\s*$', '', full)
                 self.add_message(sess, "assistant", full)
                 sess.status = "idle"
                 sess.last_error = ""
@@ -272,10 +350,7 @@ class AgentManager:
         with self.lock:
             sess = self.sessions.get(sid)
             if not sess:
-                raise web.HTTPNotFound(
-                    text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False),
-                    content_type="application/json",
-                )
+                raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
             msgs = [m for m in sess.messages if int(m.get("id", 0)) > after]
             if limit > 0:
                 msgs = msgs[-limit:]
@@ -293,14 +368,11 @@ class AgentManager:
         with self.lock:
             sess = self.sessions.get(sid)
             if not sess:
-                raise web.HTTPNotFound(
-                    text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False),
-                    content_type="application/json",
-                )
+                raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
             sess.cancel_requested = True
-            if sess.runner and hasattr(sess.runner, "abort"):
+            if sess.agent and hasattr(sess.agent, "abort"):
                 with contextlib.suppress(Exception):
-                    sess.runner.abort()
+                    sess.agent.abort()
             sess.status = "cancelled"
             sess.partial = None
             sess.updated_at = time.time()
@@ -308,15 +380,17 @@ class AgentManager:
         return {"ok": True, "sessionId": sid}
 
 
-# —— Image helpers ——
 import base64
 import tempfile
 
-_UPLOAD_DIR = Path(tempfile.gettempdir()) / "za_web2_uploads"
+# Shared temp dir for image uploads (persists for process lifetime)
+_UPLOAD_DIR = Path(tempfile.gettempdir()) / "ga_web2_uploads"
 _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _save_image_data(data_url: str, img_id: str) -> str:
+    """Save a data URL to disk, return absolute path."""
+    # data:image/png;base64,xxxxx
     if "," in data_url:
         header, b64 = data_url.split(",", 1)
     else:
@@ -335,6 +409,11 @@ def _save_image_data(data_url: str, img_id: str) -> str:
 
 
 def normalize_prompt(prompt: Any, images: Optional[list] = None):
+    """Normalize prompt and images.
+    
+    images: list of dicts {"id": "img-xxx", "dataUrl": "data:..."} or plain data URLs.
+    Returns: (prompt_text_with_image_tags, image_ids_list)
+    """
     images = list(images or [])
     if isinstance(prompt, list):
         text_parts = []
@@ -352,6 +431,7 @@ def normalize_prompt(prompt: Any, images: Optional[list] = None):
                         images.append(url)
         prompt = "\n".join([p for p in text_parts if p])
 
+    # Process images: save to disk, build [image:path] tags
     image_ids = []
     image_tags = []
     for img in images:
@@ -359,6 +439,7 @@ def normalize_prompt(prompt: Any, images: Optional[list] = None):
             img_id = img.get("id") or f"img-{uuid.uuid4().hex[:8]}"
             data_url = img.get("dataUrl") or img.get("data_url") or ""
         else:
+            # Plain data URL string
             img_id = f"img-{uuid.uuid4().hex[:8]}"
             data_url = str(img)
         if data_url:
@@ -366,6 +447,7 @@ def normalize_prompt(prompt: Any, images: Optional[list] = None):
             image_tags.append(f"[image:{path}]")
             image_ids.append(img_id)
 
+    # Append image tags to prompt
     final_prompt = str(prompt or "")
     if image_tags:
         final_prompt = final_prompt + "\n" + "\n".join(image_tags)
@@ -376,11 +458,13 @@ def normalize_prompt(prompt: Any, images: Optional[list] = None):
 manager = AgentManager()
 
 
-# —— WebSocket Hub ——
+# ---------------------------------------------------------------------------
+# Transport layer: WS notification only
+# ---------------------------------------------------------------------------
 
 class WsHub:
     def __init__(self):
-        self.websockets: set[web.WebSocketResponse] = set()
+        self.websockets: Set[web.WebSocketResponse] = set()
         self.loop: Optional[asyncio.AbstractEventLoop] = None
 
     def emit(self, obj: dict):
@@ -419,13 +503,16 @@ async def ws_handler(request):
     hub.websockets.add(ws)
     await ws.send_str(json.dumps({
         "type": "bridge-ready",
-        "gaRoot": manager.za_root,
+        "gaRoot": manager.ga_root,
         "mykeyPath": manager.mykey_path,
+        "workspaceDir": manager.workspace_dir,
+        "configPath": manager.config_path,
         "http": True,
         "wsEventsOnly": True,
     }, ensure_ascii=False))
     async for msg in ws:
         if msg.type == WSMsgType.TEXT:
+            # WS is intentionally not a data/command channel anymore.
             with contextlib.suppress(Exception):
                 data = json.loads(msg.data)
                 if data.get("action") == "ping":
@@ -434,7 +521,9 @@ async def ws_handler(request):
     return ws
 
 
-# —— HTTP handlers ——
+# ---------------------------------------------------------------------------
+# Transport layer: HTTP command/data API
+# ---------------------------------------------------------------------------
 
 def cors_headers():
     return {
@@ -455,10 +544,7 @@ async def cors_middleware(request, handler):
 
 
 def json_ok(data: dict, status: int = 200):
-    return web.json_response(
-        data, status=status, headers=cors_headers(),
-        dumps=lambda x: json.dumps(x, ensure_ascii=False, default=str),
-    )
+    return web.json_response(data, status=status, headers=cors_headers(), dumps=lambda x: json.dumps(x, ensure_ascii=False, default=str))
 
 
 async def read_json(request) -> dict:
@@ -476,45 +562,150 @@ async def status_handler(request):
         "ok": True,
         "running": True,
         "ready": True,
-        "gaRoot": manager.za_root,
+        "gaRoot": manager.ga_root,
         "mykeyPath": manager.mykey_path,
+        "workspaceDir": manager.workspace_dir,
+        "configPath": manager.config_path,
         "sessionCount": len(manager.sessions),
         "activeSessionId": manager.active_session_id,
         "ws": "/ws",
         "transport": {"http": True, "wsEventsOnly": True},
     })
 
+
 async def get_config_handler(request):
-    return json_ok({"gaRoot": manager.za_root, "mykeyPath": manager.mykey_path, "config": manager.config})
+    return json_ok({
+        "gaRoot": manager.ga_root,
+        "mykeyPath": manager.mykey_path,
+        "workspaceDir": manager.workspace_dir,
+        "configPath": manager.config_path,
+        "config": manager.config,
+    })
+
 
 async def save_config_handler(request):
     data = await read_json(request)
     cfg = data.get("config", data)
     if isinstance(cfg, dict):
         manager.config.update(cfg)
-    return json_ok({"ok": True, "gaRoot": manager.za_root, "mykeyPath": manager.mykey_path, "config": manager.config})
+    return json_ok({
+        "ok": True,
+        "gaRoot": manager.ga_root,
+        "mykeyPath": manager.mykey_path,
+        "workspaceDir": manager.workspace_dir,
+        "configPath": manager.config_path,
+        "config": manager.config,
+    })
+
 
 async def model_profiles_handler(request):
     return json_ok({"profiles": manager.list_model_profiles()})
+
+
+async def slash_commands_handler(request):
+    try:
+        from zero_agent.frontends.slash_cmds import PALETTE_ENTRIES, prompt_for
+        locally_handled = {"/resume", "/scheduler"}
+        commands = [
+            {"cmd": cmd, "argHint": arg_hint, "description": desc}
+            for cmd, arg_hint, desc in PALETTE_ENTRIES
+            if cmd in locally_handled or prompt_for(cmd, "")
+        ]
+        commands.append({
+            "cmd": "/continue",
+            "argHint": "",
+            "description": "继续最近一个历史会话",
+        })
+    except Exception as e:
+        print(f"get slash commands failed: {e}", file=sys.stderr)
+        commands = []
+    return json_ok({"commands": commands})
+
+
+async def slash_resolve_handler(request):
+    data = await read_json(request)
+    command = str(data.get("command") or data.get("cmd") or "").strip()
+    args_text = str(data.get("args") or data.get("argsText") or "").strip()
+    if not command.startswith("/"):
+        command = "/" + command
+    try:
+        from zero_agent.frontends.slash_cmds import prompt_for
+        prompt = prompt_for(command, args_text)
+    except Exception as e:
+        return json_ok({"ok": False, "error": f"Failed to resolve {command}: {type(e).__name__}: {e}"}, status=500)
+    if not prompt:
+        return json_ok({"ok": False, "error": f"Unsupported slash command: {command}"}, status=404)
+    return json_ok({"ok": True, "command": command, "prompt": prompt})
+
+
+async def scheduler_status_handler(request):
+    try:
+        from zero_agent.frontends import slash_cmds
+        tasks = slash_cmds.list_scheduler_tasks()
+        running = slash_cmds.running_services()
+        return json_ok({
+            "ok": True,
+            "tasks": tasks,
+            "running": "reflect/scheduler.py" in running,
+            "pid": running.get("reflect/scheduler.py"),
+        })
+    except Exception as e:
+        return json_ok({"ok": False, "error": f"Failed to read scheduler: {type(e).__name__}: {e}"}, status=500)
+
+
+async def scheduler_start_handler(request):
+    try:
+        from zero_agent.frontends import slash_cmds
+        ok, message = slash_cmds.start_reflect_task("scheduler")
+        running = slash_cmds.running_services(use_cache=False)
+        return json_ok({
+            "ok": ok,
+            "message": message,
+            "running": "reflect/scheduler.py" in running,
+            "pid": running.get("reflect/scheduler.py"),
+        }, status=200 if ok else 409)
+    except Exception as e:
+        return json_ok({"ok": False, "error": f"Failed to start scheduler: {type(e).__name__}: {e}"}, status=500)
+
 
 async def list_sessions_handler(request):
     with manager.lock:
         sessions = [manager.snapshot(s, include_messages=False) for s in manager.sessions.values()]
     return json_ok({"sessions": sessions, "activeSessionId": manager.active_session_id})
 
+
+async def history_sessions_handler(request):
+    limit = int(request.query.get("limit") or 10)
+    return json_ok({"sessions": manager.list_resume_sessions(limit=limit)})
+
+
+async def history_resume_handler(request):
+    data = await read_json(request)
+    sid = str(data.get("sessionId") or data.get("id") or manager.active_session_id or "")
+    index = int(data.get("index") or data.get("n") or 0)
+    if not sid:
+        return json_ok({"ok": False, "error": "missing sessionId"}, status=400)
+    if index <= 0:
+        return json_ok({"ok": False, "error": "missing resume index"}, status=400)
+    return json_ok(manager.resume_history(sid, index))
+
+
 async def new_session_handler(request):
     data = await read_json(request)
     sess = manager.create_session(cwd=data.get("cwd") or data.get("path"))
     return json_ok({"ok": True, "sessionId": sess.id, "session": manager.snapshot(sess)}, status=201)
+
 
 async def get_session_handler(request):
     sid = request.match_info["sid"]
     sess = manager.get_session(sid)
     return json_ok({"sessionId": sid, "session": manager.snapshot(sess), "messages": list(sess.messages), "partial": sess.partial})
 
+
 async def delete_session_handler(request):
     sid = request.match_info["sid"]
     return json_ok(manager.delete_session(sid))
+
 
 async def prompt_handler(request):
     sid = request.match_info["sid"]
@@ -523,26 +714,30 @@ async def prompt_handler(request):
     images = data.get("images") or []
     return json_ok(manager.submit_prompt(sid, prompt, images))
 
+
 async def messages_handler(request):
     sid = request.match_info["sid"]
     after = int(request.query.get("after") or request.query.get("afterId") or 0)
     limit = int(request.query.get("limit") or 200)
     return json_ok(manager.messages(sid, after=after, limit=limit))
 
+
 async def cancel_handler(request):
     sid = request.match_info["sid"]
     return json_ok(manager.cancel(sid))
 
+
 async def path_open_handler(request):
     data = await read_json(request)
     kind = data.get("kind", "")
-    if kind == "mykey":
-        target = Path(manager.za_root) / "mykey.json"
+    if kind in {"config", "mykey", "mykeyTemplate"}:
+        target = Path(manager.config_path)
     else:
-        target = Path(data.get("path") or data.get("target") or manager.za_root)
+        target = Path(data.get("path") or data.get("target") or manager.ga_root)
     target = target.resolve()
     if not target.exists():
         return json_ok({"ok": False, "error": f"File not found: {target}"})
+    # Actually open the file with the system default editor
     import subprocess, platform
     if platform.system() == "Windows":
         os.startfile(str(target))
@@ -560,6 +755,12 @@ def create_app():
     app.router.add_get("/config", get_config_handler)
     app.router.add_post("/config", save_config_handler)
     app.router.add_get("/model-profiles", model_profiles_handler)
+    app.router.add_get("/slash/commands", slash_commands_handler)
+    app.router.add_post("/slash/resolve", slash_resolve_handler)
+    app.router.add_get("/scheduler", scheduler_status_handler)
+    app.router.add_post("/scheduler/start", scheduler_start_handler)
+    app.router.add_get("/history/sessions", history_sessions_handler)
+    app.router.add_post("/history/resume", history_resume_handler)
     app.router.add_get("/sessions", list_sessions_handler)
     app.router.add_post("/session/new", new_session_handler)
     app.router.add_get("/session/{sid}", get_session_handler)
@@ -569,6 +770,7 @@ def create_app():
     app.router.add_post("/session/{sid}/cancel", cancel_handler)
     app.router.add_post("/path/open", path_open_handler)
 
+    # Serve static frontend (desktop/static/)
     static_dir = APP_DIR / "desktop" / "static"
 
     async def index_handler(request):
@@ -585,11 +787,10 @@ def create_app():
 
 
 if __name__ == "__main__":
-    for _s in (sys.stdout, sys.stderr):
-        with contextlib.suppress(Exception):
-            _s.reconfigure(encoding="utf-8", errors="replace")
-
     host = os.environ.get("BRIDGE_HOST", "127.0.0.1")
     port = int(os.environ.get("BRIDGE_PORT", "14168"))
-    print(f"ZeroAgent Web2 bridge: http://{host}:{port}  ws://{host}:{port}/ws", file=sys.stderr)
+    url = f"http://{host}:{port}/"
+    print(f"ZeroAgent Web2 bridge: {url}  ws://{host}:{port}/ws", file=sys.stderr)
+    if os.environ.get("ZA_DESKTOP_BRIDGE_NO_BROWSER") != "1":
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     web.run_app(create_app(), host=host, port=port, print=None)

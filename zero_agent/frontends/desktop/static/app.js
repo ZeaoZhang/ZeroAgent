@@ -1,5 +1,5 @@
 window.process = window.process || { platform: navigator.platform.toLowerCase().includes('mac') ? 'darwin' : 'win32' };
-// GenericAgent Desktop — Renderer Logic
+// ZeroAgent Desktop — Renderer Logic
 // Handles UI state, sessions, streaming, slash commands.
 
 'use strict';
@@ -11,6 +11,7 @@ const state = {
   bridgeReady: false,
   defaultConfig: { theme: 'auto', llmNo: 0, gaRoot: '' },
   modelProfiles: [],
+  slashCommands: [],
   restartingBridge: false,
   bridgeNoticeMessage: null,
   mykeyReady: true,
@@ -40,6 +41,7 @@ const settingsModal = $('settings-modal');
 const errorBanner = $('error-banner');
 const diagnosticsPanel = $('diagnostics-panel');
 const diagnosticsLogEl = $('diagnostics-log');
+const commandPaletteEl = $('command-palette');
 
 
 // ─── Diagnostics ─────────────────────────────────────────────────────────
@@ -164,10 +166,12 @@ function sanitizeMarkdown(html) {
 
 function detectStructuredKind(line) {
   const trimmed = String(line || '').trim();
+  const genericTool = trimmed.match(/^TURN\s+\d+\s*:\s*TOOL:\s*`?([^`\s]+)`?\s*(?:ARGS?:)?\s*$/i);
+  if (genericTool) return { kind: 'TOOL_CALL', rest: trimmed };
   const m = trimmed.match(/^(TOOL_RECALL|TOOL_REQUEST|TOOL_RESPONSE|COWORK|TUNR|TURN|ACTION|OBSERVATION|THOUGHT|TOOL)[\s:_-]*(.*)$/i);
   if (m) return { kind: m[1].toUpperCase(), rest: (m[2] || '').trim() };
 
-  // GenericAgent's ACP bridge currently streams tool calls/results as plain
+  // ZeroAgent's bridge currently streams tool calls/results as plain
   // assistant text, not as ACP `tool_call` notifications. Recognize the real
   // XML-ish markers so streamed code_run/file_read/etc. blocks are folded.
   if (/^<function_calls\b[^>]*>/i.test(trimmed) || /^<invoke\b[^>]*\bname=["'][^"']+["'][^>]*>/i.test(trimmed)) {
@@ -195,17 +199,128 @@ function isStructuredClosingLine(line, kind, textSoFar) {
   return false;
 }
 
+function compactTurnSummary(text, fallback = '', maxLen = 96) {
+  const value = String(text || fallback || '').replace(/\s+/g, ' ').trim();
+  if (!value) return fallback || '';
+  return value.length > maxLen ? value.slice(0, maxLen) + '...' : value;
+}
+
+function decodeXmlEntities(text) {
+  const template = document.createElement('textarea');
+  template.innerHTML = String(text || '');
+  return template.value;
+}
+
+function extractTagAttribute(text, tag, attr) {
+  const tagName = String(tag || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const attrName = String(attr || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp('<' + tagName + '\\b[^>]*\\b' + attrName + '=["\\\']([^"\\\']+)["\\\'][^>]*>', 'i');
+  const match = String(text || '').match(re);
+  return match ? decodeXmlEntities(match[1]).trim() : '';
+}
+
+function firstUsefulArgValue(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return '';
+  const keys = [
+    'path', 'file_path', 'filepath', 'filename', 'target_file', 'target',
+    'cwd', 'cmd', 'command', 'query', 'url', 'pattern', 'note', 'goal',
+    'prompt', 'message', 'task', 'seed',
+  ];
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value === 'string' && value.trim()) return `${key}: ${value.trim()}`;
+  }
+  const first = Object.entries(args).find(([, value]) => typeof value === 'string' && value.trim());
+  return first ? `${first[0]}: ${first[1].trim()}` : '';
+}
+
+function parseToolArgs(text) {
+  const decoded = decodeXmlEntities(String(text || '').trim());
+  if (!decoded) return { raw: '' };
+  try {
+    return { raw: decoded, value: JSON.parse(decoded) };
+  } catch (_) {
+    const jsonMatch = decoded.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+    if (jsonMatch) {
+      try {
+        return { raw: decoded, value: JSON.parse(jsonMatch[0]) };
+      } catch (_) {}
+    }
+  }
+  return { raw: decoded };
+}
+
+function summarizeToolCall(text) {
+  const raw = String(text || '');
+  const generic = raw.match(/^TURN\s+\d+\s*:\s*TOOL:\s*`?([^`\s]+)`?\s*ARGS?:\s*$/im);
+  const toolName = (generic ? generic[1] : '') || extractTagAttribute(raw, 'invoke', 'name') || 'tool';
+  const paramText = generic ? '' : (extractTagBody(raw, 'parameter') || extractTagBody(raw, 'arguments') || extractTagBody(raw, 'args'));
+  const parsed = parseToolArgs(paramText);
+  const args = parsed.value && typeof parsed.value === 'object' ? parsed.value : null;
+  const argHint = args ? firstUsefulArgValue(args) : compactTurnSummary(parsed.raw, '', 56);
+  const normalized = toolName.toLowerCase().replace(/[-\s]+/g, '_');
+
+  let action = `调用工具 ${toolName}`;
+  if (/(^|_)file_(read|view)$|^(read|view)(_file)?$/.test(normalized)) action = '读取文件';
+  else if (/(^|_)file_(write|patch|edit)$|^(write|edit|patch)(_file)?$/.test(normalized)) action = '修改文件';
+  else if (/(^|_)(code_run|run_command|shell|bash|exec|terminal)$/.test(normalized)) action = '运行命令';
+  else if (normalized.includes('web_scan')) action = '扫描浏览器页面';
+  else if (normalized.includes('web_execute_js')) action = '执行浏览器 JS';
+  else if (normalized.includes('ask_user')) action = '询问用户';
+  else if (normalized.includes('update_working_checkpoint')) action = '更新工作记忆';
+  else if (normalized.includes('start_long_term_update')) action = '提炼长期记忆';
+  else if (normalized.includes('search')) action = '搜索信息';
+  else if (normalized.includes('browser')) action = '操作浏览器';
+
+  return compactTurnSummary(argHint ? `${action}: ${argHint}` : action);
+}
+
+function summarizeToolResult(text) {
+  const raw = decodeXmlEntities(String(text || ''));
+  const status = extractTagAttribute(raw, 'result', 'status') || extractTagAttribute(raw, 'result', 'state');
+  if (/error|fail/i.test(status)) return '工具返回失败';
+  if (/success|ok|done/i.test(status)) return '工具返回成功';
+  const body = extractTagBody(raw, 'result') || raw.replace(/<\/?function_results[^>]*>/gi, '').trim();
+  const firstLine = body.split(/\r?\n/).map(line => line.trim()).find(Boolean);
+  return compactTurnSummary(firstLine ? `工具返回: ${firstLine}` : '工具返回结果');
+}
+
+function summarizeStructuredLine(kind, text) {
+  const raw = String(text || '');
+  const firstLine = raw.split(/\r?\n/).map(line => line.trim()).find(Boolean) || '';
+  const match = firstLine.match(/^(TOOL_RECALL|TOOL_REQUEST|TOOL_RESPONSE|COWORK|TUNR|TURN|ACTION|OBSERVATION|THOUGHT|TOOL)[\s:_-]*(.*)$/i);
+  if (match && match[2]) return compactTurnSummary(match[2], kind);
+  return compactTurnSummary(firstLine.replace(/^#+\s*/, ''), kind);
+}
+
+function summarizeLLMRunningTurn(text) {
+  const raw = String(text || '');
+  const withoutMarker = raw.replace(/\**LLM Running \(Turn\s+\d+\) \.\.\.\**/i, '').trim();
+  const toolCall = withoutMarker.match(/<function_calls\b[\s\S]*?<\/function_calls>|<invoke\b[^>]*\bname=["'][^"']+["'][\s\S]*?<\/invoke>/i);
+  if (toolCall) return summarizeToolCall(toolCall[0]);
+  const toolResult = withoutMarker.match(/<function_results\b[\s\S]*?<\/function_results>|<result\b[\s\S]*?<\/result>/i);
+  if (toolResult) return summarizeToolResult(toolResult[0]);
+  const structured = withoutMarker
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .find(line => line && !/^\**LLM Running \(Turn\s+\d+\) \.\.\.\**$/i.test(line));
+  return compactTurnSummary(structured, '本轮暂无可提取纪要');
+}
+
 function summarizeStructuredBlock(kind, text) {
   const raw = String(text || '');
-  // For all kinds: prefer <summary> tag content only
+  // Prefer model-authored summaries, then derive a terse action summary.
   const summaryMatch = raw.match(/<summary>\s*([\s\S]*?)\s*<\/summary>/i);
   if (summaryMatch) {
     const line = summaryMatch[1].trim().split('\n')[0] || kind;
-    return line.length > 96 ? line.slice(0, 96) + '…' : line;
+    return compactTurnSummary(line, kind);
   }
-  // No summary tag: show kind only (no body text leakage)
-  if (kind === 'LLM_RUNNING') return 'LLM Running';
-  return kind;
+  if (kind === 'TOOL_CALL') return summarizeToolCall(raw);
+  if (kind === 'TOOL_RESULT') return summarizeToolResult(raw);
+  if (kind === 'LLM_RUNNING') {
+    return summarizeLLMRunningTurn(raw);
+  }
+  return summarizeStructuredLine(kind, raw) || kind;
 }
 
 const LLM_RUNNING_MARKER_RE = /(\**LLM Running \(Turn \d+\) \.\.\.\**)/g;
@@ -282,7 +397,7 @@ function hasUnfencedStructuredMarker(text) {
 }
 
 function shouldFoldSegment(kind, text) {
-  return kind !== 'agent_message_chunk' || hasUnfencedStructuredMarker(text);
+  return kind !== 'agent_message_chunk';
 }
 
 function getNowMs() {
@@ -463,6 +578,8 @@ function extractTagBody(text, tag) {
 function parseToolDetails(kind, text) {
   const raw = String(text || '');
   if (kind === 'TOOL_CALL') {
+    const generic = raw.match(/^TURN\s+\d+\s*:\s*TOOL:\s*`?([^`\s]+)`?\s*ARGS?:\s*$/im);
+    if (generic) return { title: `Tool: ${generic[1]}`, tool: generic[1], args: '' };
     const invoke = raw.match(/<invoke\b[^>]*\bname=["']([^"']+)["'][^>]*>/i);
     const tool = invoke ? invoke[1] : '';
     const params = extractTagBody(raw, 'parameter') || extractTagBody(raw, 'arguments') || extractTagBody(raw, 'args');
@@ -568,12 +685,20 @@ function extractAndRenderSummary(container, text) {
   return remaining;
 }
 
+function stripVisibleToolProtocol(text) {
+  return String(text || '')
+    .replace(/^\s*TURN\s+\d+\s*:\s*TOOL:\s*`?[^`\s]+`?\s*ARGS?:\s*$/gim, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function renderStructuredMarkdownInto(container, text, options = {}) {
   const segments = splitStructuredSegments(text);
   container.innerHTML = '';
   if (segments.length === 1 && !shouldFoldSegment(segments[0].kind, segments[0].text)) {
     const remaining = extractAndRenderSummary(container, text);
-    if (remaining) container.insertAdjacentHTML('beforeend', renderMarkdown(remaining));
+    const visible = stripVisibleToolProtocol(remaining);
+    if (visible) container.insertAdjacentHTML('beforeend', renderMarkdown(visible));
     return;
   }
   for (const item of groupIntoTurns(segments, options)) {
@@ -581,7 +706,8 @@ function renderStructuredMarkdownInto(container, text, options = {}) {
       const plain = document.createElement('div');
       plain.className = 'md';
       const remaining = extractAndRenderSummary(plain, item.segment.text);
-      if (remaining) plain.insertAdjacentHTML('beforeend', renderMarkdown(remaining));
+      const visible = stripVisibleToolProtocol(remaining);
+      if (visible) plain.insertAdjacentHTML('beforeend', renderMarkdown(visible));
       container.appendChild(plain);
       continue;
     }
@@ -813,9 +939,9 @@ async function newSession() {
 }
 
 async function getCwd() {
-  // Use GA root as default cwd
+  // Use ZeroAgent workspace as default cwd
   const status = await window.ga.checkStatus();
-  return status.gaRoot;
+  return status.workspaceDir || status.gaRoot;
 }
 
 // ─── Messages rendering ──────────────────────────────────────────────────
@@ -1408,7 +1534,7 @@ async function pollSessionMessages(sess) {
   }
 }
 
-async function sendPrompt(text, images = []) {
+async function sendPrompt(text, images = [], options = {}) {
   if (!state.bridgeReady) {
     showError('Bridge is not ready.');
     return;
@@ -1427,12 +1553,13 @@ async function sendPrompt(text, images = []) {
     return img.id;
   });
 
-  const localUserMsg = { role: 'user', content: text, image_ids: imageIds };
+  const displayText = options.displayText || text;
+  const localUserMsg = { role: 'user', content: displayText, image_ids: imageIds };
   sess.messages.push(localUserMsg);
   renderMessage(localUserMsg);
   startTaskTimer(sess);
   if (sess.untitled || isUntitledSessionTitle(sess.title)) {
-    sess.title = text.trim().slice(0, 40) + (text.trim().length > 40 ? '…' : '');
+    sess.title = displayText.trim().slice(0, 40) + (displayText.trim().length > 40 ? '…' : '');
     sess.untitled = false;
     sessionTitleEl.textContent = sess.title;
     renderSessionList();
@@ -1477,6 +1604,230 @@ async function cancelPrompt() {
 }
 
 // ─── Slash commands ──────────────────────────────────────────────────────
+const LOCAL_SLASH_COMMANDS = [
+  { cmd: '/help', argHint: '', description: '显示可用命令' },
+  { cmd: '/new', argHint: '', description: '新建会话' },
+  { cmd: '/clear', argHint: '', description: '清空当前会话显示' },
+  { cmd: '/stop', argHint: '', description: '取消当前请求' },
+  { cmd: '/restart', argHint: '', description: '重启 bridge' },
+  { cmd: '/settings', argHint: '', description: '打开设置' },
+  { cmd: '/theme', argHint: 'light|dark|auto', description: '切换主题' },
+  { cmd: '/cwd', argHint: '[path]', description: '显示当前目录或在指定目录新建会话' },
+];
+
+let commandPaletteIndex = 0;
+let commandPaletteItems = [];
+
+async function getSlashCommandRows() {
+  try {
+    const result = await window.ga.getSlashCommands();
+    const commands = Array.isArray(result?.commands) ? result.commands : [];
+    state.slashCommands = commands;
+    return commands;
+  } catch (err) {
+    addDiagnostic('warn', 'Failed to load slash commands', err);
+    return state.slashCommands || [];
+  }
+}
+
+function mergeSlashCommands(bridgeCommands = state.slashCommands || []) {
+  const seen = new Set();
+  return [...LOCAL_SLASH_COMMANDS, ...bridgeCommands].filter((entry) => {
+    const cmd = entry.cmd || '';
+    if (!cmd || seen.has(cmd)) return false;
+    seen.add(cmd);
+    return true;
+  });
+}
+
+async function getAllSlashCommands() {
+  const bridgeCommands = await getSlashCommandRows();
+  return mergeSlashCommands(bridgeCommands);
+}
+
+async function showHelp() {
+  const rows = await getAllSlashCommands();
+  showSystem([
+    'Available commands:',
+    ...rows.map((entry) => {
+      const hint = entry.argHint ? ` ${entry.argHint}` : '';
+      const left = `${entry.cmd}${hint}`.padEnd(18, ' ');
+      return `  ${left} ${entry.description || ''}`.trimEnd();
+    }),
+  ].join('\n'));
+}
+
+function closeCommandPalette() {
+  commandPaletteItems = [];
+  commandPaletteIndex = 0;
+  if (commandPaletteEl) {
+    commandPaletteEl.classList.add('hidden');
+    commandPaletteEl.textContent = '';
+  }
+}
+
+function renderCommandPalette(items) {
+  if (!commandPaletteEl) return;
+  commandPaletteEl.textContent = '';
+  commandPaletteItems = items;
+  commandPaletteIndex = Math.max(0, Math.min(commandPaletteIndex, items.length - 1));
+  if (!items.length) {
+    closeCommandPalette();
+    return;
+  }
+  for (const [idx, entry] of items.entries()) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'command-item' + (idx === commandPaletteIndex ? ' active' : '');
+    btn.setAttribute('role', 'option');
+    btn.setAttribute('aria-selected', idx === commandPaletteIndex ? 'true' : 'false');
+    const hint = entry.argHint ? ` ${entry.argHint}` : '';
+    btn.innerHTML = `<span class="command-name"></span><span class="command-desc"></span>`;
+    btn.querySelector('.command-name').textContent = `${entry.cmd}${hint}`;
+    btn.querySelector('.command-desc').textContent = entry.description || '';
+    btn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      applyCommandSuggestion(entry);
+    });
+    commandPaletteEl.appendChild(btn);
+  }
+  commandPaletteEl.classList.remove('hidden');
+}
+
+async function updateCommandPalette() {
+  const value = inputEl.value;
+  const cursor = inputEl.selectionStart ?? value.length;
+  const beforeCursor = value.slice(0, cursor);
+  const match = beforeCursor.match(/^\/[^\s]*$/);
+  if (!match) {
+    closeCommandPalette();
+    return;
+  }
+  const query = match[0].toLowerCase();
+  const commands = await getAllSlashCommands();
+  const items = commands
+    .filter((entry) => String(entry.cmd || '').toLowerCase().startsWith(query));
+  renderCommandPalette(items);
+}
+
+function applyCommandSuggestion(entry) {
+  if (!entry?.cmd) return;
+  const hint = entry.argHint ? ' ' : '';
+  inputEl.value = `${entry.cmd}${hint}`;
+  inputEl.focus();
+  inputEl.selectionStart = inputEl.selectionEnd = inputEl.value.length;
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
+  updateSendButton();
+  closeCommandPalette();
+}
+
+function moveCommandPalette(delta) {
+  if (!commandPaletteItems.length) return;
+  commandPaletteIndex = (commandPaletteIndex + delta + commandPaletteItems.length) % commandPaletteItems.length;
+  renderCommandPalette(commandPaletteItems);
+}
+
+function formatResumeSessions(sessions) {
+  if (!Array.isArray(sessions) || sessions.length === 0) {
+    return '没有可恢复的历史会话。';
+  }
+  return [
+    `最近 ${sessions.length} 个可恢复会话（输入 /resume N 恢复；/continue 继续上一个会话）：`,
+    '',
+    ...sessions.map((sess) => {
+      const preview = String(sess.preview || '（无法预览）').replace(/\s+/g, ' ').slice(0, 80);
+      return `${sess.index}. ${sess.name} · ${sess.rounds} 轮 · ${preview}`;
+    }),
+  ].join('\n');
+}
+
+async function restoreResumeIndex(index, commandName) {
+  if (!Number.isInteger(index) || index <= 0) {
+    showSystem(commandName === 'continue' ? 'Usage: /continue' : 'Usage: /resume N');
+    return;
+  }
+  const sess = state.sessions.get(state.activeId);
+  if (!sess) {
+    showSystem('No active session.');
+    return;
+  }
+  const result = await window.ga.resumeSession(await ensureBridgeSession(sess), index);
+  if (!result?.ok) {
+    showSystem(result?.error || 'Resume failed.');
+    return;
+  }
+  sess.messages = Array.isArray(result.messages) ? result.messages : [];
+  if (result.session?.title) sess.title = result.session.title;
+  const runtime = getSessionRuntime(sess);
+  runtime.seenBridgeMessageIds = new Set();
+  runtime.lastPolledMessageId = 0;
+  for (const msg of sess.messages) {
+    if (msg.id) {
+      runtime.seenBridgeMessageIds.add(Number(msg.id));
+      runtime.lastPolledMessageId = Math.max(runtime.lastPolledMessageId, Number(msg.id));
+    }
+  }
+  renderSessionList();
+  renderMessages();
+  showSystem(result.message || `Restored session #${index}.`);
+}
+
+async function handleResumeCommand(arg) {
+  const indexText = (arg || '').trim();
+  if (!indexText) {
+    const result = await window.ga.listResumeSessions(10);
+    showSystem(formatResumeSessions(result?.sessions || []));
+    return;
+  }
+  const index = Number.parseInt(indexText, 10);
+  await restoreResumeIndex(index, 'resume');
+}
+
+async function handleContinueCommand(arg) {
+  const indexText = (arg || '').trim();
+  const index = indexText ? Number.parseInt(indexText, 10) : 1;
+  await restoreResumeIndex(index, 'continue');
+}
+
+function formatSchedulerStatus(data) {
+  if (!data?.ok) return data?.error || 'Scheduler status unavailable.';
+  const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+  const lines = [
+    `Scheduler: ${data.running ? `running${data.pid ? ` (pid ${data.pid})` : ''}` : 'stopped'}`,
+    '',
+  ];
+  if (!tasks.length) {
+    lines.push('No scheduled tasks found in sche_tasks/*.json.');
+  } else {
+    lines.push('Scheduled tasks:');
+    for (const task of tasks) {
+      const state = task.enabled ? 'enabled' : 'disabled';
+      const schedule = task.schedule || 'no schedule';
+      lines.push(`- ${task.name}: ${state}, ${schedule}`);
+    }
+  }
+  lines.push('', 'Commands: /scheduler start');
+  return lines.join('\n');
+}
+
+async function handleSchedulerCommand(arg) {
+  const action = (arg || '').trim().toLowerCase();
+  if (!action) {
+    const status = await window.ga.rpc('scheduler/status', {});
+    showSystem(formatSchedulerStatus(status));
+    return;
+  }
+  if (action === 'start') {
+    const result = await window.ga.rpc('scheduler/start', {});
+    showSystem(result?.message || result?.error || 'Scheduler start requested.');
+    const status = await window.ga.rpc('scheduler/status', {});
+    showSystem(formatSchedulerStatus(status));
+    return;
+  }
+  showSystem('Usage: /scheduler or /scheduler start');
+}
+
 async function handleSlash(cmd) {
   const [name, ...rest] = cmd.trim().slice(1).split(/\s+/);
   const arg = rest.join(' ');
@@ -1484,13 +1835,7 @@ async function handleSlash(cmd) {
 
   switch (name) {
     case 'help':
-      showSystem([
-        'Available commands:',
-        '  /new        New session',
-        '  /clear      Clear current session display',
-        '  /stop       Cancel the current request',
-        '  /theme      Switch theme (light|dark|auto)',
-      ].join('\n'));
+      await showHelp();
       break;
     case 'new':
       await newSession();
@@ -1521,7 +1866,7 @@ async function handleSlash(cmd) {
     case 'cwd':
       if (!arg) {
         const status = await window.ga.checkStatus();
-        showSystem(`cwd: ${sess?.cwd || status.gaRoot}`);
+        showSystem(`cwd: ${sess?.cwd || status.workspaceDir || status.gaRoot}`);
       } else {
         showSystem(`Creating new session in ${arg}…`);
         // Need a new session for different cwd
@@ -1536,9 +1881,45 @@ async function handleSlash(cmd) {
         }
       }
       break;
+    case 'resume':
+      await handleResumeCommand(arg);
+      break;
+    case 'continue':
+      await handleContinueCommand(arg);
+      break;
+    case 'scheduler':
+      await handleSchedulerCommand(arg);
+      break;
     default:
-      showSystem(`Unknown command: /${name}. Try /help.`);
+      await runAgentSlash(`/${name}`, arg, cmd.trim());
   }
+}
+
+async function runAgentSlash(command, args = '', displayText = null) {
+  if (getActiveSessionRuntime()?.busy) {
+    showSystem('Agent is still responding. Press Esc or Stop before starting a mode.');
+    return;
+  }
+  try {
+    const result = await window.ga.resolveSlash(command, args);
+    if (!result?.ok || !result.prompt) {
+      showSystem(result?.error || `Unknown command: ${command}. Try /help.`);
+      return;
+    }
+    await sendPrompt(result.prompt, [], { displayText: displayText || `${command}${args ? ' ' + args : ''}` });
+  } catch (err) {
+    showSystem(`Command failed: ${err.message || err}`);
+  }
+}
+
+async function invokeMode(command) {
+  const label = command === '/goal'
+    ? 'Goal or condition'
+    : command === '/autorun'
+      ? 'Autonomous task seed'
+      : 'Mode argument';
+  const args = window.prompt(`${label} (optional):`, '') || '';
+  await runAgentSlash(command, args.trim(), `${command}${args.trim() ? ' ' + args.trim() : ''}`);
 }
 
 function showSystem(text) {
@@ -1815,7 +2196,7 @@ window.ga.onBridgeError((err) => {
 
   if (err.type === 'no-mykey') {
     showError(err.message, 'Setup', async () => {
-      await window.ga.openMykeyTemplate();
+      await window.ga.openConfig();
     }, { skipDiagnostic: true });
   } else if (err.type === 'no-python') {
     showError(err.message, 'Settings', openSettings, { skipDiagnostic: true });
@@ -1845,6 +2226,7 @@ inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
   updateSendButton();
+  updateCommandPalette();
 });
 
 // IME composition fix - triple guard for CJK input methods (macOS especially)
@@ -1853,6 +2235,33 @@ inputEl.addEventListener('compositionstart', () => { _imeComposing = true; });
 inputEl.addEventListener('compositionend', () => { _imeComposing = false; });
 
 inputEl.addEventListener('keydown', (e) => {
+  if (!commandPaletteEl.classList.contains('hidden')) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      moveCommandPalette(1);
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      moveCommandPalette(-1);
+      return;
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      applyCommandSuggestion(commandPaletteItems[commandPaletteIndex]);
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeCommandPalette();
+      return;
+    }
+    if (e.key === 'Enter' && !e.shiftKey && commandPaletteItems.length) {
+      e.preventDefault();
+      applyCommandSuggestion(commandPaletteItems[commandPaletteIndex]);
+      return;
+    }
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     if (e.isComposing || _imeComposing || e.keyCode === 229) return; // IME active, ignore
     e.preventDefault();
@@ -1933,6 +2342,7 @@ function submitInput() {
   inputEl.style.height = 'auto';
   clearPendingImages();
   updateSendButton();
+  closeCommandPalette();
 
   if (text.startsWith('/')) {
     handleSlash(text).catch((err) => {
@@ -1957,7 +2367,9 @@ $('settings-btn').addEventListener('click', openSettings);
 $('close-settings').addEventListener('click', closeSettings);
 $('cancel-settings').addEventListener('click', closeSettings);
 $('save-settings').addEventListener('click', saveSettings);
-$('open-mykey').addEventListener('click', () => openConfigFile(window.ga.openMykey, 'mykey.py'));
+$('open-config').addEventListener('click', () => openConfigFile(window.ga.openConfig, 'config.yaml'));
+$('goal-mode-btn').addEventListener('click', () => invokeMode('/goal'));
+$('auto-run-btn').addEventListener('click', () => invokeMode('/autorun'));
 $('error-dismiss').addEventListener('click', hideError);
 
 settingsModal.querySelector('.modal-backdrop').addEventListener('click', closeSettings);
