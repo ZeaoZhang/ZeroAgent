@@ -216,6 +216,47 @@ def test_default_system_prompt_matches_ga_composition_exactly(
     )
 
 
+def test_system_prompt_appends_ga_peer_hint_when_enabled(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    class FakeClient:
+        extra_sys_prompt = ""
+
+    monkeypatch.setattr(
+        "zero_agent.core.agent.LLMFactory.create_all_sessions",
+        lambda config: {"default": FakeClient()},
+    )
+    import zero_agent.core.agent as agent_module
+
+    monkeypatch.setattr(agent_module.time, "strftime", lambda fmt: "2099-01-02 Thu")
+
+    config = AgentConfig(
+        language="zh",
+        llm_backends={
+            "default": LLMBackendConfig(
+                name="default",
+                provider="openai",
+                api_key="k",
+                api_base="https://x.com",
+                model="test-model",
+            ),
+        },
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        peer_hint=True,
+    )
+
+    agent = ZeroAgent(config=config)
+    agent.memory.init_memory()
+    prompt = agent._build_system_prompt()
+
+    assert prompt.endswith(
+        "\n[Peer] 用户提及其他会话/后台任务状态时: "
+        "temp/model_responses/ (只找近期修改的文件尾部)\n"
+    )
+
+
 @pytest.mark.parametrize("language", ["zh", "en"])
 def test_tool_protocol_prompt_matches_ga_exactly(monkeypatch, language: str) -> None:
     monkeypatch.delenv("ZA_LANG", raising=False)
@@ -362,3 +403,51 @@ def test_memory_resources_do_not_contain_generated_python_cache_artifacts() -> N
     ]
 
     assert generated == []
+
+
+def test_memory_resources_cover_ga_files_with_explicit_za_extensions() -> None:
+    ga_files = {
+        str(path.relative_to(GA_ROOT / "memory"))
+        for path in (GA_ROOT / "memory").rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+    za_files = {
+        str(path.relative_to(ZA_ROOT / "zero_agent" / "memory"))
+        for path in (ZA_ROOT / "zero_agent" / "memory").rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+    explicit_za_extensions = {
+        "__init__.py",
+        "compress_session.py",
+        "file_access_stats.json",
+        "global_mem.txt",
+        "global_mem_insight.txt",
+        "manager.py",
+        "skill_search/skill_search/__init__.py",
+        "skill_search/skill_search/__main__.py",
+        "skill_search/skill_search/engine.py",
+        "stock_analysis_sop.md",
+        "vision_api.py",
+    }
+
+    assert ga_files - za_files == set()
+    assert za_files - ga_files <= explicit_za_extensions
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "adb_ui.py",
+        "checklist_helper.py",
+        "checklist_sop.md",
+        "computer_use.md",
+        "procmem_scanner.py",
+        "ui_detect.py",
+        "vision_api.template.py",
+    ],
+)
+def test_direct_copy_memory_resources_match_ga_exactly(name: str) -> None:
+    assert (
+        (ZA_ROOT / "zero_agent" / "memory" / name).read_text(encoding="utf-8")
+        == (GA_ROOT / "memory" / name).read_text(encoding="utf-8")
+    )

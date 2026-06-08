@@ -80,6 +80,20 @@ class LiteLLMSession:
             self._cut_msg_interval = 25
             self._trim_keep_rate = 0.3
 
+    def reset_tool_protocol_cache(self) -> None:
+        """Force the next tool-enabled call to resend the full GA protocol."""
+        self._last_tools_json = ""
+
+    @property
+    def last_tools(self) -> str:
+        """GA-compatible alias for the mounted-tool protocol cache."""
+        return self._last_tools_json
+
+    @last_tools.setter
+    def last_tools(self, value: str) -> None:
+        """GA-compatible alias for the mounted-tool protocol cache."""
+        self._last_tools_json = value
+
     def chat(
         self,
         messages: List[Dict[str, Any]],

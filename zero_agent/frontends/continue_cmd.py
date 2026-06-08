@@ -29,16 +29,47 @@ def _pairs(content):
             pairs.append((pending, body.strip())); pending = None
     return pairs
 
+
+def _content_blocks(content):
+    if isinstance(content, list): return content
+    if isinstance(content, dict): return [content]
+    return []
+
+
+def _preview_user_text(text):
+    t = str(text or '').strip()
+    if not t: return ''
+    if '<history>' in t: return ''
+    if t.startswith('### [WORKING MEMORY]'): return ''
+    return t
+
+
+def _real_user_text(text):
+    t = str(text or '').strip()
+    if not t: return ''
+    if '<history>' in t: return ''
+    if any(mk in t for mk in _INJECT_MARKERS): return ''
+    return t
+
+
+def _message_user_text(msg, preview=False):
+    content = msg.get('content', '')
+    accept = _preview_user_text if preview else _real_user_text
+    if isinstance(content, str): return accept(content)
+    for blk in _content_blocks(content):
+        if isinstance(blk, dict) and blk.get('type') == 'text':
+            t = accept(blk.get('text'))
+            if t: return t
+    return ''
+
+
 def _first_user(pairs):
     for p, _ in pairs:
         try: msg = json.loads(p)
         except Exception: continue
         if not isinstance(msg, dict): continue
-        for blk in msg.get('content', []) or []:
-            if isinstance(blk, dict) and blk.get('type') == 'text':
-                t = (blk.get('text') or '').strip()
-                if t and '<history>' not in t and not t.startswith('### [WORKING MEMORY]'):
-                    return t
+        t = _message_user_text(msg, preview=True)
+        if t: return t
     for p, _ in pairs[:1]:
         for line in p.splitlines():
             s = line.strip()
@@ -452,14 +483,11 @@ def _user_text(prompt_body):
     try: msg = json.loads(prompt_body)
     except Exception: return ''
     if not isinstance(msg, dict): return ''
-    blocks = msg.get('content', []) or []
+    content = msg.get('content', '') or ''
+    blocks = _content_blocks(content)
     if any(isinstance(b, dict) and b.get('type') == 'tool_result' for b in blocks):
         return ''
-    for blk in blocks:
-        if isinstance(blk, dict) and blk.get('type') == 'text':
-            t = (blk.get('text') or '').strip()
-            if t and not any(mk in t for mk in _INJECT_MARKERS): return t
-    return ''
+    return _message_user_text(msg)
 
 
 def _assistant_text(response_body):
@@ -504,7 +532,7 @@ def _tool_results_from_prompt(prompt_body):
     except Exception: return {}
     if not isinstance(msg, dict): return {}
     out = {}
-    for blk in msg.get('content', []) or []:
+    for blk in _content_blocks(msg.get('content', []) or []):
         if isinstance(blk, dict) and blk.get('type') == 'tool_result':
             tid = blk.get('tool_use_id') or ''
             if tid: out[tid] = _format_tool_result(blk.get('content'))

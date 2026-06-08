@@ -381,14 +381,19 @@ def _make_file_read_handler(config: AgentConfig):
             count=count, show_linenos=show_linenos,
         )
         if show_linenos and not result.startswith("Error:"):
-            result = "（以下返回格式为：行号|内容）\n" + result
+            result = "由于设置了show_linenos，以下返回信息为：(行号|)内容 。\n" + result
         if " ... [TRUNCATED]" in result:
             result += "\n\n（某些行被截断，如需完整内容可改用 code_run 读取）"
         next_prompt = None
         # SOP 读取提示
-        if _is_under_dir(path, config.memory_dir) and not result.startswith("Error:"):
+        is_memory_path = _is_under_dir(path, config.memory_dir)
+        if is_memory_path and not result.startswith("Error:"):
             from zero_agent.utils.memory_stats import log_memory_access
             log_memory_access(path, stats_dir=config.memory_dir)
+        if (
+            ("memory" in path or "sop" in path)
+            and not result.startswith("Error:")
+        ):
             next_prompt = handler._default_next_prompt(args) + (
                 "\n[SYSTEM TIPS] 正在读取记忆或SOP文件，若决定按sop执行请提取"
                 "sop中的关键点（特别是靠后的）update working memory."

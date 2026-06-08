@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, Generator, List, Optional
 from zero_agent.core.hooks import HookSystem
 from zero_agent.core.interfaces import LLMClient, ToolDispatcher
 from zero_agent.core.types import StepOutcome
+from zero_agent.utils.text import smart_format
 
 if TYPE_CHECKING:
     from zero_agent.core.agent import ZeroAgent
@@ -132,7 +133,7 @@ class AgentLoop:
 
             # 每 10 轮重置工具描述缓存
             if turn % 10 == 0:
-                self.client.last_tools = ""
+                self._clear_tool_cache()
 
             self._trigger_hook("turn_before", {
                 "turn": turn,
@@ -316,9 +317,11 @@ class AgentLoop:
         """Mirror GA's compact [USER] entry in handler.history_info."""
         if not isinstance(getattr(self.handler, "history_info", None), list):
             return
-        text = self._message_text(content).strip()
+        text = self._message_text(content).replace("\n", " ").strip()
         if text:
-            self.handler.history_info.append(f"[USER]: {text}")
+            self.handler.history_info.append(
+                f"[USER]: {smart_format(text, max_str_len=200)}"
+            )
 
     @staticmethod
     def _message_text(content: Any) -> str:
@@ -343,6 +346,10 @@ class AgentLoop:
 
     def _clear_tool_cache(self) -> None:
         """Force full tool protocol resend after tool routing failures."""
+        reset = getattr(self.client, "reset_tool_protocol_cache", None)
+        if callable(reset):
+            reset()
+            return
         if hasattr(self.client, "last_tools"):
             self.client.last_tools = ""
         if hasattr(self.client, "_last_tools_json"):

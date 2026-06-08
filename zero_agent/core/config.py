@@ -127,6 +127,7 @@ class AgentConfig:
     incremental_output: bool = False
     failover_backends: list[str] = field(default_factory=list)
     log_dir: Optional[str] = None
+    peer_hint: bool = False
 
     @property
     def resolved_language(self) -> str:
@@ -245,6 +246,7 @@ class AgentConfig:
         max_turns = int(os.environ.get("ZA_MAX_TURNS", "80"))
         workspace_dir = os.environ.get("ZA_WORKSPACE_DIR", "./workspace")
         language = os.environ.get("ZA_LANG", "auto")
+        peer_hint = os.environ.get("ZA_PEER_HINT", "").lower() in ("1", "true", "yes", "on")
 
         return cls(
             llm_backends={
@@ -260,6 +262,7 @@ class AgentConfig:
             max_turns=max_turns,
             workspace_dir=workspace_dir,
             language=language,
+            peer_hint=peer_hint,
         )
 
     @classmethod
@@ -289,6 +292,7 @@ class AgentConfig:
             incremental_output=data.get("incremental_output", False),
             failover_backends=data.get("failover_backends", []),
             log_dir=data.get("log_dir"),
+            peer_hint=data.get("peer_hint", False),
         )
 
 

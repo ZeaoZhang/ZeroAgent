@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Any, Dict, Generator, List, Optional
 
@@ -88,7 +89,7 @@ class ZeroAgent:
             registry=self.registry,
             cwd=self.config.workspace_dir,
         )
-        self.handler.parent = self
+        self._wire_handler(self.handler)
 
         # 4. 记忆管理器
         self.memory = MemoryManager(
@@ -189,11 +190,13 @@ class ZeroAgent:
         Raises:
             RuntimeError: 当前有任务正在运行（不支持并发）.
         """
-        self.handler.reset_code_stop_signal()
-
         # 创建工作目录和记忆目录
         os.makedirs(self.config.workspace_dir, exist_ok=True)
         self.memory.init_memory()
+
+        # GA 每个任务创建新 handler，但继承短期工作记忆。
+        self.handler = self._new_task_handler()
+        self.handler.reset_code_stop_signal()
 
         # 构建系统提示词
         prompt = system_prompt or self._build_system_prompt()
@@ -216,6 +219,50 @@ class ZeroAgent:
             user_input=user_input,
             initial_user_content=initial_user_content,
         ))
+
+    def _wire_handler(self, handler: BaseHandler) -> BaseHandler:
+        """Attach runtime references shared by freshly-created handlers."""
+        handler.parent = self
+        try:
+            handler.client = self.client
+        except Exception:
+            pass
+        return handler
+
+    def _new_task_handler(self) -> BaseHandler:
+        """Create a GA-compatible per-task handler and carry working memory."""
+        old_handler = self.handler
+        cls = type(old_handler) if old_handler is not None else BaseHandler
+        try:
+            handler = cls(registry=self.registry, cwd=self.config.workspace_dir)
+        except TypeError:
+            handler = BaseHandler(
+                registry=self.registry,
+                cwd=self.config.workspace_dir,
+            )
+        handler = self._wire_handler(handler)
+
+        if old_handler is None:
+            return handler
+
+        old_working = getattr(old_handler, "working", {})
+        if "key_info" in old_working:
+            key_info = re.sub(
+                r"\n\[SYSTEM\] 此为.*?工作记忆[。\n]*",
+                "",
+                old_working.get("key_info", ""),
+            )
+            handler.working["key_info"] = key_info
+            passed_sessions = old_working.get("passed_sessions", 0) + 1
+            handler.working["passed_sessions"] = passed_sessions
+            if passed_sessions > 0:
+                handler.working["key_info"] += (
+                    f"\n[SYSTEM] 此为 {passed_sessions} 个对话前设置的key_info，"
+                    "若已在新任务，先更新或清除工作记忆。\n"
+                )
+        if "related_sop" in old_working:
+            handler.working["related_sop"] = old_working["related_sop"]
+        return handler
 
     def abort(self) -> None:
         """中止当前任务.
@@ -254,7 +301,11 @@ class ZeroAgent:
 
         target.history = old_history
         target.system = getattr(old_client, "system", "")
-        target.last_tools = ""
+        reset = getattr(target, "reset_tool_protocol_cache", None)
+        if callable(reset):
+            reset()
+        else:
+            target.last_tools = ""
 
         self.client = target
 
@@ -353,6 +404,12 @@ class ZeroAgent:
         extra_sys = getattr(self.client, "extra_sys_prompt", "")
         if extra_sys:
             prompt += f"\n{extra_sys}"
+
+        if getattr(self.config, "peer_hint", False):
+            prompt += (
+                "\n[Peer] 用户提及其他会话/后台任务状态时: "
+                "temp/model_responses/ (只找近期修改的文件尾部)\n"
+            )
 
         return prompt
 

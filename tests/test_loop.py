@@ -14,6 +14,7 @@ from zero_agent.core.loop import AgentLoop
 from zero_agent.core.types import StepOutcome
 from zero_agent.llm.base import MockFunction, MockResponse, MockToolCall
 from zero_agent.tools.registry import ToolRegistry
+from zero_agent.utils.text import smart_format
 
 
 def _make_mock_client(responses: List[MockResponse]):
@@ -381,6 +382,30 @@ class TestAgentLoop:
 
         assert mock_handler.history_info[0] == "[USER]: inspect context"
 
+    def test_loop_records_initial_user_input_like_ga_compacted_history(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        client = _make_mock_client([
+            MockResponse(content="Done."),
+        ])
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=5,
+            verbose=False,
+        )
+        user_input = "first line\n" + ("x" * 260)
+
+        _exhaust(loop.run("system prompt", user_input))
+
+        expected = smart_format(
+            user_input.replace("\n", " "),
+            max_str_len=200,
+        )
+        assert mock_handler.history_info[0] == f"[USER]: {expected}"
+
     def test_unknown_tool_prompt_clears_tool_protocol_cache(
         self,
         mock_handler: BaseHandler,
@@ -412,6 +437,39 @@ class TestAgentLoop:
         exit_reason = _exhaust(loop.run("system prompt", "task"))
 
         assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        assert client.last_tools == ""
+        assert client._last_tools_json == ""
+
+    def test_turn_ten_clears_tool_protocol_cache_field(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        responses = [
+            MockResponse(
+                content="",
+                tool_calls=[
+                    MockToolCall(
+                        function=MockFunction(name="echo", arguments='{"message": "x"}'),
+                        id=f"call_{i}",
+                    ),
+                ],
+            )
+            for i in range(10)
+        ]
+        client = _make_mock_client(responses)
+        client.last_tools = "cached"
+        client._last_tools_json = "cached-json"
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=10,
+            verbose=False,
+        )
+
+        exit_reason = _exhaust(loop.run("system prompt", "task"))
+
+        assert exit_reason["result"] == "MAX_TURNS_EXCEEDED"
         assert client.last_tools == ""
         assert client._last_tools_json == ""
 

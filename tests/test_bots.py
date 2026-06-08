@@ -27,6 +27,7 @@ from zero_agent.bots.shared.continue_cmd import (
     _last_summary,
     _user_text,
     _assistant_text,
+    extract_ui_messages,
     list_sessions,
     format_list,
     reset_conversation,
@@ -121,6 +122,13 @@ class TestContinueCmd:
         )]
         assert _first_user(pairs) == "hello world"
 
+    def test_first_user_accepts_string_content(self):
+        pairs = [(
+            '{"role": "user", "content": "hello world"}',
+            'resp',
+        )]
+        assert _first_user(pairs) == "hello world"
+
     def test_first_user_skips_working_memory(self):
         pairs = [(
             '{"role": "user", "content": [{"type": "text", "text": "### [WORKING MEMORY] stuff"}]}',
@@ -132,6 +140,10 @@ class TestContinueCmd:
         prompt = '{"role": "user", "content": [{"type": "text", "text": "hello"}]}'
         assert _user_text(prompt) == "hello"
 
+    def test_user_text_accepts_string_content(self):
+        prompt = '{"role": "user", "content": "hello"}'
+        assert _user_text(prompt) == "hello"
+
     def test_user_text_skips_tool_result(self):
         prompt = '{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "1"}]}'
         assert _user_text(prompt) == ""
@@ -139,6 +151,26 @@ class TestContinueCmd:
     def test_user_text_skips_injection(self):
         prompt = '{"role": "user", "content": [{"type": "text", "text": "[SYSTEM TIPS] do X"}]}'
         assert _user_text(prompt) == ""
+
+    def test_user_text_skips_string_injection(self):
+        prompt = '{"role": "user", "content": "[SYSTEM TIPS] do X"}'
+        assert _user_text(prompt) == ""
+
+    def test_extract_ui_messages_keeps_string_user_prompt(self):
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
+            path = f.name
+            f.write('=== Prompt === 2026-06-08 12:00:00\n')
+            f.write('{"role": "user", "content": "first prompt"}\n')
+            f.write('=== Response === 2026-06-08 12:00:00\n')
+            f.write("[{'type': 'text', 'text': 'answer'}]\n")
+        try:
+            messages = extract_ui_messages(path)
+        finally:
+            os.unlink(path)
+
+        assert messages[0] == {"role": "user", "content": "first prompt"}
+        assert messages[1]["role"] == "assistant"
+        assert "answer" in messages[1]["content"]
 
     def test_assistant_text(self):
         resp = '[{"type": "text", "text": "hello"}, {"type": "text", "text": "world"}]'

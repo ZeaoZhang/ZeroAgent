@@ -230,6 +230,54 @@ class TestBaseHandlerDispatch:
         assert "SYSTEM TIPS" in result.next_prompt
         assert result.next_prompt.startswith("\n### [WORKING MEMORY]")
 
+    def test_real_registry_file_read_matches_ga_line_number_prefix(
+        self,
+        mock_config,
+        tmp_path,
+    ) -> None:
+        target = tmp_path / "source.txt"
+        target.write_text("alpha\nbeta\n", encoding="utf-8")
+        mock_config.workspace_dir = str(tmp_path)
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=str(tmp_path))
+
+        result = _exhaust(handler.dispatch(
+            "file_read",
+            {"path": str(target), "count": 5, "show_linenos": True},
+            MockResponse(content=""),
+        ))
+
+        assert isinstance(result.data, str)
+        assert result.data.startswith(
+            "由于设置了show_linenos，以下返回信息为：(行号|)内容 。\n"
+        )
+
+    def test_real_registry_file_read_sop_path_tip_matches_ga_heuristic(
+        self,
+        mock_config,
+        tmp_path,
+    ) -> None:
+        sop_dir = tmp_path / "outside_sop"
+        sop_dir.mkdir()
+        sop = sop_dir / "guide.md"
+        sop.write_text("follow this\n", encoding="utf-8")
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        mock_config.memory_dir = str(memory_dir)
+        mock_config.workspace_dir = str(tmp_path)
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=str(tmp_path))
+
+        result = _exhaust(handler.dispatch(
+            "file_read",
+            {"path": str(sop), "count": 5},
+            MockResponse(content=""),
+        ))
+
+        assert "SYSTEM TIPS" not in result.data
+        assert "SYSTEM TIPS" in result.next_prompt
+        assert result.next_prompt.startswith("\n### [WORKING MEMORY]")
+
     def test_real_registry_start_long_term_update_includes_global_memory(
         self,
         mock_config,

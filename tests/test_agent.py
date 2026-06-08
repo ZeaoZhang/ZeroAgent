@@ -269,6 +269,59 @@ class TestZeroAgentHooks:
         assert "after abort" in tool_result
         assert '"status": "success"' in tool_result
 
+    def test_run_creates_fresh_handler_and_ages_key_info(
+        self,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        """每个任务应像 GA 一样使用新 handler，但继承并老化 key_info."""
+        config = AgentConfig(
+            llm_backends={
+                "default": LLMBackendConfig(
+                    name="default",
+                    provider="openai",
+                    api_key="test-key",
+                    api_base="https://api.openai.com/v1",
+                    model="test-model",
+                ),
+            },
+            default_backend="default",
+            max_turns=5,
+            workspace_dir=str(tmp_path / "workspace"),
+            memory_dir=str(tmp_path / "memory"),
+        )
+        fake_client = _FakeClient(
+            config.llm_backends["default"],
+            [MockResponse(content="Done. <summary>done</summary>")],
+        )
+        monkeypatch.setattr(
+            "zero_agent.core.agent.LLMFactory.create_all_sessions",
+            lambda _config: {"default": fake_client},
+        )
+
+        agent = ZeroAgent(config=config)
+        old_handler = agent.handler
+        old_handler.history_info = ["[USER]: old task", "[Agent] old summary"]
+        old_handler.working["key_info"] = (
+            "Important context\n"
+            "[SYSTEM] 此为 8 个对话前设置的key_info，若已在新任务，先更新或清除工作记忆。\n"
+        )
+        old_handler.working["related_sop"] = "plan_sop.md"
+        old_handler.working["passed_sessions"] = 8
+
+        exit_reason = _exhaust(agent.run("new task"))
+
+        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        assert agent.handler is not old_handler
+        assert agent.handler.history_info[0] == "[USER]: new task"
+        assert "[USER]: old task" not in agent.handler.history_info
+        assert agent.handler.working["related_sop"] == "plan_sop.md"
+        assert agent.handler.working["passed_sessions"] == 9
+        assert agent.handler.working["key_info"] == (
+            "Important context\n"
+            "[SYSTEM] 此为 9 个对话前设置的key_info，若已在新任务，先更新或清除工作记忆。\n"
+        )
+
 
 class _FakeClient:
     """Minimal LLM client for ZeroAgent.run() tests."""

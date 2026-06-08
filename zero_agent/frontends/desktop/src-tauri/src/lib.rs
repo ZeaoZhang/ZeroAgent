@@ -32,10 +32,6 @@ fn bridge_script_for_project(project_dir: &PathBuf) -> PathBuf {
     project_dir.join("desktop_bridge.py")
 }
 
-fn find_bridge_script() -> PathBuf {
-    bridge_script_for_project(&project_root())
-}
-
 /// Find python executable:
 /// 1. .portable/uv-python/ 下找 python.exe (Windows) 或 python3 (Unix)
 /// 2. Fallback to system PATH
@@ -178,53 +174,6 @@ fn wait_for_port(port: u16, timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(100));
     }
     false
-}
-
-fn start_bridge() {
-    let script = find_bridge_script();
-    if !script.exists() {
-        eprintln!("[tauri] bridge script not found: {:?}", script);
-        return;
-    }
-
-    let python = find_python();
-    eprintln!("[tauri] using python: {}", python);
-
-    let show_console = std::env::args().any(|a| a == "--console");
-
-    let mut cmd = Command::new(&python);
-    cmd.arg(&script)
-       .current_dir(script.parent().unwrap())
-       .env("ZA_DESKTOP_BRIDGE_NO_BROWSER", "1");
-
-    #[cfg(windows)]
-    if !show_console {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    match cmd.spawn() {
-        Ok(child) => {
-            eprintln!("[tauri] started bridge PID={}", child.id());
-            *BRIDGE_PROCESS.lock().unwrap() = Some(child);
-        }
-        Err(e) => {
-            eprintln!("[tauri] failed to start bridge: {} (python={})", e, python);
-            return;
-        }
-    }
-
-    if !wait_for_port(14168, Duration::from_secs(15)) {
-        eprintln!("[tauri] WARNING: bridge did not become ready within 15s");
-    }
-}
-
-fn ensure_bridge_running() {
-    if is_bridge_running() {
-        eprintln!("[tauri] bridge already running on 127.0.0.1:14168; reusing it");
-        return;
-    }
-    start_bridge();
 }
 
 #[tauri::command]

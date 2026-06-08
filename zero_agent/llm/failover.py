@@ -387,6 +387,17 @@ class AutoFailoverSession:
         """设置工具描述缓存（设置到活跃 session）."""
         setattr(self._active, "last_tools", value)
 
+    def reset_tool_protocol_cache(self) -> None:
+        """Reset tool protocol cache on all wrapped sessions that support it."""
+        for session in [self.primary] + self.backups:
+            reset = getattr(session, "reset_tool_protocol_cache", None)
+            if callable(reset):
+                reset()
+            elif hasattr(session, "last_tools"):
+                setattr(session, "last_tools", "")
+            if hasattr(session, "_last_tools_json"):
+                setattr(session, "_last_tools_json", "")
+
     @property
     def temperature(self) -> float:
         return self._active.temperature
