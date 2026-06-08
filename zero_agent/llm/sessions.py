@@ -438,46 +438,45 @@ class LiteLLMSession:
             return ""
 
         tools_json = json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
-        lang = (os.environ.get("ZA_LANG") or os.environ.get("GA_LANG") or "").lower()
-        use_en = lang == "en"
+        use_en = os.environ.get("GA_LANG") == "en"
 
         if self._last_tools_json == tools_json:
             return (
-                "### Tools: still active, ready to call. Protocol unchanged.\n"
-                "**If the user's request is not yet complete, tool calls are required!**"
+                "\n### Tools: still active, **ready to call**. Protocol unchanged.\n"
                 if use_en
-                else "### 工具库状态：持续有效（code_run/file_read等），可正常调用。调用协议沿用。\n"
-                "**若用户需求未完成，必须进行工具调用！**"
+                else "\n### 工具库状态：持续有效（code_run/file_read等），**可正常调用**。调用协议沿用。\n"
             )
 
         self._last_tools_json = tools_json
         if use_en:
             return (
-                "### Interaction Protocol (must follow strictly, always in effect)\n"
+                "\n### Interaction Protocol (must follow strictly, always in effect)\n"
                 "Follow these steps to think and act:\n"
-                "1. Think: analyze the current situation and strategy inside "
+                "1. **Think**: Analyze the current situation and strategy inside "
                 "`<thinking>` tags.\n"
-                "2. Summarize: output a minimal one-line (<30 words) physical "
+                "2. **Summarize**: Output a minimal one-line (<30 words) physical "
                 "snapshot in `<summary>`: new info from last tool result + current "
                 "tool call intent. This goes into long-term working memory. Must "
                 "contain real information, no filler.\n"
-                "3. Act: if the user's request is not yet complete, tool calls are "
-                "required. Output one or more `<tool_use>` blocks, then stop.\n\n"
-                'Format: ```<tool_use>{"name":"tool_name","arguments":{...}}</tool_use>```\n\n'
-                f"### Tools (mounted, always in effect):\n{tools_json}"
+                "3. **Act**: If you need to call tools, output one or more "
+                "**<tool_use> blocks** after your reply, then stop.\n"
+                "\n"
+                'Format: ```<tool_use>{"name": "tool_name", "arguments": {...}}</tool_use>```\n\n'
+                f"### Tools (mounted, always in effect):\n{tools_json}\n"
             )
 
         return (
-            "### 交互协议 (必须严格遵守，持续有效)\n"
+            "\n### 交互协议 (必须严格遵守，持续有效)\n"
             "请按照以下步骤思考并行动：\n"
             "1. **思考**: 在 `<thinking>` 标签中先进行思考，分析现状和策略。\n"
-            "2. **总结**: 在 `<summary>` 中输出极为简短的单行（<30字）物理快照，"
-            "包括上次工具调用结果产生的新信息+本次工具调用意图。此内容将进入长期工作记忆，"
-            "严禁输出无实际信息增量的描述。\n"
-            "3. **行动**: 若用户需求未完成，必须进行工具调用。请在回复正文之后输出一个"
-            "或多个 `<tool_use>` 块，然后结束。\n\n"
-            'Format: ```<tool_use>{"name":"tool_name","arguments":{...}}</tool_use>```\n\n'
-            f"### Tools (mounted, always in effect):\n{tools_json}"
+            "2. **总结**: 在 `<summary>` 中输出*极为简短*的高度概括的单行（<30字）"
+            "物理快照，包括上次工具调用结果产生的新信息+本次工具调用意图。"
+            "此内容将进入长期工作记忆，记录关键信息，严禁输出无实际信息增量的描述。\n"
+            "3. **行动**: 如需调用工具，请在回复正文之后输出一个（或多个）"
+            "**<tool_use>块**，然后结束。\n"
+            "\n"
+            'Format: ```<tool_use>{"name": "tool_name", "arguments": {...}}</tool_use>```\n\n'
+            f"### Tools (mounted, always in effect):\n{tools_json}\n"
         )
 
     def _provider_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

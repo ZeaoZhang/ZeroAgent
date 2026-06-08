@@ -161,6 +161,7 @@ def _make_start_long_term_update_handler(config: AgentConfig):
             memory_ctx = MemoryManager(
                 memory_dir=config.memory_dir,
                 workspace_dir=config.workspace_dir,
+                language=config.resolved_language,
             ).get_global_memory_context()
         prompt += memory_ctx
 

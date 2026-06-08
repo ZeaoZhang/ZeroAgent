@@ -264,9 +264,10 @@ class TestZeroAgentHooks:
         exit_reason = _exhaust(agent.run("run code after abort"))
 
         assert exit_reason["result"] == "CURRENT_TASK_DONE"
-        assert fake_client.calls[1][0]["role"] == "tool"
-        assert "after abort" in fake_client.calls[1][0]["content"]
-        assert '"status": "success"' in fake_client.calls[1][0]["content"]
+        assert fake_client.calls[1][0]["role"] == "user"
+        tool_result = fake_client.calls[1][0]["tool_results"][0]["content"]
+        assert "after abort" in tool_result
+        assert '"status": "success"' in tool_result
 
 
 class _FakeClient:

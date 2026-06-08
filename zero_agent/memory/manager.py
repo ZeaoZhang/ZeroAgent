@@ -12,21 +12,18 @@ MemoryManager: 管理文件式分层记忆（L0-L4），提供系统提示词增
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Optional
 
 
-# 记忆结构说明（注入系统提示词，告知 LLM 记忆层次）
-_MEMORY_STRUCTURE_TEMPLATE = """Facts(L2): {memory_dir}/global_mem.txt | SOPs(L3): {memory_dir}/*.md or *.py | META-SOP(L0): {memory_dir}/memory_management_sop.md
-L1 Insight是极简索引，L2/L3变更时同步L1，索引必须极简。写记忆前先读META-SOP(L0)。
+_ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
 
-[CONSTITUTION]
-1. 改自身源码先请示；./内可自主实验
-2. 决策前查记忆，有SOP/utils必用；多次失败回看SOP；未查证不断言
-3. 分步执行，控制粒度，限制失败半径；3次失败请求干预
-4. 写任何记忆前读META-SOP核验，memory下文件只能patch修改（除非新建）
-5. 密钥/凭证文件(.env,config.yaml,keychain等)仅引用路径，禁止读取内容或移动
-6. 安装新Python包前需确认必要性，优先使用标准库和已有依赖"""
 
+def _asset_text(name: str) -> str:
+    try:
+        return (_ASSETS_DIR / name).read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 class MemoryManager:
@@ -44,15 +41,18 @@ class MemoryManager:
         self,
         memory_dir: str = "./memory",
         workspace_dir: str = "./workspace",
+        language: str | None = None,
     ) -> None:
         """初始化 MemoryManager.
 
         Args:
             memory_dir: 记忆文件存储目录.
             workspace_dir: 工作目录.
+            language: 记忆上下文语言 ("zh" 或 "en").
         """
         self.memory_dir = os.path.abspath(memory_dir)
         self.workspace_dir = os.path.abspath(workspace_dir)
+        self.language = "en" if language == "en" else "zh"
 
     def init_memory(self) -> None:
         """初始化记忆目录和默认文件.
@@ -72,15 +72,11 @@ class MemoryManager:
         # L1: 极简索引
         l1_path = os.path.join(self.memory_dir, "global_mem_insight.txt")
         if not os.path.exists(l1_path):
+            template = _asset_text(
+                f"global_mem_insight_template{self._lang_suffix()}.txt"
+            )
             with open(l1_path, "w", encoding="utf-8") as f:
-                f.write(
-                    "# [Global Memory Insight]\n"
-                    "需要时read L2 或 ls ../memory/ 查L3\n"
-                    "L0(META-SOP): memory_management_sop\n"
-                    "L2: 现空\n"
-                    "L3: (暂无)\n"
-                    "L4: L4_raw_sessions/ 历史会话\n"
-                )
+                f.write(template)
 
         # L4: 历史会话存档目录
         l4_dir = os.path.join(self.memory_dir, "L4_raw_sessions")
@@ -96,28 +92,26 @@ class MemoryManager:
             记忆上下文字符串，可直接拼接到系统提示词末尾.
             若 L1 文件不存在则返回仅含结构说明的字符串.
         """
-        parts: list[str] = []
-
-        # 工作目录信息
-        parts.append(f"cwd = {self.workspace_dir}")
-
-        # 记忆结构说明
-        rel_memory = self.memory_dir
-        parts.append(
-            _MEMORY_STRUCTURE_TEMPLATE.format(memory_dir=rel_memory)
-        )
+        prompt = "\n"
+        prompt += f"cwd = {self.workspace_dir} (./)\n"
+        prompt += "\n[Memory] (../memory)\n"
+        prompt += _asset_text(f"insight_fixed_structure{self._lang_suffix()}.txt")
+        prompt += "\n../memory/global_mem_insight.txt:\n"
 
         # L1 索引内容
         l1_path = os.path.join(self.memory_dir, "global_mem_insight.txt")
         if os.path.exists(l1_path):
             try:
                 with open(l1_path, "r", encoding="utf-8", errors="replace") as f:
-                    insight = f.read()
-                parts.append(f"{rel_memory}/global_mem_insight.txt:\n{insight}")
+                    prompt += f.read()
+                prompt += "\n"
             except (OSError, UnicodeDecodeError):
                 pass
 
-        return "\n".join(parts)
+        return prompt
+
+    def _lang_suffix(self) -> str:
+        return "_en" if self.language == "en" else ""
 
     def get_sop_path(self, sop_name: str) -> Optional[str]:
         """查找 SOP 文件的完整路径.

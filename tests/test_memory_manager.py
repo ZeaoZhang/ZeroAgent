@@ -2,8 +2,11 @@
 
 import os
 import tempfile
+from pathlib import Path
 
 from zero_agent.memory.manager import MemoryManager
+
+GA_ASSETS = Path(__file__).resolve().parents[2] / "GenericAgent" / "assets"
 
 
 class TestMemoryManager:
@@ -49,9 +52,19 @@ class TestMemoryManager:
             mgr.init_memory()
 
             ctx = mgr.get_global_memory_context()
-            assert "cwd =" in ctx
-            assert "CONSTITUTION" in ctx
-            assert "global_mem_insight.txt" in ctx
+            assert f"cwd = {os.path.join(tmp, 'workspace')} (./)" in ctx
+            assert "[Memory] (../memory)" in ctx
+            assert (
+                GA_ASSETS / "insight_fixed_structure.txt"
+            ).read_text(encoding="utf-8") in ctx
+            assert "../memory/global_mem_insight.txt:" in ctx
+
+            insight = (
+                Path(tmp) / "memory" / "global_mem_insight.txt"
+            ).read_text(encoding="utf-8")
+            assert insight == (
+                GA_ASSETS / "global_mem_insight_template.txt"
+            ).read_text(encoding="utf-8")
 
     def test_get_sop_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

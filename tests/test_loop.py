@@ -325,7 +325,7 @@ class TestAgentLoop:
         self,
         mock_handler: BaseHandler,
     ) -> None:
-        """下一轮消息使用标准 role=tool，不再携带自定义 tool_results 字段."""
+        """下一轮消息保持 GA 的 tool_results 字段，session 再标准化."""
         client = _make_recording_client([
             MockResponse(
                 content="",
@@ -353,9 +353,14 @@ class TestAgentLoop:
         assert exit_reason["result"] == "CURRENT_TASK_DONE"
         assert client.system == "system prompt"
         assert client.calls[0] == [{"role": "user", "content": "task"}]
-        assert [m["role"] for m in client.calls[1][:2]] == ["tool", "user"]
-        assert client.calls[1][0]["tool_call_id"] == "call_0"
-        assert "tool_results" not in client.calls[1][1]
+        assert len(client.calls[1]) == 1
+        msg = client.calls[1][0]
+        assert msg["role"] == "user"
+        assert "### [WORKING MEMORY]" in msg["content"]
+        assert "[USER]: task" in msg["content"]
+        assert msg["tool_results"] == [
+            {"tool_use_id": "call_0", "content": '{"result": "hello"}'}
+        ]
 
     def test_loop_records_initial_user_input_in_handler_history(
         self,
@@ -444,7 +449,7 @@ class TestAgentLoop:
         self,
         mock_handler: BaseHandler,
     ) -> None:
-        """多工具调用后的 provider payload 保留多个独立 tool result."""
+        """多工具调用后的 loop payload 保持 GA 的自定义 tool_results."""
         client = _make_recording_client([
             MockResponse(
                 content="",
@@ -476,13 +481,15 @@ class TestAgentLoop:
         exit_reason = _exhaust(loop.run("system prompt", "task"))
 
         assert exit_reason["result"] == "CURRENT_TASK_DONE"
-        assert [m["role"] for m in client.calls[1][:3]] == [
-            "tool",
-            "tool",
-            "user",
+        assert len(client.calls[1]) == 1
+        msg = client.calls[1][0]
+        assert msg["role"] == "user"
+        assert "### [WORKING MEMORY]" in msg["content"]
+        assert "[USER]: task" in msg["content"]
+        assert msg["tool_results"] == [
+            {"tool_use_id": "call_1", "content": '{"result": "a"}'},
+            {"tool_use_id": "call_2", "content": '{"result": "b"}'},
         ]
-        assert client.calls[1][0]["tool_call_id"] == "call_1"
-        assert client.calls[1][1]["tool_call_id"] == "call_2"
 
     def test_done_hook_extends_loop(self, mock_handler: BaseHandler) -> None:
         """_done_hooks 在任务声明完成时追加额外轮次."""

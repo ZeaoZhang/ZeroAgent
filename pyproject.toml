@@ -77,7 +77,13 @@ packages = [
     "*.png",
     "*.md",
 ]
-"zero_agent.assets" = ["code_run_header.py", "sys_prompt*.txt", "tmwd_cdp_bridge/*"]
+"zero_agent.assets" = [
+    "code_run_header.py",
+    "sys_prompt*.txt",
+    "insight_fixed_structure*.txt",
+    "global_mem_insight_template*.txt",
+    "tmwd_cdp_bridge/*",
+]
 "zero_agent.memory" = ["*.md", "*.py", "*.txt", "**/*.md", "**/*.py", "**/*.txt"]
 
 [tool.pytest.ini_options]

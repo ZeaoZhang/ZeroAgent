@@ -166,7 +166,8 @@ def test_completion_kwargs_include_provider_for_openai_compatible_backend() -> N
 
 
 def test_completion_kwargs_inject_tool_instruction_when_tools_mounted(monkeypatch) -> None:
-    monkeypatch.setenv("ZA_LANG", "en")
+    monkeypatch.delenv("ZA_LANG", raising=False)
+    monkeypatch.setenv("GA_LANG", "en")
     session = _make_session()
     tools = [
         {
@@ -191,14 +192,15 @@ def test_completion_kwargs_inject_tool_instruction_when_tools_mounted(monkeypatc
     system = kwargs["messages"][0]["content"]
     assert "system prompt" in system
     assert "Interaction Protocol" in system
-    assert "user's request is not yet complete" in system
+    assert "If you need to call tools" in system
     assert "<tool_use>" in system
     assert '"name":"file_read"' in system
     assert kwargs["tools"] == tools
 
 
 def test_completion_kwargs_repeats_short_tool_instruction_for_same_tools(monkeypatch) -> None:
-    monkeypatch.setenv("ZA_LANG", "en")
+    monkeypatch.delenv("ZA_LANG", raising=False)
+    monkeypatch.setenv("GA_LANG", "en")
     session = _make_session()
     tools = [
         {
@@ -224,7 +226,7 @@ def test_completion_kwargs_repeats_short_tool_instruction_for_same_tools(monkeyp
 
     system = kwargs["messages"][0]["content"]
     assert "Tools: still active" in system
-    assert "tool calls are required" in system
+    assert "**ready to call**" in system
     assert '"name":"code_run"' not in system
 
 

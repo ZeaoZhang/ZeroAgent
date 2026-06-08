@@ -353,36 +353,18 @@ class AgentLoop:
         next_prompt: str,
         tool_results: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Build provider-compatible messages for the next LLM turn.
+        """Build the same GA-shaped next-turn message payload.
 
-        GenericAgent carried tool results on a custom ``tool_results`` field.
-        LiteLLM expects standard chat messages, so each tool result becomes a
-        ``role=tool`` message before the user continuation.
+        LiteLLMSession normalizes this custom field into provider-native
+        ``role=tool`` messages before sending the API request.
         """
-        messages: List[Dict[str, Any]] = []
-        fallback_results: List[str] = []
-
-        for result in tool_results:
-            tool_use_id = str(result.get("tool_use_id") or "")
-            content = result.get("content", "")
-            if not isinstance(content, str):
-                content = str(content)
-            if tool_use_id:
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_use_id,
-                    "content": content,
-                })
-            else:
-                fallback_results.append(f"<tool_result>{content}</tool_result>")
-
-        continuation = next_prompt or ""
-        if fallback_results:
-            continuation = "\n".join(fallback_results + [continuation])
-        if continuation.strip() or not messages:
-            messages.append({"role": "user", "content": continuation})
-
-        return messages
+        return [
+            {
+                "role": "user",
+                "content": next_prompt,
+                "tool_results": tool_results,
+            }
+        ]
 
     def _consume_dispatch(self, gen: Generator) -> Generator[Any, None, StepOutcome]:
         """消费 dispatch() 返回的 generator，获取 StepOutcome.

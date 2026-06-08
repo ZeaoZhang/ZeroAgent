@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Dict, Generator, List, Optional
 
 from zero_agent.core.config import AgentConfig, load_default_config
@@ -18,46 +19,22 @@ from zero_agent.tools.registry import ToolRegistry
 from zero_agent.llm.factory import LLMFactory
 
 
-# 系统提示词模板
-_SYSTEM_PROMPT_ZH = """你是一个具备工具调用能力的 AI 助手，可以使用以下工具：
-- 代码执行 (code_run)
-- 文件操作 (file_read, file_write, file_patch)
-- 浏览器交互 (web_scan, web_execute_js)
-- 记忆管理 (update_working_checkpoint)
-
-### 行动规范（持续有效）
-每次回复（含工具调用轮）都先在回复文字中包含一个<summary></summary> 中输出极简单行（<30字）物理快照：上次结果新信息+本次意图。此内容进入长期工作记忆。
-
-**若用户需求未完成，必须进行工具调用！**
-
-在指定的工作目录中操作。逐步使用工具完成任务。
-任务完成时直接给出最终回复，无需再调用工具。
-需要用户输入时使用 ask_user 工具。
-每次回复中请包含 <summary>标签</summary> 简要概括本轮操作。
-
-当前日期: {date}
-工作目录: {workspace_dir}
+# 系统提示词模板 fallback：与 GenericAgent/assets/sys_prompt*.txt 保持等价。
+_SYSTEM_PROMPT_ZH = """# Role: 物理级全能执行者
+你拥有文件读写、脚本执行、用户浏览器JS注入、系统级干预的物理操作权限。禁止推诿"无法操作"——不空想，用工具探测。
+## 行动原则
+调用工具前先推演：当前阶段、上步结果是否符合预期、下步策略，必须在回复文本中用<summary>输出极简总结。
+- 探测优先：失败时先充分获取信息（日志/状态/上下文），关键信息存入工作记忆，再决定重试或换方案。不可逆操作先询问用户。
+- 失败升级：1次→读错误理解原因，2次→探测环境状态，3次→深度分析后换方案或问用户。禁止无新信息的重复操作。
 """
 
-_SYSTEM_PROMPT_EN = """You are a helpful AI assistant with access to tools for:
-- Code execution (code_run)
-- File operations (file_read, file_write, file_patch)
-- Browser interaction (web_scan, web_execute_js)
-- Memory management (update_working_checkpoint)
-
-### Action Protocol (always in effect)
-The reply body should first include a minimal one-line (<30 words) physical snapshot in <summary></summary>: new info from last result + current intent. This goes into long-term working memory.
-
-**If the user's request is not yet complete, tool calls are required!**
-
-Work in the designated workspace directory. Use tools to accomplish tasks step by step.
-When a task is complete, provide a final response without calling further tools.
-If you need user input, use the ask_user tool.
-Include a <summary>brief summary of this turn</summary> in every reply.
-
-Current date: {date}
-Working directory: {workspace_dir}
-"""
+_SYSTEM_PROMPT_EN = """# Role: Physical-Level Omnipotent Executor
+You have full physical access: file I/O, script execution, browser JS injection, and system-level intervention. Never deflect with "can't do it" — don't speculate, use tools to probe.
+Summarize and reply in user's language or follow user's prompt.
+## Action Principles
+Before each tool call, reason: current phase, whether the last result met expectations, and next strategy and <summary> in reply text of each turn.
+- Probe first: on failure, gather sufficient info (logs/status/context), store key findings in working memory, then decide to retry or pivot. Ask the user before irreversible operations.
+- Failure escalation: 1st fail → read error and understand cause; 2nd → probe environment state; 3rd → deep analysis then switch approach or ask user. Never repeat an action without new information."""
 
 
 class ZeroAgent:
@@ -117,6 +94,7 @@ class ZeroAgent:
         self.memory = MemoryManager(
             memory_dir=self.config.memory_dir,
             workspace_dir=self.config.workspace_dir,
+            language=self.config.resolved_language,
         )
 
         # 5. 运行时状态
@@ -354,44 +332,24 @@ class ZeroAgent:
         return "unknown"
 
     def _build_system_prompt(self) -> str:
-        """从配置和已注册工具构建默认系统提示词.
+        """构建与 GenericAgent 等价的默认系统提示词.
 
-        优先级:
-            1. config.prompt_file 指定的文件路径
-            2. zero_agent/assets/sys_prompt.txt（自动检测）
-            3. 代码中硬编码的默认常量（fallback）
-
-        根据 config.resolved_language 选择中英文模板.
-        包含日期、工作目录、可用工具列表、记忆上下文.
+        拼接顺序保持 GenericAgent.agentmain.get_system_prompt() 的语义:
+        资产文本 + Today 行 + 全局记忆上下文。
 
         Returns:
             系统提示词字符串.
         """
-        import datetime
-
         lang = self.config.resolved_language
-        tool_lang = self.config.resolved_tool_language
 
-        # 尝试从外部文件加载模板
         template = self._load_prompt_template(lang)
         if template is None:
-            # 回退到代码中的默认常量
             template = _SYSTEM_PROMPT_ZH if lang == "zh" else _SYSTEM_PROMPT_EN
 
-        tools_desc = self._generate_tools_description(tool_lang)
-        prompt = template.format(
-            date=datetime.date.today().strftime("%Y-%m-%d %a"),
-            workspace_dir=os.path.abspath(self.config.workspace_dir),
-        )
-        if tools_desc:
-            prompt += f"\n## Available Tools\n{tools_desc}"
+        prompt = template
+        prompt += f"\nToday: {time.strftime('%Y-%m-%d %a')}\n"
+        prompt += self.memory.get_global_memory_context()
 
-        # 注入记忆上下文
-        memory_ctx = self.memory.get_global_memory_context()
-        if memory_ctx:
-            prompt += f"\n\n[Memory]\n{memory_ctx}"
-
-        # 注入会话级额外系统提示词
         extra_sys = getattr(self.client, "extra_sys_prompt", "")
         if extra_sys:
             prompt += f"\n{extra_sys}"
