@@ -165,14 +165,29 @@ class AgentLoop:
             if not response.tool_calls:
                 tool_calls = [{"tool_name": "no_tool", "args": {}}]
             else:
-                tool_calls = [
-                    {
+                tool_calls = []
+                for i, tc in enumerate(response.tool_calls):
+                    raw_args = tc.function.arguments
+                    try:
+                        args = json.loads(raw_args)
+                    except json.JSONDecodeError as exc:
+                        args = {
+                            "msg": (
+                                "Failed to parse tool call JSON arguments: "
+                                f"{exc}. Raw: {raw_args[:200]}"
+                            )
+                        }
+                        tool_calls.append({
+                            "tool_name": "bad_json",
+                            "args": args,
+                            "id": tc.id or f"call_{i}",
+                        })
+                        continue
+                    tool_calls.append({
                         "tool_name": tc.function.name,
-                        "args": json.loads(tc.function.arguments),
+                        "args": args,
                         "id": tc.id or f"call_{i}",
-                    }
-                    for i, tc in enumerate(response.tool_calls)
-                ]
+                    })
 
             self._trigger_hook("llm_after", {
                 "turn": turn,
@@ -214,7 +229,7 @@ class AgentLoop:
                     exit_reason = {"result": "EXITED", "data": outcome.data}
                     break
 
-                if outcome.next_prompt is None:
+                if not outcome.next_prompt:
                     exit_reason = {
                         "result": "CURRENT_TASK_DONE",
                         "data": outcome.data,

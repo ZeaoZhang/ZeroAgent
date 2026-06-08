@@ -195,6 +195,90 @@ class TestAutoFailoverSessionFallback:
         assert response.content == "backup ok"
         assert session.is_fallback_active is True
 
+    def test_exception_fallback_does_not_duplicate_current_user_history(self) -> None:
+        """同轮异常 fallback 只迁移调用前历史，不重复当前 user 消息."""
+        primary = _make_session("primary")
+        backup = _make_session("backup1")
+        session = AutoFailoverSession(primary, backups=[backup])
+
+        def failing_chat(*_args, **_kwargs):
+            raise RuntimeError("primary down")
+
+        def backup_chat(messages, tools=None):
+            assert backup.history == []
+            yield "backup ok"
+            return MockResponse(content="backup ok")
+
+        primary.chat = failing_chat
+        backup.chat = backup_chat
+
+        chunks = list(
+            session.chat(messages=[{"role": "user", "content": "hi"}], tools=[])
+        )
+        assert any("backup1" in chunk for chunk in chunks)
+        assert session.name == "backup1"
+
+    def test_long_immediate_error_response_fallbacks_same_turn(self) -> None:
+        """长错误响应按 GA 规则同轮 fallback，不等到下一轮."""
+        primary = _make_session("primary")
+        backup = _make_session("backup1")
+        session = AutoFailoverSession(primary, backups=[backup])
+
+        def error_chat(*_args, **_kwargs):
+            if False:
+                yield ""
+            return MockResponse(content="!!!Error: backend failed " + ("x" * 200))
+
+        def backup_chat(messages, tools=None):
+            assert backup.history == []
+            yield "backup ok"
+            return MockResponse(content="backup ok")
+
+        primary.chat = error_chat
+        backup.chat = backup_chat
+
+        chunks = []
+        gen = session.chat(messages=[{"role": "user", "content": "hi"}], tools=[])
+        try:
+            while True:
+                chunks.append(next(gen))
+        except StopIteration as e:
+            response = e.value
+
+        assert any("backup1" in chunk for chunk in chunks)
+        assert response.content == "backup ok"
+        assert session.name == "backup1"
+
+    def test_partial_stream_interruption_switches_next_call_only(self) -> None:
+        """已流出部分内容的中断只切换下一轮，不重放当前轮."""
+        primary = _make_session("primary")
+        backup = _make_session("backup1")
+        session = AutoFailoverSession(primary, backups=[backup])
+
+        def interrupted_chat(*_args, **_kwargs):
+            yield "partial answer"
+            return MockResponse(
+                content="partial answer\n[!!! 流异常中断",
+                stop_reason="stream_interrupted",
+            )
+
+        backup.chat = MagicMock(side_effect=AssertionError("backup should not run"))
+        primary.chat = interrupted_chat
+
+        chunks = []
+        gen = session.chat(messages=[{"role": "user", "content": "hi"}], tools=[])
+        try:
+            while True:
+                chunks.append(next(gen))
+        except StopIteration as e:
+            response = e.value
+
+        assert "partial answer" in "".join(chunks)
+        assert response.stop_reason == "stream_interrupted"
+        assert session.name == "backup1"
+        assert session.is_fallback_active is True
+        assert backup.chat.call_count == 0
+
 
 class TestHealthProbe:
     """健康检查测试."""

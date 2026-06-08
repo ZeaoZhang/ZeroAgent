@@ -15,8 +15,7 @@ class StepOutcome:
     Attributes:
         data: 工具返回的结构化数据（dict / str / 任意值）.
         next_prompt: 下一轮 LLM 调用的 prompt.
-            None  → 任务完成，循环退出 (CURRENT_TASK_DONE).
-            ""    → 空 prompt，循环继续但上下文最小.
+            None/"" → 任务完成，循环退出 (CURRENT_TASK_DONE).
             其他   → 作为下一轮 user message 的 content.
         should_exit: True 则立即硬退出（用于 ask_user 等需要中断的场景）.
     """

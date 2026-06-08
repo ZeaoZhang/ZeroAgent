@@ -15,6 +15,10 @@ import litellm
 
 from zero_agent.core.config import LLMBackendConfig
 from zero_agent.core.exceptions import LLMError
+from zero_agent.core.interruption import (
+    append_interruption_marker,
+    classify_interruption,
+)
 from zero_agent.llm.base import MockResponse
 from zero_agent.llm.converters import msgs_claude_to_openai
 
@@ -220,9 +224,15 @@ class LiteLLMSession:
         if stream_interrupted:
             if not mock.content:
                 mock.content = ""
-            if "[!!! 流异常中断" not in mock.content:
-                mock.content += "\n[!!! 流异常中断"
+            mock.content = append_interruption_marker(mock.content, "incomplete")
             mock.stop_reason = "stream_interrupted"
+        else:
+            interruption = classify_interruption(mock)
+            if interruption:
+                mock.content = append_interruption_marker(
+                    mock.content,
+                    interruption.kind,
+                )
 
         # 如果流式解析丢失了 thinking 或 tool_calls，从累积数据补全
         if not mock.thinking and collected_thinking:
@@ -235,9 +245,10 @@ class LiteLLMSession:
                     function=MockFunction(name=tc["name"], arguments=tc["arguments"]),
                     id=tc["id"],
                 )
-                for tc in sorted(collected_tool_calls.values(), key=lambda x: list(collected_tool_calls.keys())[list(collected_tool_calls.values()).index(x)])
+                for _, tc in sorted(collected_tool_calls.items())
             ]
-            mock.stop_reason = "tool_use"
+            if not classify_interruption(mock):
+                mock.stop_reason = "tool_use"
 
         # 如果 litellm 未返回 tool_calls，尝试从文本中回退解析
         if not mock.tool_calls and collected_content:
@@ -255,7 +266,8 @@ class LiteLLMSession:
                     )
                     for tc in text_calls
                 ]
-                mock.stop_reason = "tool_use"
+                if not classify_interruption(mock):
+                    mock.stop_reason = "tool_use"
 
         # 将助手消息追加到历史
         self._record_usage(
@@ -283,6 +295,12 @@ class LiteLLMSession:
         response = litellm.completion(**kwargs)
 
         mock = MockResponse.from_litellm_response(response)
+        interruption = classify_interruption(mock)
+        if interruption:
+            mock.content = append_interruption_marker(
+                mock.content,
+                interruption.kind,
+            )
         yield mock.content
 
         # 文本回退：litellm 未返回 tool_calls 时尝试从文本解析
@@ -301,7 +319,8 @@ class LiteLLMSession:
                     )
                     for tc in text_calls
                 ]
-                mock.stop_reason = "tool_use"
+                if not classify_interruption(mock):
+                    mock.stop_reason = "tool_use"
 
         self._record_usage(getattr(response, "usage", None))
         self._record_assistant(mock)

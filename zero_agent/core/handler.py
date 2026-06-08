@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any, Dict, Generator, Optional
 
+from zero_agent.core.interruption import classify_interruption
 from zero_agent.core.types import StepOutcome
 from zero_agent.tools.registry import ToolRegistry
 
@@ -419,17 +420,9 @@ class BaseHandler:
                 "[System] Blank response, regenerate and tooluse"
             )
 
-        # 流异常中断
-        if "[!!! 流异常中断" in content[-100:] or "!!!Error:" in content[-100:]:
-            return self._retry_or_exit(
-                "[System] Incomplete response. Regenerate and tooluse."
-            )
-
-        # max_tokens 截断
-        if "max_tokens !!!]" in content[-100:]:
-            return self._retry_or_exit(
-                "[System] max_tokens limit reached. Use multi small steps to do it."
-            )
+        interruption = classify_interruption(response)
+        if interruption:
+            return self._retry_or_exit(interruption.retry_prompt)
 
         # Plan mode: 拦截未验证的完成声明
         plan_mode_complete_kw = [

@@ -289,6 +289,38 @@ class TestAgentLoop:
         exit_reason = _exhaust(gen)
         assert exit_reason["result"] == "CURRENT_TASK_DONE"
 
+    def test_empty_next_prompt_completes_like_ga(self, mock_handler: BaseHandler) -> None:
+        """空 next_prompt 应与 GA 一样直接视为任务完成."""
+        def do_empty(self, args, response):
+            yield "empty prompt\n"
+            return StepOutcome({"result": "ok"}, next_prompt="")
+
+        mock_handler.do_empty = do_empty.__get__(mock_handler)
+
+        client = _make_mock_client([
+            MockResponse(
+                content="",
+                tool_calls=[
+                    MockToolCall(
+                        function=MockFunction(name="empty", arguments="{}"),
+                        id="call_1",
+                    ),
+                ],
+            ),
+        ])
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=5,
+            verbose=False,
+        )
+
+        exit_reason = _exhaust(loop.run("sp", "task"))
+
+        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        assert client._call_count == 1
+
     def test_loop_sends_system_once_and_tool_results_as_tool_messages(
         self,
         mock_handler: BaseHandler,
@@ -377,6 +409,36 @@ class TestAgentLoop:
         assert exit_reason["result"] == "CURRENT_TASK_DONE"
         assert client.last_tools == ""
         assert client._last_tools_json == ""
+
+    def test_bad_json_tool_call_routes_to_bad_json_and_recovers(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        client = _make_mock_client([
+            MockResponse(
+                content="",
+                tool_calls=[
+                    MockToolCall(
+                        function=MockFunction(
+                            name="echo", arguments='{"message": "unterminated"',
+                        ),
+                        id="call_1",
+                    ),
+                ],
+            ),
+            MockResponse(content="Recovered."),
+        ])
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=5,
+            verbose=False,
+        )
+
+        exit_reason = _exhaust(loop.run("system prompt", "task"))
+
+        assert exit_reason["result"] == "CURRENT_TASK_DONE"
 
     def test_multi_tool_results_are_sent_as_separate_messages(
         self,

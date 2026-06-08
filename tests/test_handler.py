@@ -148,10 +148,27 @@ class TestBaseHandlerDoNoTool:
         assert result.next_prompt is not None
         assert "incomplete" in result.next_prompt.lower()
 
+    def test_long_immediate_error_retries(self, mock_handler: BaseHandler) -> None:
+        """长错误响应也由共享中断判定触发重试."""
+        content = "!!!Error: backend failed " + ("x" * 200)
+        gen = mock_handler.do_no_tool({}, MockResponse(content=content))
+        result = _exhaust(gen)
+        assert result.next_prompt is not None
+        assert "incomplete" in result.next_prompt.lower()
+
     def test_max_tokens_retries(self, mock_handler: BaseHandler) -> None:
         """max_tokens 截断触发重试."""
         content = "some text max_tokens !!!] in the last part"
         gen = mock_handler.do_no_tool({}, MockResponse(content=content))
+        result = _exhaust(gen)
+        assert result.next_prompt is not None
+        assert "max_tokens" in result.next_prompt.lower()
+
+    def test_length_stop_reason_retries(self, mock_handler: BaseHandler) -> None:
+        """stop_reason=length 也视为 max_tokens 类截断."""
+        gen = mock_handler.do_no_tool(
+            {}, MockResponse(content="partial answer", stop_reason="length")
+        )
         result = _exhaust(gen)
         assert result.next_prompt is not None
         assert "max_tokens" in result.next_prompt.lower()

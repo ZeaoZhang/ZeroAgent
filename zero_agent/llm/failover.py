@@ -16,6 +16,7 @@ from typing import Any, Dict, Generator, List, Optional
 
 from zero_agent.core.config import LLMBackendConfig
 from zero_agent.core.exceptions import LLMError
+from zero_agent.core.interruption import classify_interruption
 from zero_agent.llm.base import MockResponse
 from zero_agent.llm.sessions import LiteLLMSession
 
@@ -129,35 +130,51 @@ class AutoFailoverSession:
             MockResponse 实例.
         """
         self._try_health_check()
+        active = self._active
+        history_len = len(active.history)
 
         try:
-            mock = yield from self._active.chat(messages=messages, tools=tools)
-            # 流中断/错误检测：即使未抛异常，content 中也可能包含流中断标记
-            # 与 GenericAgent MixinSession 对齐：检测到部分失败时主动切换
-            content = getattr(mock, "content", "") or ""
-            if ("[!!! 流异常中断" in content or "!!!Error:" in content):
-                if self.backups:
+            mock = yield from active.chat(messages=messages, tools=tools)
+            interruption = classify_interruption(mock)
+            if interruption and interruption.kind == "incomplete" and self.backups:
+                content = getattr(mock, "content", "") or ""
+                if self._is_immediate_error(content):
                     yield (
-                        f"\n[Fallback] 检测到流中断 ({self._active.name})，"
+                        f"\n[Fallback] 检测到后端错误 ({active.name})，"
                         f"切换到备用后端...\n"
                     )
                     return (
                         yield from self._fallback(
                             messages, tools,
-                            RuntimeError(f"stream_interrupted: {content[-200:]}")
+                            RuntimeError(f"stream_error: {content[-200:]}"),
+                            source_history_len=history_len,
                         )
+                    )
+                switched = self._switch_after_partial_interruption()
+                if switched:
+                    yield (
+                        f"\n[Fallback] 检测到流中断 ({active.name})，"
+                        f"下一轮将使用备用后端 {self._active.name}。\n"
                     )
             return mock
         except Exception as primary_error:
             if not self.backups:
                 raise
-            return (yield from self._fallback(messages, tools, primary_error))
+            return (
+                yield from self._fallback(
+                    messages,
+                    tools,
+                    primary_error,
+                    source_history_len=history_len,
+                )
+            )
 
     def _fallback(
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]],
         original_error: Exception,
+        source_history_len: Optional[int] = None,
     ) -> Generator[str, None, MockResponse]:
         """执行故障转移，依次尝试备用 session（含指数退避）.
 
@@ -191,7 +208,11 @@ class AutoFailoverSession:
         for i, backup in enumerate(self.backups):
             try:
                 with self._lock:
-                    self._migrate_history(self._active, backup)
+                    self._migrate_history(
+                        self._active,
+                        backup,
+                        upto=source_history_len,
+                    )
                     backup.system = self._active.system
                     self._active = backup
                     self._active_name = backup.name
@@ -215,6 +236,41 @@ class AutoFailoverSession:
         raise LLMError(
             f"所有 LLM 后端均不可用（共 {1 + len(self.backups)} 个）"
         ) from last_error
+
+    @staticmethod
+    def _is_immediate_error(content: str) -> bool:
+        """Return True for pre-stream errors that GA retries on another backend."""
+
+        return (content or "").lstrip().startswith(("!!!Error:", "[Error:"))
+
+    def _switch_after_partial_interruption(self) -> bool:
+        """Switch active backend for the next call without replaying this turn."""
+
+        sessions = [self.primary] + self.backups
+        if len(sessions) < 2:
+            return False
+        try:
+            current_idx = sessions.index(self._active)
+        except ValueError:
+            current_idx = 0
+        target = sessions[(current_idx + 1) % len(sessions)]
+        if target is self._active:
+            return False
+
+        with self._lock:
+            self._fallback_count += 1
+            self._is_fallback_active = target is not self.primary
+            self._migrate_history(self._active, target)
+            target.system = self._active.system
+            self._active = target
+            self._active_name = target.name
+
+        _logger.warning(
+            "后端 (%s) 流式部分中断，下一轮切换至 %s",
+            sessions[current_idx].name,
+            target.name,
+        )
+        return True
 
     def _try_health_check(self) -> None:
         """如果已 fallback 且超过健康检查间隔，探测主 session.
@@ -277,6 +333,7 @@ class AutoFailoverSession:
     def _migrate_history(
         source: LiteLLMSession,
         target: LiteLLMSession,
+        upto: Optional[int] = None,
     ) -> None:
         """将对话历史从源 session 迁移到目标 session.
 
@@ -284,7 +341,8 @@ class AutoFailoverSession:
             source: 源 LiteLLMSession.
             target: 目标 LiteLLMSession.
         """
-        target.history = list(source.history)
+        history = source.history if upto is None else source.history[:upto]
+        target.history = list(history)
         target.system = source.system
 
     @property

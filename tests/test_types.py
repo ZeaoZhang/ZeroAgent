@@ -13,7 +13,7 @@ class TestStepOutcome:
         assert outcome.should_exit is False
 
     def test_next_prompt_empty_string(self) -> None:
-        """空字符串 next_prompt 表示继续但上下文最小."""
+        """空字符串 next_prompt 由 loop 解释为当前任务完成."""
         outcome = StepOutcome(data={}, next_prompt="")
         assert outcome.next_prompt == ""
         assert outcome.should_exit is False
