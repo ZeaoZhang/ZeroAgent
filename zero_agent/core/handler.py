@@ -522,7 +522,7 @@ class BaseHandler:
 
         首个工具调用（_index == 0）时注入完整锚点上下文:
             压缩早期历史 + 最近 30 条摘要 + 工作记忆.
-        后续工具调用仅注入工作记忆.
+        后续工具调用与 GenericAgent 对齐，仅返回空白续写提示.
 
         Args:
             args: 工具参数，可能包含 _index 等元信息.
@@ -532,28 +532,9 @@ class BaseHandler:
         """
         skip = args.get("_index", 0) > 0
 
-        if not skip:
-            # 完整锚点：压缩历史 + 最近摘要 + 工作记忆
-            anchor = self._build_anchor_prompt()
-            return anchor + self._tl(
-                "\n\n[System] Continue with the next step.",
-                "\n\n[System] Continue with the next step.",
-            )
-
-        # 后续工具调用：仅工作记忆
-        parts: list[str] = []
-        if self.working.get("key_info"):
-            parts.append(
-                f"<key_info>{self.working['key_info']}</key_info>"
-            )
-        if self.working.get("related_sop"):
-            parts.append(
-                self._tl(
-                    f"有不清晰的地方请再次读取{self.working['related_sop']}",
-                    f"If unclear, please re-read {self.working['related_sop']}",
-                )
-            )
-        return "\n\n".join(parts) if parts else "\n"
+        if skip:
+            return "\n"
+        return self._build_anchor_prompt()
 
     def _build_anchor_prompt(self) -> str:
         """构建锚点 prompt：压缩早期历史 + 最近摘要 + 工作记忆.
@@ -565,39 +546,21 @@ class BaseHandler:
             格式化的锚点 prompt 字符串.
         """
         WINDOW = 30
-        parts: list[str] = ["\n### [WORKING MEMORY]"]
         h = self.history_info
-
+        earlier = ""
         if len(h) > WINDOW:
-            earlier = self._fold_history(h[:-WINDOW])
-            if earlier:
-                parts.append(
-                    f"<earlier_context>\n{earlier}\n</earlier_context>"
-                )
-
-        recent = "\n".join(h[-WINDOW:])
-        parts.append(f"<history>\n{recent}\n</history>")
-
-        parts.append(
-            self._tl(
-                f"Current turn: {self.current_turn}",
-                f"Current turn: {self.current_turn}",
+            earlier = (
+                f"<earlier_context>\n{self._fold_history(h[:-WINDOW])}"
+                "\n</earlier_context>\n"
             )
-        )
-
+        h_str = "\n".join(h[-WINDOW:])
+        prompt = f"\n### [WORKING MEMORY]\n{earlier}<history>\n{h_str}\n</history>"
+        prompt += f"\nCurrent turn: {self.current_turn}\n"
         if self.working.get("key_info"):
-            parts.append(
-                f"<key_info>{self.working['key_info']}</key_info>"
-            )
+            prompt += f"\n<key_info>{self.working.get('key_info')}</key_info>"
         if self.working.get("related_sop"):
-            parts.append(
-                self._tl(
-                    f"有不清晰的地方请再次读取{self.working['related_sop']}",
-                    f"If unclear, please re-read {self.working['related_sop']}",
-                )
-            )
-
-        return "\n".join(parts)
+            prompt += f"\n有不清晰的地方请再次读取{self.working.get('related_sop')}"
+        return prompt
 
     @staticmethod
     def _fold_history(lines: list) -> str:
@@ -731,7 +694,7 @@ class BaseHandler:
             if self.parent is not None and hasattr(self.parent, "memory"):
                 memory_ctx = self.parent.memory.get_global_memory_context()
                 if memory_ctx:
-                    next_prompt += f"\n\n[Memory Refresh]\n{memory_ctx}"
+                    next_prompt += "\n" + memory_ctx
 
         # ─── 3.5 Plan Mode 提示 ───
         if plan_active:

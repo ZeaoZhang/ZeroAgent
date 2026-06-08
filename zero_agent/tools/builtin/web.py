@@ -15,6 +15,7 @@ from importlib import resources
 from typing import Any, Dict, Generator, Optional
 
 from zero_agent.core.config import AgentConfig
+from zero_agent.core.types import StepOutcome
 from zero_agent.tools.registry import ToolRegistry
 from zero_agent.utils.text import smart_format, format_error
 
@@ -263,15 +264,9 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
     registry.register(ToolDefinition(
         name="web_scan",
         description=_t(
-            "获取浏览器标签页列表和当前页面简化 HTML 内容。"
-            "简化过程会过滤边栏、浮动元素等非主体内容。"
-            "应优先使用 web_execute_js 进行精细操作，仅在需要全量观察时使用此工具。"
-            "tabs_only=true 时仅返回标签页列表，不获取 HTML（节省 token）。",
-            "Get the browser tab list and simplified HTML content of the current page. "
-            "The simplification process filters out sidebars, floating elements, "
-            "and other non-body content. Prefer web_execute_js for fine-grained "
-            "operations; use this tool only for full-page observation. "
-            "tabs_only=true returns only the tab list without HTML (saves tokens).",
+            "获取当前页面的简化HTML内容和标签页列表。会移除隐藏/浮动/被遮盖的元素。切换页面后一般应先调用查看",
+            "Get simplified HTML and tab list. Removes hidden/floating/covered elements. "
+            "Call after switching pages",
             lang,
         ),
         parameters={
@@ -280,24 +275,24 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
                 "tabs_only": {
                     "type": "boolean",
                     "description": _t(
-                        "仅返回标签页列表，不获取 HTML 内容",
-                        "Return only tab list, do not fetch HTML content",
+                        "仅返回标签页列表和当前标签信息，不获取HTML内容",
+                        "Show tab list only, no HTML",
                         lang,
                     ),
                 },
                 "switch_tab_id": {
                     "type": "string",
                     "description": _t(
-                        "扫描前切换到指定标签页 ID",
-                        "Switch to the specified tab ID before scanning",
+                        "可选的标签页 ID。如果提供，系统将在扫描前切换到该标签页",
+                        "[Optional] Tab ID to switch to",
                         lang,
                     ),
                 },
                 "text_only": {
                     "type": "boolean",
                     "description": _t(
-                        "仅提取文本内容，不保留 HTML 结构",
-                        "Extract text only, do not preserve HTML structure",
+                        "只要纯文本不要HTML",
+                        "Plain text only, no HTML",
                         lang,
                     ),
                 },
@@ -310,13 +305,11 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
     registry.register(ToolDefinition(
         name="web_execute_js",
         description=_t(
-            "在浏览器中执行 JavaScript 代码并捕获结果和页面变化。"
-            "这是浏览器交互的优先使用工具，可以实现对浏览器的完全控制。"
-            "支持将结果保存到文件供后续读取分析。",
-            "Execute JavaScript code in the browser and capture results "
-            "and page changes. This is the preferred tool for browser "
-            "interaction, providing complete control over the browser. "
-            "Supports saving results to a file for later analysis.",
+            "执行JS。支持Multi-call，用不同switch_tab_id并行操作多标签页。"
+            "禁止猜测，准确操作以减少 web_scan 调用。无script参数时执行正文 ```javascript 块，以免转义",
+            "Execute JS. Multi-call OK with different switch_tab_id. No guessing. "
+            "Act accurately to reduce web_scan calls. Execute JS in ```javascript "
+            "blocks if no script arg, prefer to avoid escaping",
             lang,
         ),
         parameters={
@@ -325,32 +318,32 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
                 "script": {
                     "type": "string",
                     "description": _t(
-                        "待执行的 JavaScript 代码",
-                        "JavaScript code to execute",
-                        lang,
-                    ),
-                },
-                "switch_tab_id": {
-                    "type": "string",
-                    "description": _t(
-                        "执行前切换到指定标签页 ID",
-                        "Switch to the specified tab ID before execution",
+                        "[Optional] JS代码或路径。为免转义建议留空，改用正文代码块（与此参数互斥）",
+                        "[Mutually exclusive] JS code or script path. NEVER use this param when use reply code block",
                         lang,
                     ),
                 },
                 "save_to_file": {
                     "type": "string",
                     "description": _t(
-                        "将 js_return 结果保存到指定文件路径",
-                        "Save the js_return result to the specified file path",
+                        "结果存文件，适合返回值较长时",
+                        "file path; **only** for long result",
                         lang,
                     ),
                 },
                 "no_monitor": {
                     "type": "boolean",
                     "description": _t(
-                        "不监控页面变化",
-                        "Do not monitor page changes",
+                        "跳过页面变更监控，省2-3秒。仅在纯读取信息时设置，页面操作时不要设置",
+                        "Skip page change monitoring, saves 2-3s. Only for reads, not for page actions",
+                        lang,
+                    ),
+                },
+                "switch_tab_id": {
+                    "type": "string",
+                    "description": _t(
+                        "可选的标签页 ID，切换到该标签页执行",
+                        "[Optional] Tab ID to switch to before executing",
                         lang,
                     ),
                 },
@@ -367,7 +360,7 @@ def _make_web_scan_handler(config: AgentConfig):
         args: Dict[str, Any],
         _response: Any,
         handler: Any,
-    ) -> Generator[str, None, dict]:
+    ) -> Generator[str, None, dict | StepOutcome]:
         tabs_only = args.get("tabs_only", False)
         switch_tab_id = args.get("switch_tab_id")
         text_only = args.get("text_only", False)
@@ -387,9 +380,9 @@ def _make_web_scan_handler(config: AgentConfig):
             import json
             output = json.dumps(result, ensure_ascii=False)
             output += f"\n```html\n{content}\n```"
-            return {"status": "success", "output": output}
+            return StepOutcome(output, next_prompt="\n")
 
-        return result
+        return StepOutcome(result, next_prompt="\n")
     return _handler
 
 
@@ -399,7 +392,7 @@ def _make_web_execute_js_handler(config: AgentConfig):
         args: Dict[str, Any],
         _response: Any,
         handler: Any,
-    ) -> Generator[str, None, dict]:
+    ) -> Generator[str, None, dict | StepOutcome]:
         script = args.get("script", "")
         if not script:
             # 回退: 从 LLM 响应提取 JavaScript 代码块
@@ -408,7 +401,10 @@ def _make_web_execute_js_handler(config: AgentConfig):
             # 二级回退: 从响应提取任意代码块
             script = handler._extract_code_block(_response)
         if not script:
-            return {"status": "error", "msg": "缺少 script 参数"}
+            return StepOutcome(
+                "[Error] Script missing. Use ```javascript block or 'script' arg.",
+                next_prompt="\n",
+            )
 
         import os
         # 支持从工作目录读取脚本文件，兼容 GenericAgent 行为。
@@ -450,7 +446,9 @@ def _make_web_execute_js_handler(config: AgentConfig):
         yield f"JS 执行结果:\n{show}\n"
 
         maxlen = 8000 // max(args.get("_tool_num", 1), 1)
-        if "js_return" in result and isinstance(result["js_return"], str):
-            result["js_return"] = smart_format(result["js_return"], max_str_len=maxlen)
-        return result
+        result_json = json.dumps(result, ensure_ascii=False)
+        return StepOutcome(
+            smart_format(result_json, max_str_len=maxlen),
+            next_prompt=handler._default_next_prompt(args),
+        )
     return _handler

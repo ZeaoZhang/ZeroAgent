@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Generator, Optional
 
 from zero_agent.core.config import AgentConfig
+from zero_agent.core.types import StepOutcome
 from zero_agent.tools.registry import ToolRegistry
 from zero_agent.utils.files import expand_file_refs
 from zero_agent.utils.text import smart_format
@@ -207,13 +208,8 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
     registry.register(ToolDefinition(
         name="file_read",
         description=_t(
-            "读取文件内容。支持从指定行开始读取、关键词搜索（忽略大小写，"
-            "返回第一个匹配行附近内容）、行号显示。"
-            "适用于查看代码、日志、配置文件等文本文件。",
-            "Read file contents. Supports reading from a specific line, "
-            "keyword search (case-insensitive, returns content around "
-            "the first match), and line number display. "
-            "Suitable for viewing code, logs, config files, and other text files.",
+            "读取文件内容。建议在修改文件前先读取，以确保获取最新的上下文和行号。支持分页读取或关键字搜索",
+            "Read file. Read before modify for latest context and line numbers",
             lang,
         ),
         parameters={
@@ -222,42 +218,44 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
                 "path": {
                     "type": "string",
                     "description": _t(
-                        "文件路径（相对或绝对）",
-                        "File path (relative or absolute)",
+                        "文件相对或绝对路径",
+                        "Relative or absolute",
                         lang,
                     ),
                 },
                 "start": {
                     "type": "integer",
                     "description": _t(
-                        "起始行号，默认 1",
-                        "Starting line number, default 1",
-                        lang,
-                    ),
-                },
-                "keyword": {
-                    "type": "string",
-                    "description": _t(
-                        "搜索关键词（忽略大小写），返回匹配行附近内容",
-                        "Search keyword (case-insensitive), returns content around matching line",
+                        "起始行号（从 1 开始）",
+                        "Start line number (1-based)",
                         lang,
                     ),
                 },
                 "count": {
                     "type": "integer",
                     "description": _t(
-                        "最大返回行数，默认 200",
-                        "Maximum lines to return, default 200",
+                        "读取的行数",
+                        "Number of lines to read",
+                        lang,
+                    ),
+                    "default": 200,
+                },
+                "keyword": {
+                    "type": "string",
+                    "description": _t(
+                        "可选搜索关键字。如果提供，将返回第一个匹配项（忽略大小写）及其周边的内容",
+                        "[Optional] If provided, returns first match (case-insensitive) with context",
                         lang,
                     ),
                 },
                 "show_linenos": {
                     "type": "boolean",
                     "description": _t(
-                        "是否显示行号前缀，默认 true",
-                        "Whether to show line number prefixes, default true",
+                        "是否显示行号，建议开启以辅助 file_patch 定位",
+                        "Show line numbers",
                         lang,
                     ),
+                    "default": True,
                 },
             },
         },
@@ -266,60 +264,13 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
     ))
 
     registry.register(ToolDefinition(
-        name="file_write",
-        description=_t(
-            "创建或覆盖写入文件。适用于创建新文件或整体重写。"
-            "精细的局部修改请使用 file_patch。"
-            "支持 overwrite / append / prepend 三种写入模式。",
-            "Create or overwrite a file. Suitable for new files or "
-            "full rewrites. For precise local modifications, use file_patch. "
-            "Supports overwrite / append / prepend write modes.",
-            lang,
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": _t(
-                        "文件路径（相对或绝对）",
-                        "File path (relative or absolute)",
-                        lang,
-                    ),
-                },
-                "content": {
-                    "type": "string",
-                    "description": _t(
-                        "要写入的文件内容",
-                        "File content to write",
-                        lang,
-                    ),
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["overwrite", "append", "prepend"],
-                    "description": _t(
-                        "写入模式: overwrite(覆盖,默认) / append(追加) / prepend(前置)",
-                        "Write mode: overwrite(default) / append / prepend",
-                        lang,
-                    ),
-                },
-            },
-        },
-        handler=_make_file_write_handler(config),
-        category="file",
-    ))
-
-    registry.register(ToolDefinition(
         name="file_patch",
         description=_t(
-            "在文件中精准替换唯一的文本块。"
-            "old_content 必须在文件中恰好出现一次，否则操作失败。"
-            "适用于小幅局部修改，不适合大范围重写。",
-            "Precisely replace a unique text block in a file. "
-            "old_content must appear exactly once in the file, "
-            "otherwise the operation fails. "
-            "Suitable for small local modifications, not for large rewrites.",
+            "精细化局部文件修改。在文件中寻找唯一的 old_content 块并替换为 new_content。"
+            "要求 old_content 必须在文件中唯一存在，且空格、缩进、换行必须与原文件完全一致。"
+            "如果匹配失败，请使用 file_read 重新确认文件内容",
+            "Replace unique old_content with new_content. Exact match required "
+            "(whitespace/indentation). On failure, file_read to recheck",
             lang,
         ),
         parameters={
@@ -327,31 +278,60 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": _t(
-                        "文件路径（相对或绝对）",
-                        "File path (relative or absolute)",
-                        lang,
-                    ),
+                    "description": _t("文件路径", "File path", lang),
                 },
                 "old_content": {
                     "type": "string",
                     "description": _t(
-                        "待替换的旧文本块，必须在文件中唯一匹配",
-                        "Old text block to replace; must match uniquely in the file",
+                        "文件中需要被替换的原始文本块（需确保唯一性）",
+                        "Original text block to replace (must be unique)",
                         lang,
                     ),
                 },
                 "new_content": {
                     "type": "string",
                     "description": _t(
-                        "替换后的新文本块",
-                        "New text block to replace with",
+                        "替换后的新文本内容。支持 {{file:路径:起始行:结束行}} 语法引用文件内容，写入前自动展开",
+                        "New content. Supports {{file:path:startLine:endLine}} to ref file lines, auto-expanded",
                         lang,
                     ),
                 },
             },
         },
         handler=_make_file_patch_handler(config),
+        category="file",
+    ))
+
+    registry.register(ToolDefinition(
+        name="file_write",
+        description=_t(
+            "用于文件的新建、全量覆盖或追加写入。对于精细的代码修改，应优先使用 file_patch。"
+            "写入内容支持 {{file:路径:起始行:结束行}} 语法引用文件片段，写入前自动展开",
+            "Create/overwrite/append files. HUGE edits ONLY. Supports "
+            "{{file:path:startLine:endLine}}, auto-expanded",
+            lang,
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": _t("文件路径", "File path", lang),
+                },
+                "content": {"type": "string"},
+                "mode": {
+                    "type": "string",
+                    "enum": ["overwrite", "append", "prepend"],
+                    "description": _t(
+                        "写入模式覆盖、追加或在开头追加",
+                        "Write mode",
+                        lang,
+                    ),
+                    "default": "overwrite",
+                },
+            },
+        },
+        handler=_make_file_write_handler(config),
         category="file",
     ))
 
@@ -389,7 +369,7 @@ def _make_file_read_handler(config: AgentConfig):
         args: Dict[str, Any],
         _response: Any,
         handler: Any,
-    ) -> Generator[str, None, str]:
+    ) -> Generator[str, None, str | StepOutcome]:
         path = _resolve_path(args.get("path", ""), config)
         yield f"[Action] Reading file: {path}\n"
         start = args.get("start", 1)
@@ -404,16 +384,22 @@ def _make_file_read_handler(config: AgentConfig):
             result = "（以下返回格式为：行号|内容）\n" + result
         if " ... [TRUNCATED]" in result:
             result += "\n\n（某些行被截断，如需完整内容可改用 code_run 读取）"
+        next_prompt = None
         # SOP 读取提示
         if _is_under_dir(path, config.memory_dir) and not result.startswith("Error:"):
             from zero_agent.utils.memory_stats import log_memory_access
             log_memory_access(path, stats_dir=config.memory_dir)
-            result += (
-                "\n\n[SYSTEM TIPS] 请严格遵循已读取的 SOP 内容执行对应操作，"
-                "切勿自行发挥或偏离文档指引。"
+            next_prompt = handler._default_next_prompt(args) + (
+                "\n[SYSTEM TIPS] 正在读取记忆或SOP文件，若决定按sop执行请提取"
+                "sop中的关键点（特别是靠后的）update working memory."
             )
         maxlen = 15000 // max(args.get("_tool_num", 1), 1)
-        return smart_format(result, max_str_len=maxlen, omit_str="\n\n[omitted long content]\n\n")
+        result = smart_format(
+            result, max_str_len=maxlen, omit_str="\n\n[omitted long content]\n\n"
+        )
+        if next_prompt is not None:
+            return StepOutcome(result, next_prompt=next_prompt)
+        return result
     return _handler
 
 
@@ -437,17 +423,16 @@ def _make_file_write_handler(config: AgentConfig):
             # 二级回退: 从响应中提取代码块
             content = handler._extract_code_block(_response)
         if not content:
-            # 三级回退: 如果响应有文本但没有工具调用标签，
-            # 可能是 LLM 直接把内容放在了正文中
-            resp_content = getattr(_response, "content", "") or ""
-            resp_thinking = getattr(_response, "thinking", "") or ""
-            if resp_content.strip() and not resp_content.strip().startswith("<"):
-                content = resp_content.strip()
-            elif resp_thinking.strip() and not resp_thinking.strip().startswith("<"):
-                content = resp_thinking.strip()
-        if not content:
             yield "[Status] ERR 失败: 缺少 content 参数\n"
-            return {"status": "error", "msg": "缺少 content 参数"}
+            return {
+                "status": "error",
+                "msg": (
+                    "No content found. Blank is not supported. Put content inside "
+                    "<file_content>...</file_content> tags in your reply body "
+                    "before call file_write."
+                ),
+                "_za_next_prompt": "\n",
+            }
 
         try:
             content = expand_file_refs(content, base_dir=config.workspace_dir)
@@ -463,7 +448,7 @@ def _make_file_write_handler(config: AgentConfig):
             return {"status": "success", "writed_bytes": len(content)}
         except Exception as e:
             yield f"[Status] ERR 写入异常: {str(e)}\n"
-            return {"status": "error", "msg": str(e)}
+            return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
     return _handler
 
 
@@ -482,7 +467,7 @@ def _make_file_patch_handler(config: AgentConfig):
             new_content = expand_file_refs(new_content, base_dir=config.workspace_dir)
         except ValueError as e:
             yield f"[Status] ERR 引用展开失败: {e}\n"
-            return {"status": "error", "msg": str(e)}
+            return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
         result = file_patch(path, old_content, new_content)
         yield f"\n{str(result)}\n"
         return result

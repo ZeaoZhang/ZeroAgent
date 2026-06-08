@@ -53,13 +53,8 @@ def register_user_tools(registry: ToolRegistry, config: AgentConfig) -> None:
     registry.register(ToolDefinition(
         name="ask_user",
         description=_t(
-            "向用户提问以获取信息、确认操作或做出选择。"
-            "当任务需要人工判断、补充信息或确认敏感操作时调用。"
-            "调用后 agent 循环将中断，等待用户回复后继续。",
-            "Ask the user a question to get information, confirm an action, "
-            "or make a choice. Call this when the task requires human judgment, "
-            "additional input, or confirmation of sensitive operations. "
-            "The agent loop will pause and wait for the user's reply.",
+            "当需要用户决策、提供额外信息或遇到无法自动解决的阻碍时，调用此工具中断任务并提问",
+            "Interrupt task to ask user when needing decisions, extra info, or facing unresolvable blockers",
             lang,
         ),
         parameters={
@@ -68,8 +63,8 @@ def register_user_tools(registry: ToolRegistry, config: AgentConfig) -> None:
                 "question": {
                     "type": "string",
                     "description": _t(
-                        "向用户提出的问题",
-                        "The question to ask the user",
+                        "向用户提出的明确问题",
+                        "Question for the user",
                         lang,
                     ),
                 },
@@ -77,8 +72,8 @@ def register_user_tools(registry: ToolRegistry, config: AgentConfig) -> None:
                     "type": "array",
                     "items": {"type": "string"},
                     "description": _t(
-                        "可选的候选项列表，供用户从中选择",
-                        "Optional list of choices for the user to pick from",
+                        "提供给用户的可选快捷选项列表",
+                        "Optional quick-select choices for the user",
                         lang,
                     ),
                 },

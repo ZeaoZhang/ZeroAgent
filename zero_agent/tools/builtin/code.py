@@ -18,7 +18,7 @@ from importlib import resources
 from typing import Any, Dict, Generator, List, Optional
 
 from zero_agent.core.config import AgentConfig
-from zero_agent.core.exceptions import ToolError
+from zero_agent.core.types import StepOutcome
 from zero_agent.tools.registry import ToolRegistry
 from zero_agent.utils.text import smart_format
 
@@ -201,66 +201,52 @@ def register_code_tools(registry: ToolRegistry, config: AgentConfig) -> None:
     registry.register(ToolDefinition(
         name="code_run",
         description=_t(
-            "在隔离子进程中执行 Python 或 Shell 代码。"
-            "Python 模式 (type=python): 将代码写入临时 .py 文件后执行，适合多行复杂脚本。"
-            "Bash 模式 (type=bash): 通过 bash -c 执行，适合单行系统命令。"
-            "PowerShell 模式 (type=powershell): Windows PowerShell 命令。",
-            "Execute Python or Shell code in an isolated subprocess. "
-            "Python mode (type=python): writes code to a temp .py file and runs it, "
-            "suited for multi-line complex scripts. "
-            "Bash mode (type=bash): runs via bash -c, suited for one-line system commands. "
-            "PowerShell mode (type=powershell): Windows PowerShell commands.",
+            "代码执行器。优先使用python。支持Multi-call，并行时用script参数。"
+            "无script参数时正文代码块会被执行，单次调用优先使用以免转义。禁硬编码大量数据",
+            "Code executor. Prefer python. Multi-call OK, use script param. "
+            "Reply code block is executed if no script arg; prefer for single call "
+            "to avoid escaping. No hardcoding bulk data",
             lang,
         ),
         parameters={
             "type": "object",
             "properties": {
-                "type": {
-                    "type": "string",
-                    "enum": ["python", "bash", "powershell"],
-                    "description": _t(
-                        "代码类型: python(默认) / bash / powershell",
-                        "Code type: python(default) / bash / powershell",
-                        lang,
-                    ),
-                },
                 "script": {
                     "type": "string",
                     "description": _t(
-                        "[互斥] 代码文本。使用回复代码块时不要传此参数。",
-                        "[Mutually exclusive] Code text. Do not use when providing a reply code block.",
+                        "[Optional] 要执行的代码。为免转义建议留空，改用正文代码块（与此参数互斥）",
+                        "[Mutually exclusive] NEVER use this param when use reply code block.",
                         lang,
                     ),
                 },
-                "code": {
+                "type": {
                     "type": "string",
-                    "description": _t(
-                        "script 的兼容别名。优先使用 script 或回复代码块。",
-                        "Compatibility alias for script. Prefer script or a reply code block.",
-                        lang,
-                    ),
+                    "enum": ["python", "powershell"],
+                    "description": _t("代码类型", "Code type", lang),
+                    "default": "python",
                 },
                 "timeout": {
                     "type": "integer",
                     "description": _t(
-                        "执行超时秒数，默认 60",
-                        "Execution timeout in seconds, default 60",
+                        "执行超时时间（秒）",
+                        "in seconds",
                         lang,
                     ),
+                    "default": 60,
                 },
                 "cwd": {
                     "type": "string",
                     "description": _t(
-                        "子进程工作目录路径",
-                        "Working directory path for the subprocess",
+                        "工作目录，默认为当前工作目录",
+                        "Working directory, defaults to cwd",
                         lang,
                     ),
                 },
                 "inline_eval": {
                     "type": "boolean",
                     "description": _t(
-                        "仅在明确需要进程内自省调试时使用。",
-                        "Use only when explicitly needed for in-process introspection/debugging.",
+                        "不允许使用除非明确要求",
+                        "DO NOT USE except explicitly specified.",
                         lang,
                     ),
                 },
@@ -289,12 +275,15 @@ def _make_code_run_handler(config: AgentConfig):
         handler: Any,
     ) -> Generator[str, None, dict]:
         code_type = args.get("type", "python")
-        code = args.get("code") or args.get("script", "")
+        code = args.get("script", "")
         if not code:
             # 回退：从 LLM 响应代码块中提取（与 GenericAgent do_code_run 对齐）
             code = handler._extract_code_block(_response, code_type)
             if not code:
-                raise ToolError("缺少 code 或 script 参数，且回复中未找到代码块")
+                return StepOutcome(
+                    "[Error] Code missing. Must use reply code block or 'script' arg.",
+                    next_prompt="\n",
+                )
 
         # inline_eval: 在进程内执行 Python 代码（用于自省/调试）
         if code_type == "inline_eval" or (code_type == "python" and args.get("inline_eval")):
@@ -322,7 +311,10 @@ def _make_code_run_handler(config: AgentConfig):
                 yield f"[Status] ERR inline_eval: {e}\n"
                 return {"status": "error", "msg": str(e)}
 
-        timeout = int(args.get("timeout", 60))
+        try:
+            timeout = int(args.get("timeout", 60))
+        except Exception:
+            timeout = 60
         cwd = os.path.normpath(os.path.join(
             config.workspace_dir, args.get("cwd", "./"),
         ))

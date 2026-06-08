@@ -1,5 +1,6 @@
 """Tests for browser tool compatibility loading."""
 
+import json
 from importlib import resources
 
 from zero_agent.core.handler import BaseHandler
@@ -76,8 +77,9 @@ def test_web_execute_js_handler_reads_script_file_and_saves_result(
         "no_monitor": True,
     }
     assert (workspace / "result.txt").read_text(encoding="utf-8") == "long browser result"
-    assert outcome.data["status"] == "success"
-    assert "[已保存完整内容到" in outcome.data["js_return"]
+    data = json.loads(outcome.data)
+    assert data["status"] == "success"
+    assert "[已保存完整内容到" in data["js_return"]
 
 
 def test_web_execute_js_handler_uses_javascript_code_block(
@@ -98,7 +100,51 @@ def test_web_execute_js_handler_uses_javascript_code_block(
     outcome = _exhaust(handler.dispatch("web_execute_js", {}, response))
 
     assert captured["script"] == "return location.href"
-    assert outcome.data["status"] == "success"
+    data = json.loads(outcome.data)
+    assert data["status"] == "success"
+
+
+def test_web_execute_js_handler_missing_script_matches_ga(
+    tmp_path, mock_config
+) -> None:
+    mock_config.workspace_dir = str(tmp_path)
+    registry = ToolRegistry.with_builtins(mock_config)
+    handler = BaseHandler(registry=registry, cwd=str(tmp_path))
+
+    outcome = _exhaust(handler.dispatch(
+        "web_execute_js",
+        {},
+        MockResponse(content="没有脚本。"),
+    ))
+
+    assert outcome.data == (
+        "[Error] Script missing. Use ```javascript block or 'script' arg."
+    )
+    assert outcome.next_prompt == "\n"
+
+
+def test_web_scan_handler_returns_ga_shaped_html_string(
+    tmp_path, mock_config, monkeypatch
+) -> None:
+    mock_config.workspace_dir = str(tmp_path)
+
+    def fake_web_scan(tabs_only=False, switch_tab_id=None, text_only=False, maxlen=35000):
+        return {
+            "status": "success",
+            "metadata": {"tabs_count": 1, "tabs": [], "active_tab": "tab-1"},
+            "content": "<main>Hello</main>",
+        }
+
+    monkeypatch.setattr(web, "web_scan", fake_web_scan)
+    registry = ToolRegistry.with_builtins(mock_config)
+    handler = BaseHandler(registry=registry, cwd=str(tmp_path))
+
+    outcome = _exhaust(handler.dispatch("web_scan", {}, MockResponse(content="")))
+
+    assert isinstance(outcome.data, str)
+    assert '"status": "success"' in outcome.data
+    assert "```html\n<main>Hello</main>\n```" in outcome.data
+    assert outcome.next_prompt == "\n"
 
 
 def _exhaust(gen):

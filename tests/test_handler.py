@@ -121,6 +121,147 @@ class TestBaseHandlerDispatch:
         assert result.data["status"] == "INTERRUPT"
         assert result.data["data"]["question"] == "继续吗？"
 
+    def test_real_registry_file_write_missing_content_matches_ga(
+        self,
+        mock_config,
+        tmp_path,
+    ) -> None:
+        """file_write 缺 content 时像 GA 一样报错并继续，不写自然语言正文."""
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
+        target = tmp_path / "out.txt"
+
+        result = _exhaust(handler.dispatch(
+            "file_write",
+            {"path": str(target), "mode": "overwrite"},
+            MockResponse(content="我准备写入文件。"),
+        ))
+
+        assert result.data["status"] == "error"
+        assert "No content found" in result.data["msg"]
+        assert result.next_prompt == "\n"
+        assert not target.exists()
+
+    def test_real_registry_code_run_missing_script_matches_ga(
+        self,
+        mock_config,
+    ) -> None:
+        """code_run 缺 script/代码块时应返回 GA 风格错误并轻量续写."""
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
+
+        result = _exhaust(handler.dispatch(
+            "code_run",
+            {},
+            MockResponse(content="我准备运行代码。"),
+        ))
+
+        assert result.data == (
+            "[Error] Code missing. Must use reply code block or 'script' arg."
+        )
+        assert result.next_prompt == "\n"
+
+    def test_real_registry_code_run_does_not_accept_code_alias(
+        self,
+        mock_config,
+    ) -> None:
+        """ZA 不再保留 code_run 的 code 参数别名."""
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
+
+        result = _exhaust(handler.dispatch(
+            "code_run",
+            {"code": "print('alias should not execute')"},
+            MockResponse(content="我准备运行代码。"),
+        ))
+
+        assert result.data == (
+            "[Error] Code missing. Must use reply code block or 'script' arg."
+        )
+        assert result.next_prompt == "\n"
+
+    def test_real_registry_file_patch_bad_ref_matches_ga_next_prompt(
+        self,
+        mock_config,
+        tmp_path,
+    ) -> None:
+        """file_patch 引用展开失败时应像 GA 一样用空白续写提示."""
+        mock_config.workspace_dir = str(tmp_path)
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=str(tmp_path))
+
+        result = _exhaust(handler.dispatch(
+            "file_patch",
+            {
+                "path": str(tmp_path / "target.txt"),
+                "old_content": "old",
+                "new_content": "{{file:missing.txt:1:2}}",
+            },
+            MockResponse(content=""),
+        ))
+
+        assert result.data["status"] == "error"
+        assert result.next_prompt == "\n"
+
+    def test_real_registry_file_read_memory_tip_is_next_prompt(
+        self,
+        mock_config,
+        tmp_path,
+    ) -> None:
+        """读取 memory/SOP 文件时，GA 风格提示应进 next_prompt 而非污染工具结果."""
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        sop = memory_dir / "plan_sop.md"
+        sop.write_text("step one\nstep two\n", encoding="utf-8")
+        mock_config.memory_dir = str(memory_dir)
+        mock_config.workspace_dir = str(tmp_path)
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=str(tmp_path))
+
+        result = _exhaust(handler.dispatch(
+            "file_read",
+            {"path": str(sop), "count": 5},
+            MockResponse(content=""),
+        ))
+
+        assert isinstance(result.data, str)
+        assert "step one" in result.data
+        assert "SYSTEM TIPS" not in result.data
+        assert "SYSTEM TIPS" in result.next_prompt
+        assert result.next_prompt.startswith("\n### [WORKING MEMORY]")
+
+    def test_real_registry_start_long_term_update_includes_global_memory(
+        self,
+        mock_config,
+        tmp_path,
+    ) -> None:
+        """start_long_term_update 的结算 prompt 应包含 GA 同款全局记忆上下文."""
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "memory_management_sop.md").write_text(
+            "# Memory SOP\nread first\n",
+            encoding="utf-8",
+        )
+        (memory_dir / "global_mem_insight.txt").write_text(
+            "# Insight\nL2: facts\n",
+            encoding="utf-8",
+        )
+        mock_config.memory_dir = str(memory_dir)
+        mock_config.workspace_dir = str(tmp_path)
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=str(tmp_path))
+
+        result = _exhaust(handler.dispatch(
+            "start_long_term_update",
+            {},
+            MockResponse(content=""),
+        ))
+
+        assert "This is L0" in result.data
+        assert "总结提炼经验" in result.next_prompt
+        assert "global_mem_insight.txt" in result.next_prompt
+        assert "# Insight" in result.next_prompt
+
 
 class TestBaseHandlerDoNoTool:
     """BaseHandler.do_no_tool() tests."""
@@ -215,11 +356,11 @@ class TestBaseHandlerWorking:
         assert "<history>\n\n</history>" in prompt
 
     def test_default_next_prompt_skip(self, mock_handler: BaseHandler) -> None:
-        """_index > 0 时仅返回工作记忆，不含 Continue 提示."""
+        """_index > 0 时与 GA 对齐，仅返回空白续写提示."""
         mock_handler.working["key_info"] = "ctx"
         prompt = mock_handler._default_next_prompt({"_index": 1})
         assert "[System] Continue" not in prompt
-        assert "<key_info>ctx</key_info>" in prompt
+        assert prompt == "\n"
 
     def test_build_anchor_prompt_with_history(self, mock_handler: BaseHandler) -> None:
         """_build_anchor_prompt 包含历史和 working memory."""

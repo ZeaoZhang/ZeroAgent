@@ -10,6 +10,8 @@ import os
 from typing import Any, Dict, Generator
 
 from zero_agent.core.config import AgentConfig
+from zero_agent.core.types import StepOutcome
+from zero_agent.memory.manager import MemoryManager
 from zero_agent.tools.registry import ToolRegistry
 from zero_agent.tools.builtin.file import file_read
 
@@ -33,14 +35,18 @@ def register_memory_tools(registry: ToolRegistry, config: AgentConfig) -> None:
     registry.register(ToolDefinition(
         name="update_working_checkpoint",
         description=_t(
-            "更新当前任务的工作记忆检查点。用于记录任务执行过程中的关键信息、"
-            "当前进度、重要发现和参考 SOP。这些信息会随后续轮次传递给 LLM，"
-            "帮助模型保持上下文连贯性。一般在任务开始或关键阶段转换时调用。",
-            "Update the working memory checkpoint for the current task. "
-            "Records key information, current progress, important findings, "
-            "and SOP references during task execution. This context is "
-            "passed to the LLM in subsequent turns to maintain coherence. "
-            "Typically called at task start or key phase transitions.",
+            "短期工作便签，每轮自动注入上下文，防长任务信息丢失。前中期调用，非结束时。"
+            "何时调用：(1)任务开始读SOP后，存用户需求和关键约束/参数（简单1-2步任务除外）；"
+            "(2)子任务切换或上下文即将被冲刷前；(3)多次重试失败后，重读SOP并必须调用存储新发现；"
+            "(4)切换新任务时更新内容，清旧进度但保留仍有效的约束。\n\n"
+            "何时不调用：简单任务（1-2步且无严重约束）、任务已完成时（应当用长期结算工具）",
+            "Short-term working notepad, auto-injected each turn to prevent info loss "
+            "in long tasks. Call during early/mid stages, not at end. When: "
+            "(1) after reading SOP, store user needs & key constraints (skip for simple "
+            "1-2 step tasks); (2) before subtask switch or context flush; "
+            "(3) after repeated failures, re-read SOP and must store new findings; "
+            "(4) on new task, update content, clear old progress but keep valid constraints.\n\n"
+            "Don't call: simple tasks (1-2 steps), task completed (use long-term memory tool)",
             lang,
         ),
         parameters={
@@ -49,16 +55,23 @@ def register_memory_tools(registry: ToolRegistry, config: AgentConfig) -> None:
                 "key_info": {
                     "type": "string",
                     "description": _t(
-                        "需要记住的关键信息摘要，会覆盖之前的工作记忆",
-                        "Key information summary to remember; overwrites previous working memory",
+                        "替换当前便签（<200 tokens）。增量更新：先回顾现有内容，保留仍有效的，再增删改。"
+                        "存：要避的坑、用户原始需求、关键参数/发现、文件路径、当前进度、下一步计划。"
+                        "不存：马上要用用完即丢的、上下文中显而易见的、用户已换全新任务时的旧任务信息。"
+                        "宁多更新不丢关键",
+                        "Replaces current notepad (<200 tokens). Incremental update: review "
+                        "existing, keep valid, add/remove/modify. Store: pitfalls, user "
+                        "requirements, key params/findings, file paths, progress, next steps. "
+                        "Don't store: ephemeral info, obvious context, old task info when user "
+                        "switched tasks. Prefer over-updating over losing key info",
                         lang,
                     ),
                 },
                 "related_sop": {
                     "type": "string",
                     "description": _t(
-                        "关联的 SOP（标准操作流程）标识或描述",
-                        "Associated SOP (Standard Operating Procedure) identifier or description",
+                        "相关sop名称，可以多个，必要时需要再读",
+                        "Related SOP names, tips for further re-read",
                         lang,
                     ),
                 },
@@ -71,16 +84,12 @@ def register_memory_tools(registry: ToolRegistry, config: AgentConfig) -> None:
     registry.register(ToolDefinition(
         name="start_long_term_update",
         description=_t(
-            "开启长期记忆结算流程。当 Agent 认为当前任务完成后有重要信息"
-            "（环境事实、用户偏好、关键步骤）需要持久记忆时调用此工具。"
-            "调用后会返回记忆管理 SOP，Agent 需按 SOP 进行最小化记忆更新。"
-            "若无经验证且未来可用的信息，忽略此工具。",
-            "Start the long-term memory distillation process. "
-            "Call this when the agent believes important information "
-            "(environment facts, user preferences, key steps) from the "
-            "completed task should be persisted. Returns the memory "
-            "management SOP; the agent should follow it for minimal updates. "
-            "Skip this tool if there is no verified, reusable information.",
+            "准备开始提炼记忆。发现值得长期记忆的信息（环境事实/用户偏好/避坑经验）时调用此工具。"
+            "已记忆更新或在自主流程内时无需调用。超15轮完成的任务必须调用以沉淀经验",
+            "Start distilling long-term memory. Call when discovering info worth "
+            "remembering (env facts/user prefs/lessons learned). Skip if memory "
+            "already updated or in autonomous flow. Must call when a task that took "
+            "15+ turns is completed",
             lang,
         ),
         parameters={
@@ -145,7 +154,15 @@ def _make_start_long_term_update_handler(config: AgentConfig):
             "先 `file_read` 看现有 → 判断类型 → 最小化更新 → 无新内容跳过，"
             "保证对记忆库最小局部修改。\n"
         )
+        memory_manager = getattr(getattr(handler, "parent", None), "memory", None)
+        if memory_manager is not None and hasattr(memory_manager, "get_global_memory_context"):
+            memory_ctx = memory_manager.get_global_memory_context()
+        else:
+            memory_ctx = MemoryManager(
+                memory_dir=config.memory_dir,
+                workspace_dir=config.workspace_dir,
+            ).get_global_memory_context()
+        prompt += memory_ctx
 
-        # 通过 _za_next_prompt 传递自定义 next_prompt，由 dispatch 提取
-        return {"result": result, "_za_next_prompt": prompt}
+        return StepOutcome(result, next_prompt=prompt)
     return _handler

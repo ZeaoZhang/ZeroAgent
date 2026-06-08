@@ -7,43 +7,44 @@ import subprocess
 from pathlib import Path
 
 from zero_agent.core.agent import ZeroAgent
+from zero_agent.core.config import AgentConfig, LLMBackendConfig
 from zero_agent.tools.registry import ToolRegistry
 
 
 GA_ROOT = Path(__file__).resolve().parents[2] / "GenericAgent"
 
 
-def _tools_by_name(tools: list[dict]) -> dict[str, dict]:
-    return {tool["function"]["name"]: tool["function"] for tool in tools}
+def _ga_schema(name: str) -> list[dict]:
+    return json.loads((GA_ROOT / "assets" / name).read_text(encoding="utf-8"))
 
 
-def test_builtin_tool_schema_preserves_ga_core_surface(mock_config) -> None:
-    ga_tools = _tools_by_name(
-        json.loads((GA_ROOT / "assets" / "tools_schema.json").read_text(encoding="utf-8"))
+def test_builtin_tool_schema_matches_ga_english_exactly(mock_config) -> None:
+    assert (
+        ToolRegistry.with_builtins(mock_config).generate_openai_schema()
+        == _ga_schema("tools_schema.json")
     )
-    za_tools = _tools_by_name(ToolRegistry.with_builtins(mock_config).generate_openai_schema())
-
-    assert set(za_tools) == set(ga_tools)
-
-    for name, ga_tool in ga_tools.items():
-        ga_props = set(ga_tool["parameters"].get("properties", {}))
-        za_params = za_tools[name]["parameters"]
-        za_props = set(za_params.get("properties", {}))
-
-        assert ga_props <= za_props, f"{name} missing GA parameters: {ga_props - za_props}"
-        assert "required" not in za_params, f"{name} must keep GA fallback-friendly optional args"
 
 
-def test_code_run_schema_keeps_ga_script_and_inline_eval_contract(mock_config) -> None:
-    schema = _tools_by_name(ToolRegistry.with_builtins(mock_config).generate_openai_schema())
-    props = schema["code_run"]["parameters"]["properties"]
+def test_builtin_tool_schema_matches_ga_chinese_exactly() -> None:
+    config = AgentConfig(
+        language="zh",
+        llm_backends={
+            "default": LLMBackendConfig(
+                name="default",
+                provider="openai",
+                api_key="k",
+                api_base="https://x.com",
+                model="glm-4",
+            ),
+        },
+        workspace_dir="/tmp/ws",
+        memory_dir="/tmp/mem",
+    )
 
-    assert "script" in props
-    assert props["script"]["type"] == "string"
-    assert "inline_eval" in props
-    assert props["inline_eval"]["type"] == "boolean"
-    assert "python" in props["type"]["enum"]
-    assert "powershell" in props["type"]["enum"]
+    assert (
+        ToolRegistry.with_builtins(config).generate_openai_schema()
+        == _ga_schema("tools_schema_cn.json")
+    )
 
 
 def test_default_system_prompt_loads_ga_compatible_asset(mock_config, monkeypatch) -> None:

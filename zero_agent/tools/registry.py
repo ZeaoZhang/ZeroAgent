@@ -201,4 +201,29 @@ class ToolRegistry:
                 # 内置模块不存在时跳过，不阻断注册流程
                 pass
 
+        ga_order = [
+            "code_run",
+            "file_read",
+            "file_patch",
+            "file_write",
+            "web_scan",
+            "web_execute_js",
+            "update_working_checkpoint",
+            "ask_user",
+            "start_long_term_update",
+        ]
+        ordered = {
+            name: registry._tools[name]
+            for name in ga_order
+            if name in registry._tools
+        }
+        ordered.update(
+            {
+                name: tool
+                for name, tool in registry._tools.items()
+                if name not in ordered
+            }
+        )
+        registry._tools = ordered
+
         return registry

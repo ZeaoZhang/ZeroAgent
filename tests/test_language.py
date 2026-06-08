@@ -161,9 +161,9 @@ class TestBilingualTools:
         registry = ToolRegistry.with_builtins(config)
         tools = {t.name: t.description for t in registry.list_all()}
         # 国际模型 → 英文描述
-        assert "Execute" in tools["code_run"]
+        assert "Code executor" in tools["code_run"]
         assert "Read file" in tools["file_read"]
-        assert "working memory" in tools["update_working_checkpoint"].lower()
+        assert "working notepad" in tools["update_working_checkpoint"].lower()
 
     def test_chinese_model_uses_chinese_tools(self) -> None:
         """国产模型用中文工具描述."""
@@ -200,7 +200,7 @@ class TestBilingualTools:
         )
         registry = ToolRegistry.with_builtins(config)
         tools = {t.name: t.description for t in registry.list_all()}
-        assert "Execute" in tools["code_run"]
+        assert "Code executor" in tools["code_run"]
 
     def test_tool_schema_generation(self) -> None:
         """生成的 schema 使用正确语言的描述."""
@@ -219,4 +219,4 @@ class TestBilingualTools:
         registry = ToolRegistry.with_builtins(config)
         schema = registry.generate_openai_schema()
         code_run = next(s for s in schema if s["function"]["name"] == "code_run")
-        assert "Execute" in code_run["function"]["description"]
+        assert "Code executor" in code_run["function"]["description"]
