@@ -373,7 +373,7 @@ function connectWS() {
           // Plain JS code
           await handleWsExec(data);
         } else if (typeof code === 'object' && code !== null) {
-          // Object without cmd → legacy extension message
+          // Object without cmd -> extension message
           const msg = code.tabId === undefined && data.tabId !== undefined ? { ...code, tabId: data.tabId } : code;
           const res = await handleExtMessage(msg, {});
           ws.send(JSON.stringify({ type: res.ok ? 'result' : 'error', id: data.id, result: res.data ?? res.results ?? res, error: res.error }));

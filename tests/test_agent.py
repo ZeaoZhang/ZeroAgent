@@ -1,11 +1,13 @@
 """Tests for core/agent.py — ZeroAgent orchestrator with model switching."""
 
 import os
+from importlib import resources
 
 import pytest
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import AgentConfig, LLMBackendConfig
+from zero_agent.core.exceptions import ConfigError
 from zero_agent.core.hooks import HookSystem
 from zero_agent.llm.base import MockFunction, MockResponse, MockToolCall
 from zero_agent.tools.registry import ToolDefinition, ToolRegistry
@@ -138,6 +140,25 @@ class TestZeroAgentBackends:
 
         assert agent.client is agent._sessions["backend_b"]
         assert agent._get_active_backend_name() == "backend_b"
+
+    def test_system_prompt_template_loads_from_assets(self) -> None:
+        """系统提示词模板只从 zero_agent.assets 读取."""
+        zh = resources.files("zero_agent.assets").joinpath("sys_prompt.txt").read_text(encoding="utf-8")
+        en = resources.files("zero_agent.assets").joinpath("sys_prompt_en.txt").read_text(encoding="utf-8")
+
+        assert ZeroAgent._load_system_prompt_template("zh") == zh
+        assert ZeroAgent._load_system_prompt_template("en") == en
+
+    def test_system_prompt_template_missing_asset_fails(self, monkeypatch) -> None:
+        """系统提示词资产缺失时直接失败，不使用代码内 fallback."""
+        class MissingAsset:
+            def joinpath(self, _filename: str):
+                raise FileNotFoundError("missing")
+
+        monkeypatch.setattr(resources, "files", lambda _package: MissingAsset())
+
+        with pytest.raises(ConfigError, match="System prompt asset is required"):
+            ZeroAgent._load_system_prompt_template("zh")
 
 
 class TestZeroAgentHooks:
@@ -274,7 +295,7 @@ class TestZeroAgentHooks:
         tmp_path,
         monkeypatch,
     ) -> None:
-        """每个任务应像 GA 一样使用新 handler，但继承并老化 key_info."""
+        """每个任务应使用新 handler，但继承并老化 key_info."""
         config = AgentConfig(
             llm_backends={
                 "default": LLMBackendConfig(

@@ -1,1 +1,0 @@
-看来 file_write 写入后内容未持久化。我用 code_run bash 方式直接写入确保成功。

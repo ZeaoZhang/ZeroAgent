@@ -219,7 +219,7 @@ class TestAutoFailoverSessionFallback:
         assert session.name == "backup1"
 
     def test_long_immediate_error_response_fallbacks_same_turn(self) -> None:
-        """长错误响应按 GA 规则同轮 fallback，不等到下一轮."""
+        """长错误响应应同轮 fallback，不等到下一轮."""
         primary = _make_session("primary")
         backup = _make_session("backup1")
         session = AutoFailoverSession(primary, backups=[backup])

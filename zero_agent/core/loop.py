@@ -118,7 +118,7 @@ class AgentLoop:
             turn += 1
             yield {"turn": turn}
 
-            # 配置热重载：与 GenericAgent reload_mykeys() 对齐
+            # 配置热重载：定期检测 config.yaml 的 mtime。
             if self._agent is not None and turn % 5 == 0:
                 if self._agent.reload_config():
                     self.client = self._agent.client
@@ -314,7 +314,7 @@ class AgentLoop:
     # ---- dispatch 消费 ----
 
     def _record_user_history(self, content: Any) -> None:
-        """Mirror GA's compact [USER] entry in handler.history_info."""
+        """Record a compact [USER] entry in handler.history_info."""
         if not isinstance(getattr(self.handler, "history_info", None), list):
             return
         text = self._message_text(content).replace("\n", " ").strip()
@@ -360,7 +360,7 @@ class AgentLoop:
         next_prompt: str,
         tool_results: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Build the same GA-shaped next-turn message payload.
+        """Build the next-turn message payload.
 
         LiteLLMSession normalizes this custom field into provider-native
         ``role=tool`` messages before sending the API request.

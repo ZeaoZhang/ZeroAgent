@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+zero_agent.egg-info/
 dist/
 build/
 *.egg
@@ -41,11 +42,23 @@ logs/
 
 # Workspace / task directories
 workspace/
+/memory/
 task_*/
+temp/
+zero_agent/temp/
 
 # OMC
 .omc/
 .omx/
+**/.omc/
+**/.omx/
 
 config.yaml
 
+# Desktop frontend local artifacts
+zero_agent/frontends/desktop/node_modules/
+zero_agent/frontends/desktop/package-lock.json
+zero_agent/frontends/desktop/.omc/
+zero_agent/frontends/desktop/.omx/
+zero_agent/frontends/desktop/src-tauri/gen/
+zero_agent/frontends/desktop/src-tauri/target/

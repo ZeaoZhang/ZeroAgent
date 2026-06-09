@@ -19,16 +19,14 @@ pytest tests/ -v
 ## PR 流程
 
 1. Fork 仓库并创建 feature 分支
-2. 编写代码，遵循编码规范（见 CLAUDE.md）
+2. 编写代码，遵循编码规范
 3. 为新功能添加测试（`tests/` 目录下对应文件）
 4. 运行 `pytest tests/ -v` 确保全部通过
 5. 提交 PR，描述清楚做了什么和为什么
 
 ## 编码规范
 
-见 [CLAUDE.md](CLAUDE.md) 中的完整规范:
-
-- **注释**: Google Python 风格，中文 docstring（Args/Returns/Raises/Yields）
+- **注释**: Python 公共 API 使用 Google 风格 docstring（Args/Returns/Raises/Yields 按需出现）
 - **类型标注**: 所有函数参数和返回值
 - **类设计**: dataclass 优先，依赖注入优先
 - **异常**: 使用 ZeroAgentError → ConfigError / LLMError / ToolError 层次
@@ -43,10 +41,10 @@ pytest tests/ -v
 
 ## 工具边界
 
-`ToolRegistry.with_builtins()` 的默认注册范围必须保持为 GenericAgent 对齐的 9 个核心原子工具:
+`ToolRegistry.with_builtins()` 的默认注册范围必须保持为 9 个核心原子工具:
 `code_run`、`file_read`、`file_write`、`file_patch`、`web_scan`、`web_execute_js`、`update_working_checkpoint`、`start_long_term_update`、`ask_user`。
 
-`search_web`、`vision`、`memory_plot`、`send_im` 属于 ZeroAgent 可选/实验性扩展模块。不要把这些扩展工具写成 GenericAgent 原有核心能力，也不要默认放进 `with_builtins()`。
+`search_web`、`vision`、`memory_plot`、`send_im` 属于 ZeroAgent 可选/实验性扩展模块。不要默认放进 `with_builtins()`。
 
 ## 项目结构
 
@@ -55,11 +53,12 @@ zero_agent/
   core/        — 编排层: exceptions, types, config, handler, loop, agent, hooks
   llm/         — LLM 后端: base, sessions, failover, factory, converters, sse_parsers
   tools/       — 工具系统: registry, builtin/(code, file, memory, user, web) 默认核心; im/search/vision/memory_plot 可选扩展
-  memory/      — 记忆管理: manager, ocr_utils, vision_api, compress_session
+  memory/      — 记忆管理: manager, compress_session
   reflect/     — 反射式唤醒: runner, autonomous, goal_mode, scheduler, agent_team_worker
-  frontends/   — 用户界面: stapp (Streamlit)
+  browser/     — 浏览器自动化 runtime
+  frontends/   — Web2/Tauri desktop bridge、静态前端和 launcher
   runners/     — 运行器: cli
-  utils/       — 工具函数: configure, files, text, memory_stats, keychain
+  utils/       — 工具函数和 agent 辅助脚本: configure, files, text, memory_stats, keychain
   plugins/     — 可插拔扩展: langfuse_tracing
 tests/         — 测试
 ```

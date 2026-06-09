@@ -121,9 +121,7 @@ write_desktop_settings() {
   {
     printf '{\n'
     printf '  "python_path": %s,\n' "${python_json}"
-    printf '  "pythonPath": %s,\n' "${python_json}"
-    printf '  "project_dir": %s,\n' "${root_json}"
-    printf '  "workspaceDir": %s\n' "${root_json}"
+    printf '  "project_dir": %s\n' "${root_json}"
     printf '}\n'
   } > "${SETTINGS_PATH}"
 }
@@ -131,7 +129,7 @@ write_desktop_settings() {
 match_pids() {
   ps -axo pid=,command= | awk \
     -v self="$$" \
-    -v app_path="${APP_PATH}/Contents/MacOS/ga-desktop" \
+    -v app_path="${APP_PATH}/Contents/MacOS/zero-agent-desktop" \
     -v root="${REPO_ROOT}" '
       {
         pid = $1
@@ -157,7 +155,7 @@ match_pids() {
 list_matching_processes() {
   local rows
   rows="$(ps -axo pid=,ppid=,command= | awk \
-    -v app_path="${APP_PATH}/Contents/MacOS/ga-desktop" \
+    -v app_path="${APP_PATH}/Contents/MacOS/zero-agent-desktop" \
     -v root="${REPO_ROOT}" '
       {
         pid = $1

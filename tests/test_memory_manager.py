@@ -6,7 +6,7 @@ from pathlib import Path
 
 from zero_agent.memory.manager import MemoryManager
 
-GA_ASSETS = Path(__file__).resolve().parents[2] / "GenericAgent" / "assets"
+ZA_ASSETS = Path(__file__).resolve().parents[1] / "zero_agent" / "assets"
 
 
 class TestMemoryManager:
@@ -24,6 +24,10 @@ class TestMemoryManager:
             assert os.path.isfile(os.path.join(tmp, "memory", "global_mem.txt"))
             assert os.path.isfile(os.path.join(tmp, "memory", "global_mem_insight.txt"))
             assert os.path.isdir(os.path.join(tmp, "memory", "L4_raw_sessions"))
+            assert os.path.isdir(os.path.join(tmp, "memory", "sops"))
+            assert os.path.isfile(
+                os.path.join(tmp, "memory", "sops", "memory_management_sop.md")
+            )
 
     def test_init_idempotent(self) -> None:
         """重复 init 不会覆盖已有文件."""
@@ -55,7 +59,7 @@ class TestMemoryManager:
             assert f"cwd = {os.path.join(tmp, 'workspace')} (./)" in ctx
             assert "[Memory] (../memory)" in ctx
             assert (
-                GA_ASSETS / "insight_fixed_structure.txt"
+                ZA_ASSETS / "insight_fixed_structure.txt"
             ).read_text(encoding="utf-8") in ctx
             assert "../memory/global_mem_insight.txt:" in ctx
 
@@ -63,7 +67,7 @@ class TestMemoryManager:
                 Path(tmp) / "memory" / "global_mem_insight.txt"
             ).read_text(encoding="utf-8")
             assert insight == (
-                GA_ASSETS / "global_mem_insight_template.txt"
+                ZA_ASSETS / "global_mem_insight_template.txt"
             ).read_text(encoding="utf-8")
 
     def test_get_sop_path(self) -> None:
@@ -73,7 +77,7 @@ class TestMemoryManager:
             mgr.init_memory()
 
             # 创建一个 SOP 文件
-            sop_path = os.path.join(mem_dir, "test_sop.md")
+            sop_path = os.path.join(mem_dir, "sops", "test_sop.md")
             with open(sop_path, "w") as f:
                 f.write("# Test SOP")
 
@@ -98,16 +102,16 @@ class TestMemoryManager:
             mgr.init_memory()
 
             # 创建测试文件
+            sops_dir = os.path.join(mem_dir, "sops")
             for name in ["sop_a.md", "sop_b.md", "utils.py", "notes.txt"]:
-                with open(os.path.join(mem_dir, name), "w") as f:
+                with open(os.path.join(sops_dir, name), "w") as f:
                     f.write("test")
 
             sops = mgr.list_sops()
             assert "sop_a.md" in sops
             assert "sop_b.md" in sops
-            assert "utils.py" in sops
+            assert "utils.py" not in sops
             assert "notes.txt" not in sops
-            assert len(sops) == 4
 
     def test_list_sops_nonexistent_dir(self) -> None:
         mgr = MemoryManager(memory_dir="/nonexistent/path")

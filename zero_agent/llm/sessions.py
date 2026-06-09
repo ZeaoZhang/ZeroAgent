@@ -81,17 +81,17 @@ class LiteLLMSession:
             self._trim_keep_rate = 0.3
 
     def reset_tool_protocol_cache(self) -> None:
-        """Clear the compatibility marker used by older frontends."""
+        """Clear the text-tool protocol marker."""
         self._last_tools_json = ""
 
     @property
     def last_tools(self) -> str:
-        """Compatibility alias; native-only mode does not cache text tools."""
+        """Text-tool protocol marker; native-only mode leaves it empty."""
         return self._last_tools_json
 
     @last_tools.setter
     def last_tools(self, value: str) -> None:
-        """Compatibility alias; native-only mode does not cache text tools."""
+        """Set the text-tool protocol marker."""
         self._last_tools_json = value
 
     def chat(
@@ -116,7 +116,7 @@ class LiteLLMSession:
             MockResponse 包含 content / tool_calls / thinking / stop_reason.
         """
         with self.lock:
-            # 追加标准化后的消息到历史。AgentLoop may pass GenericAgent-style
+            # 追加标准化后的消息到历史。AgentLoop may pass custom
             # tool_results; normalize them before they hit provider payloads.
             normalized_messages = self._normalize_incoming_messages(messages)
             self.history.extend(normalized_messages)
@@ -150,7 +150,7 @@ class LiteLLMSession:
             }
             self._write_llm_log("Response", json.dumps(resp_log, ensure_ascii=False, indent=2))
 
-            # Write model_responses log (compatible with continue_cmd / session history)
+            # Write model_responses log for continue_cmd / session history.
             self._write_model_response_log(messages, mock)
 
             return mock
@@ -333,7 +333,7 @@ class LiteLLMSession:
         if self.config.max_tokens:
             kwargs["max_tokens"] = self.config.max_tokens
 
-        # Tool schema 缓存：最后一个 tool 标记 ephemeral cache（与 GenericAgent NativeClaudeSession 对齐）
+        # Tool schema 缓存：最后一个 tool 标记 ephemeral cache。
         if tools and "claude" in self.config.provider.lower():
             tools = list(tools)
             if tools:
@@ -478,7 +478,6 @@ class LiteLLMSession:
     def _trim_history(self) -> None:
         """裁剪历史消息，防止超出上下文窗口.
 
-        与 GenericAgent.trim_messages_history 对齐：
         先按固定间隔压缩旧标签；超过 context_window * 3 字符预算时强制
         压缩旧标签；仍超过 target 时从最早消息开始删到 user 边界。
         """
@@ -643,7 +642,7 @@ class LiteLLMSession:
         force: bool = False,
         interval: int = 5,
     ) -> list[dict]:
-        """Compress old history tags exactly like GenericAgent."""
+        """Compress old history tags."""
         import re as _re
 
         cd = getattr(LiteLLMSession._compress_history_tags, "_cd", 0) + 1
@@ -709,7 +708,7 @@ class LiteLLMSession:
 
     @staticmethod
     def _sanitize_leading_user_msg(msg: dict) -> dict:
-        """Rewrite leading user tool_result blocks as text, matching GA behavior."""
+        """Rewrite leading user tool_result blocks as text."""
         msg = dict(msg)
         content = msg.get("content")
         if not isinstance(content, list):
@@ -857,7 +856,7 @@ class LiteLLMSession:
         messages: list[dict],
         provider: str = "",
     ) -> list[dict]:
-        """在消息上设置 cache_control 标记，与 GenericAgent 的缓存策略对齐.
+        """在消息上设置 cache_control 标记.
 
         对 Anthropic 模型启用 prompt caching:
             - System prompt → "persistent" 缓存（跨请求复用）
@@ -958,8 +957,7 @@ class LiteLLMSession:
     def _keep_claude_block(block: dict) -> bool:
         """判断 Claude content block 是否应保留.
 
-        过滤掉无签名（signature）的 thinking block，
-        与 GenericAgent 的 _keep_claude_block 对齐.
+        过滤掉无签名（signature）的 thinking block.
 
         Args:
             block: 单个 content block 字典.
@@ -1173,8 +1171,7 @@ class LiteLLMSession:
     ) -> None:
         """Write Prompt/Response pair to sessions_dir for session history.
 
-        Format matches GenericAgent's _write_llm_log and is parseable by
-        continue_cmd._pairs():
+        Format is parseable by continue_cmd._pairs():
             === Prompt === {timestamp}
             {json of the last user/tool message}
             === Response === {timestamp}

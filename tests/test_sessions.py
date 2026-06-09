@@ -168,7 +168,7 @@ def test_completion_kwargs_include_provider_for_openai_compatible_backend() -> N
 
 def test_completion_kwargs_use_native_tools_without_text_protocol(monkeypatch) -> None:
     monkeypatch.delenv("ZA_LANG", raising=False)
-    monkeypatch.setenv("GA_LANG", "en")
+    monkeypatch.setenv("ZA_LANG", "en")
     session = _make_session()
     tools = [
         {
@@ -200,7 +200,7 @@ def test_completion_kwargs_use_native_tools_without_text_protocol(monkeypatch) -
 
 def test_completion_kwargs_do_not_cache_text_tool_protocol(monkeypatch) -> None:
     monkeypatch.delenv("ZA_LANG", raising=False)
-    monkeypatch.setenv("GA_LANG", "en")
+    monkeypatch.setenv("ZA_LANG", "en")
     session = _make_session()
     tools = [
         {
@@ -279,7 +279,7 @@ def test_text_tool_syntax_is_not_parsed_as_native_tool_call(monkeypatch) -> None
     assert response.stop_reason == "stop"
 
 
-def test_compress_history_tags_matches_ga_tag_replacement() -> None:
+def test_compress_history_tags_replaces_old_tags() -> None:
     long_history = "<history>\n" + ("x" * 2000) + "\n</history>"
     messages = [
         {"role": "user", "content": f"old\n### [WORKING MEMORY]\n{long_history}"},
@@ -298,7 +298,7 @@ def test_compress_history_tags_matches_ga_tag_replacement() -> None:
     assert "<history>[...]</history>" not in compressed[2]["content"]
 
 
-def test_trim_history_matches_ga_character_budget_and_user_boundary() -> None:
+def test_trim_history_respects_character_budget_and_user_boundary() -> None:
     session = _make_session()
     session._context_window = 200
     session._trim_keep_rate = 0.5

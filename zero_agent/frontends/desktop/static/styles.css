@@ -889,7 +889,7 @@ body.platform-darwin .tab-strip {
 ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
 
 
-/* Structured GA action cards */
+/* Structured ZeroAgent action cards */
 .structured-turn { margin: 8px 0; }
 .structured-turn .turn-header { width: fit-content; max-width: min(100%, 760px); background: rgba(248, 248, 250, 0.92); }
 .turn-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 12px; }

@@ -1,2 +1,1 @@
-"""Frontend entrypoints and compatibility adapters for ZeroAgent."""
-
+"""Desktop frontend entrypoints for ZeroAgent."""

@@ -1,4 +1,4 @@
-"""Tests for adapters/agent_runner.py — AgentRunner background worker wrapper."""
+"""Tests for runners/agent_runner.py — AgentRunner background worker wrapper."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import AgentConfig, LLMBackendConfig
-from zero_agent.adapters.agent_runner import AgentRunner
+from zero_agent.runners.agent_runner import AgentRunner
 
 
 @pytest.fixture
@@ -97,7 +97,7 @@ class TestAgentRunnerLLMManagement:
         assert llms[0] == (0, "backend_a/model-a", True)
         assert llms[1] == (1, "backend_b/model-b", False)
 
-    def test_llmclients_expose_genericagent_shape(self, real_agent: ZeroAgent) -> None:
+    def test_llmclients_expose_frontend_shape(self, real_agent: ZeroAgent) -> None:
         runner = AgentRunner(real_agent)
         clients = runner.llmclients
 
@@ -339,7 +339,7 @@ class TestAgentRunnerTaskDispatch:
         assert dq.get(timeout=3)["next"] == "lo"
         assert dq.get(timeout=3)["done"] == "Hello"
 
-    def test_slash_hook_can_consume_legacy_commands(self, mock_agent: ZeroAgent, monkeypatch) -> None:
+    def test_slash_hook_can_consume_commands(self, mock_agent: ZeroAgent, monkeypatch) -> None:
         runner = AgentRunner(mock_agent)
 
         def fake_slash(raw_query, display_queue):

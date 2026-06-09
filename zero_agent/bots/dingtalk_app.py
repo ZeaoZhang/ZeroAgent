@@ -17,7 +17,7 @@ import time
 import requests
 
 from zero_agent.core.agent import ZeroAgent
-from zero_agent.adapters.agent_runner import AgentRunner
+from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import (
     AgentBotMixin,
     ensure_single_instance,

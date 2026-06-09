@@ -239,7 +239,7 @@ class AutoFailoverSession:
 
     @staticmethod
     def _is_immediate_error(content: str) -> bool:
-        """Return True for pre-stream errors that GA retries on another backend."""
+        """Return True for pre-stream errors that should try another backend."""
 
         return (content or "").lstrip().startswith(("!!!Error:", "[Error:"))
 

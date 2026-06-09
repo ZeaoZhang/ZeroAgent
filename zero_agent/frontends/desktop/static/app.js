@@ -9,12 +9,11 @@ const state = {
   sessions: new Map(),      // localSessionId -> { id, bridgeSessionId, title, messages: [], cwd, config, diagnostics }
   activeId: null,
   bridgeReady: false,
-  defaultConfig: { theme: 'auto', llmNo: 0, gaRoot: '' },
+  defaultConfig: { theme: 'auto', llmNo: 0, workspaceDir: '' },
   modelProfiles: [],
   slashCommands: [],
   restartingBridge: false,
   bridgeNoticeMessage: null,
-  mykeyReady: true,
   runtimeBySessionId: new Map(),
 };
 
@@ -345,7 +344,7 @@ function splitLLMRunningSegments(raw) {
   turns.forEach((turn, idx) => {
     const text = `${turn.marker}${turn.content}`.trimEnd();
     if (!text) return;
-    // Match Streamlit: historical/intermediate LLM Running turns are folded;
+    // Historical/intermediate LLM Running turns are folded;
     // the latest turn remains plain so final answers are not hidden by default.
     segments.push({ kind: idx < turns.length - 1 ? 'LLM_RUNNING' : 'agent_message_chunk', text });
   });
@@ -894,7 +893,7 @@ function closeSession(id) {
   // Notify bridge to delete this session
   const sess = state.sessions.get(id);
   if (sess && sess.bridgeSessionId) {
-    const bridgeUrl = window.ga.bridgeUrl || 'http://127.0.0.1:14168';
+    const bridgeUrl = window.zeroAgent.bridgeUrl || 'http://127.0.0.1:14168';
     fetch(`${bridgeUrl}/session/${sess.bridgeSessionId}`, { method: 'DELETE' }).catch(() => {});
   }
   const keys = [...state.sessions.keys()];
@@ -924,7 +923,7 @@ async function newSession() {
   let createdSess = null;
   try {
     const cwd = await getCwd();
-    const res = await window.ga.rpc('session/new', { cwd, mcp_servers: [] });
+    const res = await window.zeroAgent.rpc('session/new', { cwd, mcp_servers: [] });
     if (res.error) throw new Error(typeof res.error === 'string' ? res.error : (res.error.message || JSON.stringify(res.error)));
     const bridgeSessionId = res.sessionId;
     const localSessionId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -940,8 +939,8 @@ async function newSession() {
 
 async function getCwd() {
   // Use ZeroAgent workspace as default cwd
-  const status = await window.ga.checkStatus();
-  return status.workspaceDir || status.gaRoot;
+  const status = await window.zeroAgent.checkStatus();
+  return status.workspaceDir || '';
 }
 
 // ─── Messages rendering ──────────────────────────────────────────────────
@@ -1512,7 +1511,7 @@ async function pollSessionMessages(sess) {
   try {
     while (runtime.busy || runtime.forcePollOnce) {
       runtime.forcePollOnce = false;
-      const res = await window.ga.pollSession(sess.bridgeSessionId || sess.id, runtime.lastPolledMessageId || 0);
+      const res = await window.zeroAgent.pollSession(sess.bridgeSessionId || sess.id, runtime.lastPolledMessageId || 0);
       if (res?.error) throw new Error(res.error.message || res.error);
       const result = res.result || res;
       for (const msg of (result.messages || [])) upsertPolledMessage(sess, msg, { partial: false });
@@ -1567,7 +1566,7 @@ async function sendPrompt(text, images = [], options = {}) {
 
   setBusy(true, 'Thinking…', sess);
   try {
-    const res = await window.ga.rpc('session/prompt', {
+    const res = await window.zeroAgent.rpc('session/prompt', {
       sessionId: await ensureBridgeSession(sess),
       prompt: text,
       images: images.map(img => ({id: img.id, dataUrl: img.dataUrl})),
@@ -1594,7 +1593,7 @@ async function cancelPrompt() {
   const runtime = sess ? getSessionRuntime(sess) : null;
   if (!runtime?.busy) return false;
   try {
-    const res = await window.ga.rpc('session/cancel', { sessionId: sess?.bridgeSessionId || state.activeId });
+    const res = await window.zeroAgent.rpc('session/cancel', { sessionId: sess?.bridgeSessionId || state.activeId });
     if (res.error) throw new Error(res.error.message || res.error);
     return true;
   } catch (e) {
@@ -1620,7 +1619,7 @@ let commandPaletteItems = [];
 
 async function getSlashCommandRows() {
   try {
-    const result = await window.ga.getSlashCommands();
+    const result = await window.zeroAgent.getSlashCommands();
     const commands = Array.isArray(result?.commands) ? result.commands : [];
     state.slashCommands = commands;
     return commands;
@@ -1752,7 +1751,7 @@ async function restoreResumeIndex(index, commandName) {
     showSystem('No active session.');
     return;
   }
-  const result = await window.ga.resumeSession(await ensureBridgeSession(sess), index);
+  const result = await window.zeroAgent.resumeSession(await ensureBridgeSession(sess), index);
   if (!result?.ok) {
     showSystem(result?.error || 'Resume failed.');
     return;
@@ -1776,7 +1775,7 @@ async function restoreResumeIndex(index, commandName) {
 async function handleResumeCommand(arg) {
   const indexText = (arg || '').trim();
   if (!indexText) {
-    const result = await window.ga.listResumeSessions(10);
+    const result = await window.zeroAgent.listResumeSessions(10);
     showSystem(formatResumeSessions(result?.sessions || []));
     return;
   }
@@ -1814,14 +1813,14 @@ function formatSchedulerStatus(data) {
 async function handleSchedulerCommand(arg) {
   const action = (arg || '').trim().toLowerCase();
   if (!action) {
-    const status = await window.ga.rpc('scheduler/status', {});
+    const status = await window.zeroAgent.rpc('scheduler/status', {});
     showSystem(formatSchedulerStatus(status));
     return;
   }
   if (action === 'start') {
-    const result = await window.ga.rpc('scheduler/start', {});
+    const result = await window.zeroAgent.rpc('scheduler/start', {});
     showSystem(result?.message || result?.error || 'Scheduler start requested.');
-    const status = await window.ga.rpc('scheduler/status', {});
+    const status = await window.zeroAgent.rpc('scheduler/status', {});
     showSystem(formatSchedulerStatus(status));
     return;
   }
@@ -1857,7 +1856,7 @@ async function handleSlash(cmd) {
         const cfg = getActiveConfig();
         cfg.theme = arg;
         applyTheme();
-        await window.ga.saveConfig(cfg);
+        await window.zeroAgent.saveConfig(cfg);
         showSystem(`Theme → ${arg}`);
       } else {
         showSystem('Usage: /theme light|dark|auto');
@@ -1865,12 +1864,12 @@ async function handleSlash(cmd) {
       break;
     case 'cwd':
       if (!arg) {
-        const status = await window.ga.checkStatus();
-        showSystem(`cwd: ${sess?.cwd || status.workspaceDir || status.gaRoot}`);
+        const status = await window.zeroAgent.checkStatus();
+        showSystem(`cwd: ${sess?.cwd || status.workspaceDir || ''}`);
       } else {
         showSystem(`Creating new session in ${arg}…`);
         // Need a new session for different cwd
-        const res = await window.ga.rpc('session/new', { cwd: arg, mcp_servers: [] });
+        const res = await window.zeroAgent.rpc('session/new', { cwd: arg, mcp_servers: [] });
         if (res.error) showSystem('Failed: ' + (res.error.message || res.error));
         else {
           const bridgeSessionId = res.sessionId;
@@ -1901,7 +1900,7 @@ async function runAgentSlash(command, args = '', displayText = null) {
     return;
   }
   try {
-    const result = await window.ga.resolveSlash(command, args);
+    const result = await window.zeroAgent.resolveSlash(command, args);
     if (!result?.ok || !result.prompt) {
       showSystem(result?.error || `Unknown command: ${command}. Try /help.`);
       return;
@@ -2049,7 +2048,7 @@ function renderModelOptions() {
 
 async function loadModelProfiles() {
   try {
-    const result = await window.ga.getModelProfiles();
+    const result = await window.zeroAgent.getModelProfiles();
     state.modelProfiles = Array.isArray(result && result.profiles) ? result.profiles : [];
     renderModelOptions();
   } catch (err) {
@@ -2086,7 +2085,7 @@ async function saveSettings() {
     if (!sess) throw new Error('No active session');
     const cfg = sess.config;
     cfg.llmNo = Math.max(0, parseInt($('cfg-llm').value, 10) || 0);
-    await window.ga.saveConfig(cfg);
+    await window.zeroAgent.saveConfig(cfg);
     closeSettings();
   } catch (err) {
     showError('Failed to save settings: ' + (err.message || err));
@@ -2099,7 +2098,7 @@ async function ensureBridgeSession(sess) {
   if (!sess) throw new Error('No active session.');
   if (sess.bridgeSessionId) return sess.bridgeSessionId;
   const cwd = sess.cwd || await getCwd();
-  const res = await window.ga.rpc('session/new', { cwd, mcp_servers: [] });
+  const res = await window.zeroAgent.rpc('session/new', { cwd, mcp_servers: [] });
   if (res.error) throw new Error(typeof res.error === 'string' ? res.error : (res.error.message || JSON.stringify(res.error)));
   sess.bridgeSessionId = res.sessionId;
   sess.cwd = cwd;
@@ -2115,7 +2114,7 @@ async function restartBridge(options = {}) {
     for (const sess of state.sessions.values()) sess.bridgeSessionId = null;
   }
   state.bridgeNoticeMessage = showSystem('Bridge restarting…');
-  await window.ga.startBridge(getActiveConfig().llmNo || 0);
+  await window.zeroAgent.startBridge(getActiveConfig().llmNo || 0);
   window.setTimeout(() => {
     if (state.restartingBridge && !state.bridgeReady && !getActiveSessionRuntime()?.busy) {
       markBridgeReady('Bridge ready.');
@@ -2139,7 +2138,7 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
     _bootstrappingSession = true;
     try {
       // Try to restore existing sessions from bridge
-      const bridgeUrl = window.ga.bridgeUrl || 'http://127.0.0.1:14168';
+      const bridgeUrl = window.zeroAgent.bridgeUrl || 'http://127.0.0.1:14168';
       const listRes = await fetch(`${bridgeUrl}/sessions`).then(r => r.json()).catch(() => null);
       const existingSessions = listRes?.sessions || [];
       if (existingSessions.length > 0) {
@@ -2175,28 +2174,28 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
   loadModelProfiles();
 }
 
-window.ga.onBridgeReady(() => {
+window.zeroAgent.onBridgeReady(() => {
   markBridgeReady();
 });
 
-window.ga.onBridgeMessage(() => {
+window.zeroAgent.onBridgeMessage(() => {
   // RPC responses are resolved in main; renderer readiness comes from bridge-ready.
 });
 
-window.ga.onBridgeNotification((msg) => {
+window.zeroAgent.onBridgeNotification((msg) => {
   handleNotification(msg);
 });
 
-window.ga.onBridgeError((err) => {
+window.zeroAgent.onBridgeError((err) => {
   console.error('Bridge error:', err);
   addDiagnostic('error', 'Bridge error', err);
   setStatus('err', 'Error');
   state.bridgeReady = false;
   state.restartingBridge = false;
 
-  if (err.type === 'no-mykey') {
+  if (err.type === 'no-config') {
     showError(err.message, 'Setup', async () => {
-      await window.ga.openConfig();
+      await window.zeroAgent.openConfig();
     }, { skipDiagnostic: true });
   } else if (err.type === 'no-python') {
     showError(err.message, 'Settings', openSettings, { skipDiagnostic: true });
@@ -2205,7 +2204,7 @@ window.ga.onBridgeError((err) => {
   }
 });
 
-window.ga.onBridgeClosed((info) => {
+window.zeroAgent.onBridgeClosed((info) => {
   addDiagnostic('warn', 'Bridge closed', info);
   if (state.restartingBridge) {
     setStatus('warn', 'Restarting…');
@@ -2215,7 +2214,7 @@ window.ga.onBridgeClosed((info) => {
   setStatus('err', `Bridge stopped (${info.code})`);
 });
 
-window.ga.onBridgeLog((text) => {
+window.zeroAgent.onBridgeLog((text) => {
   console.log('[bridge]', text);
   addDiagnostic('info', 'Bridge log', text);
 });
@@ -2367,7 +2366,7 @@ $('settings-btn').addEventListener('click', openSettings);
 $('close-settings').addEventListener('click', closeSettings);
 $('cancel-settings').addEventListener('click', closeSettings);
 $('save-settings').addEventListener('click', saveSettings);
-$('open-config').addEventListener('click', () => openConfigFile(window.ga.openConfig, 'config.yaml'));
+$('open-config').addEventListener('click', () => openConfigFile(window.zeroAgent.openConfig, 'config.yaml'));
 $('goal-mode-btn').addEventListener('click', () => invokeMode('/goal'));
 $('auto-run-btn').addEventListener('click', () => invokeMode('/autorun'));
 $('error-dismiss').addEventListener('click', hideError);
@@ -2500,19 +2499,19 @@ settingsModal.querySelector('.modal-backdrop').addEventListener('click', closeSe
   });
 
   // Listen for IPC from main process (menu accelerator on macOS)
-  if (window.ga && window.ga.onOpenSearch) {
-    window.ga.onOpenSearch(() => openSearch());
+  if (window.zeroAgent && window.zeroAgent.onOpenSearch) {
+    window.zeroAgent.onOpenSearch(() => openSearch());
   }
 })();
 
 // ─── Init ────────────────────────────────────────────────────────────────
 (async function init() {
   // Add platform class to body for platform-specific CSS
-  const platform = (window.ga && window.ga.platform) || process.platform || 'unknown';
+  const platform = (window.zeroAgent && window.zeroAgent.platform) || process.platform || 'unknown';
   document.body.classList.add('platform-' + platform);
 
   try {
-    const saved = await window.ga.getConfig();
+    const saved = await window.zeroAgent.getConfig();
     Object.assign(state.defaultConfig, saved);
   } catch (err) {
     addDiagnostic('error', 'Failed to load settings', err);

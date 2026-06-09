@@ -1,4 +1,4 @@
-"""Scheduler compatibility tests for GenericAgent schedule-mode semantics."""
+"""Scheduler tests for ZeroAgent schedule-mode semantics."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def _write_task(tasks: Path, name: str, data: dict) -> None:
     )
 
 
-def test_schedule_mode_daily_task_prompt_matches_ga_contract(
+def test_schedule_mode_daily_task_prompt_contract(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -129,4 +129,3 @@ def test_cron_mode_isolated_zeroagent_extension(monkeypatch, tmp_path) -> None:
     assert prompt is not None
     assert "[定时任务] cronjob\n" in prompt
     assert "cron 扩展任务" in prompt
-

@@ -1,4 +1,4 @@
-"""Tests for browser tool compatibility loading."""
+"""Tests for ZeroAgent browser tools."""
 
 import json
 from importlib import resources
@@ -20,11 +20,11 @@ def test_web_scan_reports_browser_extra_hint_when_runtime_missing(monkeypatch) -
     assert "missing browser runtime" in result["msg"]
 
 
-def test_vendored_browser_modules_are_importable() -> None:
+def test_browser_runtime_modules_are_importable() -> None:
     import importlib.util
 
-    assert importlib.util.find_spec("zero_agent.vendor.genericagent.tm_webdriver")
-    assert importlib.util.find_spec("zero_agent.vendor.genericagent.simphtml")
+    assert importlib.util.find_spec("zero_agent.browser.tm_webdriver")
+    assert importlib.util.find_spec("zero_agent.browser.simphtml")
 
 
 def test_bundled_browser_extension_assets_are_readable() -> None:
@@ -104,7 +104,7 @@ def test_web_execute_js_handler_uses_javascript_code_block(
     assert data["status"] == "success"
 
 
-def test_web_execute_js_handler_missing_script_matches_ga(
+def test_web_execute_js_handler_missing_script_returns_error(
     tmp_path, mock_config
 ) -> None:
     mock_config.workspace_dir = str(tmp_path)
@@ -123,7 +123,7 @@ def test_web_execute_js_handler_missing_script_matches_ga(
     assert outcome.next_prompt == "\n"
 
 
-def test_web_scan_handler_returns_ga_shaped_html_string(
+def test_web_scan_handler_returns_html_string(
     tmp_path, mock_config, monkeypatch
 ) -> None:
     mock_config.workspace_dir = str(tmp_path)

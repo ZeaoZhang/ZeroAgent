@@ -120,7 +120,7 @@ class AgentConfig:
     default_backend: str = "default"
     max_turns: int = 80
     workspace_dir: str = "./workspace"
-    memory_dir: str = "./zero_agent/memory"
+    memory_dir: str = "./memory"
     sessions_dir: str = "./workspace/sessions"
     verbose: bool = True
     language: str = "auto"
@@ -235,6 +235,7 @@ class AgentConfig:
             ZA_LLM_MODEL     — 模型 ID
             ZA_MAX_TURNS     — 最大轮次 (默认 80)
             ZA_WORKSPACE_DIR — 工作目录 (默认 "./workspace")
+            ZA_MEMORY_DIR    — 记忆目录 (默认 "./memory")
 
         Returns:
             从环境变量构建的 AgentConfig.
@@ -245,6 +246,7 @@ class AgentConfig:
         model = os.environ.get("ZA_LLM_MODEL", "")
         max_turns = int(os.environ.get("ZA_MAX_TURNS", "80"))
         workspace_dir = os.environ.get("ZA_WORKSPACE_DIR", "./workspace")
+        memory_dir = os.environ.get("ZA_MEMORY_DIR", "./memory")
         language = os.environ.get("ZA_LANG", "auto")
         peer_hint = os.environ.get("ZA_PEER_HINT", "").lower() in ("1", "true", "yes", "on")
 
@@ -261,6 +263,7 @@ class AgentConfig:
             default_backend="default",
             max_turns=max_turns,
             workspace_dir=workspace_dir,
+            memory_dir=memory_dir,
             language=language,
             peer_hint=peer_hint,
         )
@@ -285,8 +288,8 @@ class AgentConfig:
             default_backend=data.get("default_backend", "default"),
             max_turns=data.get("max_turns", 80),
             workspace_dir=data.get("workspace_dir", "./workspace"),
-            memory_dir=data.get("memory_dir", "./zero_agent/memory"),
-            sessions_dir=data.get("sessions_dir", "./workspace/sessions"),
+            memory_dir=data.get("memory_dir", "./memory"),
+            sessions_dir=data.get("sessions_dir", "./sessions"),
             verbose=data.get("verbose", True),
             language=data.get("language", "auto"),
             incremental_output=data.get("incremental_output", False),
@@ -299,8 +302,8 @@ class AgentConfig:
 def reload_config_if_changed(config_path: str) -> Optional[AgentConfig]:
     """若配置文件自上次读取以来已更改，则重新加载并返回新配置.
 
-    与 GenericAgent 的 reload_mykeys() 对齐：通过比较文件 mtime 检测变更，
-    仅在文件内容变化时重新读取，避免不必要的 I/O.
+    通过比较文件 mtime 检测变更，仅在文件内容变化时重新读取，
+    避免不必要的 I/O.
 
     Args:
         config_path: YAML 配置文件路径.

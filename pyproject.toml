@@ -49,7 +49,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = [
     "zero_agent",
-    "zero_agent.adapters",
+    "zero_agent.browser",
     "zero_agent.bots",
     "zero_agent.core",
     "zero_agent.llm",
@@ -58,11 +58,10 @@ packages = [
     "zero_agent.memory",
     "zero_agent.runners",
     "zero_agent.utils",
+    "zero_agent.utils.skill_search",
     "zero_agent.reflect",
     "zero_agent.plugins",
     "zero_agent.frontends",
-    "zero_agent.vendor",
-    "zero_agent.vendor.genericagent",
     "zero_agent.assets",
 ]
 
@@ -70,21 +69,18 @@ packages = [
 "zero_agent.frontends" = [
     "desktop/static/*",
     "desktop/static/vendor/*",
-    "skins/**/*",
-    "conductor_im_plugins/*",
-    "*.gif",
-    "*.html",
-    "*.png",
-    "*.md",
 ]
 "zero_agent.assets" = [
     "code_run_header.py",
     "sys_prompt*.txt",
     "insight_fixed_structure*.txt",
     "global_mem_insight_template*.txt",
+    "memory_seed/sops/*.md",
+    "review_sop/*.md",
+    "review_sop/*.txt",
+    "templates/*.py",
     "tmwd_cdp_bridge/*",
 ]
-"zero_agent.memory" = ["*.md", "*.py", "*.txt", "**/*.md", "**/*.py", "**/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

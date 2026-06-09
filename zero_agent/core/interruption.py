@@ -33,7 +33,7 @@ def classify_interruption(
     content: Optional[str] = None,
     stop_reason: Optional[str] = None,
 ) -> Optional[Interruption]:
-    """Return the GA-compatible interruption classification, if any.
+    """Return the retryable interruption classification, if any.
 
     Args:
         response: Optional MockResponse-like object.
@@ -85,7 +85,7 @@ def classify_interruption(
 
 
 def append_interruption_marker(content: str, kind: str) -> str:
-    """Append the GA-visible marker for ``kind`` unless it is already present."""
+    """Append the interruption marker for ``kind`` unless it is already present."""
 
     content = content or ""
     if kind == "max_tokens":

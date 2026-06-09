@@ -1,336 +1,251 @@
-"""L4 会话日志压缩与归档.
-
-将会话日志压缩为简化格式，提取历史摘要，归档到月度 zip.
-
-用法:
-    from zero_agent.memory.compress_session import compress_session, batch_process
+"""L4 Session Log Processor — compress & extract history.
+Format A (JSON): kept as-is.  Format B (Raw): strip sys prompt & assistant echo.
 """
-
-from __future__ import annotations
-
-import glob
-import json
-import os
-import re
-import shutil
-import zipfile
-from collections import defaultdict
+import re, os, json
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
 
+L4_DIR = os.path.abspath(os.path.join(os.getcwd(), 'memory', 'L4_raw_sessions'))
 
-def compress_session(
-    src: str,
-    dst_dir: str,
-) -> Tuple[Optional[str], Dict[str, Any]]:
-    """压缩单个会话日志文件.
+_RE_PROMPT   = re.compile(r'^=== Prompt ===(?: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}))?', re.M)
+_RE_RESPONSE = re.compile(r'^=== Response ===(?: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}))?', re.M)
+_RE_USER     = re.compile(r'^=== USER ===$', re.M)
+_RE_ASST     = re.compile(r'^=== ASSISTANT ===$', re.M)
+_RE_ANY_MARKER = re.compile(r'^=== (?:Prompt|Response|USER|ASSISTANT) ===(?:.*)?$', re.M)
 
-    支持两种格式:
-        - Format A (JSON): 保留原始 JSON 结构
-        - Format B (Raw): 去除系统提示词和助手的 echo 部分
+def _ts_fmt(ts_str):
+    """'2026-04-03 20:13:06' → '0403_2013'"""
+    try: return datetime.strptime(ts_str.strip(), '%Y-%m-%d %H:%M:%S').strftime('%m%d_%H%M')
+    except Exception: return None
 
-    Args:
-        src: 原始日志文件路径.
-        dst_dir: 输出目录.
+def _detect_format(text):
+    """Detect A (json) vs B (raw) by checking content after first Prompt marker."""
+    m = _RE_PROMPT.search(text)
+    if not m: return 'unknown'
+    return 'json' if re.match(r'\s*\{', text[m.end():m.end()+200]) else 'raw'
 
-    Returns:
-        (dst_path, stats) — dst_path 为 None 表示压缩失败,
-        stats 包含 total_lines, compressed_lines, format 等.
-    """
-    if not os.path.isfile(src):
-        return None, {"error": "Source file not found", "src": src}
+def _parse_sections(text):
+    """Split text into (type, marker_line, body) tuples."""
+    markers = list(_RE_ANY_MARKER.finditer(text))
+    if not markers:
+        return [('preamble', '', text)]
+    _MAP = {'Prompt': 'prompt', 'Response': 'response', 'USER': 'user', 'ASSISTANT': 'assistant'}
+    sections = []
+    if markers[0].start() > 0:
+        sections.append(('preamble', '', text[:markers[0].start()]))
+    for i, m in enumerate(markers):
+        line = m.group()
+        end = markers[i+1].start() if i+1 < len(markers) else len(text)
+        typ = next((v for k, v in _MAP.items() if line.startswith(f'=== {k}')), None)
+        if typ:
+            sections.append((typ, line, text[m.end():end]))
+    return sections
 
-    with open(src, "r", encoding="utf-8", errors="replace") as f:
-        content = f.read()
-
-    stats: Dict[str, Any] = {
-        "src": src,
-        "total_bytes": len(content),
-    }
-
-    # 检测格式
-    first_prompt_idx = content.find("=== Prompt ===")
-    if first_prompt_idx >= 0:
-        after_prompt = content[first_prompt_idx:]
-        # JSON 格式: Prompt 后的内容以 '{' 开头
-        try:
-            json.loads(after_prompt.split("\n", 1)[1].strip()[:1] or "x")
-        except Exception:
-            pass
-        is_json = after_prompt.strip().startswith("{")
-        stats["format"] = "json" if is_json else "raw"
-    else:
-        stats["format"] = "unknown"
-
-    # 压缩: 去除系统提示词区段和助手回声
-    compressed = _strip_system_and_echo(content)
-    stats["compressed_bytes"] = len(compressed)
-
-    # 太小则拒绝
-    if len(compressed) < 4500:
-        return None, {**stats, "error": "Compressed output too small (< 4500 bytes)"}
-
-    # 生成输出文件名: MMDD_HHMM-MMDD_HHMM.txt
-    mtime = os.path.getmtime(src)
-    dt = datetime.fromtimestamp(mtime)
-    dst_name = f"{dt.strftime('%m%d_%H%M')}-{dt.strftime('%m%d_%H%M')}_compressed.txt"
-    dst_path = os.path.join(dst_dir, dst_name)
-
-    os.makedirs(dst_dir, exist_ok=True)
-    with open(dst_path, "w", encoding="utf-8") as f:
+def compress_session(src, dst_dir=None):
+    """Compress model_responses_xxx.txt → MMDD_HHMM-MMDD_HHMM.txt. Returns (dst, stats) or (None, reason)."""
+    dst_dir = dst_dir or L4_DIR
+    with open(src, 'r', encoding='utf-8', errors='replace') as f:
+        text = f.read()
+    timestamps = [m.group(1) for m in _RE_PROMPT.finditer(text) if m.group(1)]
+    if not timestamps:  # fallback to Response timestamps
+        timestamps = [m.group(1) for m in _RE_RESPONSE.finditer(text) if m.group(1)]
+    if not timestamps:
+        return None, 'no timestamps found'
+    ts_first, ts_last = _ts_fmt(timestamps[0]), _ts_fmt(timestamps[-1])
+    if not ts_first:
+        return None, 'bad timestamp format'
+    name = f"{ts_first}-{ts_last or ts_first}.txt"
+    fmt = _detect_format(text)
+    compressed = _compress_raw(text) if fmt == 'raw' else text
+    if len(compressed.encode('utf-8')) < 4500:
+        return None, f'too small after compress ({len(compressed)}B)'
+    dst = os.path.join(dst_dir, name)
+    with open(dst, 'w', encoding='utf-8', newline='') as f:
         f.write(compressed)
+    orig_kb, new_kb = os.path.getsize(src) // 1024, os.path.getsize(dst) // 1024
+    ratio = (1 - new_kb / max(orig_kb, 1)) * 100
+    return dst, {'src': os.path.basename(src), 'dst': name, 'fmt': fmt,
+                 'orig_kb': orig_kb, 'new_kb': new_kb, 'ratio': f'{ratio:.0f}%',
+                 'year': timestamps[0][:4]}
 
-    return dst_path, stats
+def _compress_raw(text):
+    """Format B: strip system prompt (Prompt→USER) and assistant echo (ASSISTANT→Response)."""
+    sections = _parse_sections(text)
+    out = []
+    for i, (typ, line, body) in enumerate(sections):
+        if typ == 'prompt':
+            out.append(line + '\n')
+            if not (i+1 < len(sections) and sections[i+1][0] == 'user'):
+                out.append(body)  # no USER follows → keep body
+        elif typ in ('user', 'response'):
+            out.append(line + '\n')
+            out.append(body)
+        elif typ == 'preamble':
+            out.append(body)
+        # assistant → skip (redundant echo)
+    return ''.join(out)
 
+_RE_HISTORY = re.compile(r'<history>(.*?)</history>', re.S)
 
-def extract_history(src: str, session_name: str = "") -> Tuple[List[str], Dict]:
-    """从压缩后的 session 中提取 [USER]/[Agent] 历史行.
+def _parse_history_block(raw):
+    """Parse <history> block into ['[USER]...', '[Agent]...'] lines."""
+    lines = [l.strip() for l in raw.split('\n') if l.strip()]
+    parsed = [l for l in lines if l.startswith('[USER]') or l.startswith('[Agent]')]
+    if len(parsed) >= 2:
+        return parsed
+    # JSON format: literal \\n separators
+    joined = raw.strip()
+    if '\\n[USER]' in joined or '\\n[Agent]' in joined:
+        parts = joined.replace('\\n', '\n').split('\n')
+        parsed = [p.strip() for p in parts if p.strip() and (p.strip().startswith('[USER]') or p.strip().startswith('[Agent]'))]
+        if parsed: return parsed
+    return parsed or []
 
-    Args:
-        src: 压缩后的日志文件路径.
-        session_name: 会话名称（用于合并去重）.
-
-    Returns:
-        (history_lines, metadata)
-    """
-    if not os.path.isfile(src):
-        return [], {}
-
-    with open(src, "r", encoding="utf-8", errors="replace") as f:
-        content = f.read()
-
-    # 提取 <history> 块
-    history_pattern = re.compile(r"<history>(.*?)</history>", re.DOTALL)
-    lines: list[str] = []
-    for match in history_pattern.finditer(content):
-        block = match.group(1)
-        # 处理 JSON 转义的换行
-        block = block.replace("\\n", "\n")
-        for line in block.split("\n"):
-            line = line.strip()
-            if line.startswith("[USER]") or line.startswith("[Agent]"):
-                lines.append(line)
-
-    # 去重（基于后缀-前缀重叠检测）
-    deduped = _deduplicate_history(lines)
-
-    metadata = {
-        "session_name": session_name,
-        "total_lines": len(lines),
-        "deduped_lines": len(deduped),
-    }
-
-    return deduped, metadata
-
-
-def format_history_block(
-    session_name: str,
-    history_lines: List[str],
-) -> str:
-    """格式化历史块，用于追加到 all_histories.txt.
-
-    Args:
-        session_name: 会话名称.
-        history_lines: 历史行列表.
-
-    Returns:
-        格式化的字符串.
-    """
-    parts = [f"=== {session_name} ==="]
-    parts.extend(history_lines)
-    parts.append("")
-    return "\n".join(parts)
-
-
-def batch_process(
-    src_dir: str,
-    l4_dir: str,
-    dry_run: bool = True,
-) -> Dict[str, Any]:
-    """批量压缩、提取、归档流程.
-
-    Args:
-        src_dir: 原始日志目录.
-        l4_dir: L4 归档目录.
-        dry_run: True 时仅预览不执行.
-
-    Returns:
-        处理统计字典.
-    """
-    results: Dict[str, Any] = {
-        "processed": 0,
-        "skipped": 0,
-        "archived": 0,
-        "deleted_raw": 0,
-        "errors": [],
-    }
-
-    os.makedirs(l4_dir, exist_ok=True)
-
-    # 读取已归档会话，避免重复处理
-    existing = _existing_sessions(l4_dir)
-
-    log_pattern = os.path.join(src_dir, "*.log")
-    log_files = sorted(glob.glob(log_pattern))
-
-    for log_file in log_files:
-        # 跳过 2 小时内修改的文件
-        mtime = os.path.getmtime(log_file)
-        if datetime.now().timestamp() - mtime < 7200:
-            results["skipped"] += 1
-            continue
-
-        # 跳过已归档会话
-        basename = os.path.basename(log_file)
-        if basename in existing:
-            results["skipped"] += 1
-            continue
-
-        if dry_run:
-            results["processed"] += 1
-            continue
-
-        dst_path, stats = compress_session(log_file, l4_dir)
-        if dst_path:
-            history_lines, _ = extract_history(dst_path, os.path.basename(log_file))
-            if history_lines:
-                hist_block = format_history_block(
-                    os.path.basename(log_file), history_lines
-                )
-                all_path = os.path.join(l4_dir, "all_histories.txt")
-                with open(all_path, "a", encoding="utf-8") as f:
-                    f.write(hist_block)
-
-            # 月归档
-            _archive_to_monthly(log_file, l4_dir)
-            results["archived"] += 1
-            existing.add(basename)
-
-            # 删除已处理的原始文件
-            try:
-                os.remove(log_file)
-                results["deleted_raw"] += 1
-            except OSError:
-                pass
-        else:
-            results["skipped"] += 1
-            if "error" in stats:
-                results["errors"].append(stats["error"])
-
-        results["processed"] += 1
-
-    return results
-
-
-def _existing_sessions(l4_dir: str) -> set:
-    """从 all_histories.txt 读取已归档的会话名称.
-
-    Args:
-        l4_dir: L4 归档根目录.
-
-    Returns:
-        已归档会话文件名的集合.
-    """
-    hist_path = os.path.join(l4_dir, "all_histories.txt")
-    if not os.path.isfile(hist_path):
-        return set()
-    result: set = set()
-    with open(hist_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("=== "):
-                result.add(line.replace("===", "").strip())
-    return result
-
-
-def _strip_system_and_echo(content: str) -> str:
-    """去除系统提示词段和助手回声.
-
-    Args:
-        content: 原始日志内容.
-
-    Returns:
-        压缩后的内容.
-    """
-    sections = re.split(r"(=== \w+ ===)", content)
-    result_parts: list[str] = []
-
-    skip_next = False
-    for i, section in enumerate(sections):
-        stripped = section.strip()
-        if stripped in ("=== Prompt ===", "=== Response ==="):
-            result_parts.append(stripped + "\n")
-            skip_next = False
-        elif stripped == "=== ASSISTANT ===":
-            skip_next = True
-        elif skip_next:
-            skip_next = False
-            continue
-        else:
-            if not stripped.startswith("==="):
-                result_parts.append(section)
-
-    return "".join(result_parts)
-
-
-def _deduplicate_history(lines: List[str]) -> List[str]:
-    """通过后缀-前缀重叠检测合并滑动窗口中的历史块.
-
-    与 GenericAgent 的 _merge_history_blocks 对齐:
-    当连续块之间存在重叠行时（前一块尾部和后一块头部匹配），
-    将块拼接在一起而非产生重复条目。
-
-    Args:
-        lines: 历史行列表 (可能包含多个滑动窗口块).
-
-    Returns:
-        合并后的无重复列表.
-    """
-    if not lines:
-        return []
-    result: list[str] = [lines[0]]
-    i = 1
-    while i < len(lines):
-        # 查找后缀-前缀最长重叠 (最多检查最后 10 行)
+def _merge_history_blocks(all_blocks):
+    """Merge sliding-window history blocks into one deduplicated list."""
+    if not all_blocks: return []
+    acc = list(all_blocks[0])
+    for block in all_blocks[1:]:
+        if not block: continue
+        if not acc:
+            acc = list(block); continue
         best = 0
-        for k in range(1, min(len(result), 10) + 1):
-            if result[-k:] == lines[i:i + k]:
-                best = k
+        for k in range(1, min(len(acc), len(block)) + 1):
+            if acc[-k:] == block[:k]: best = k
         if best > 0:
-            i += best
-            continue
-        # 回退: 在 result 中查找当前行，从匹配位置继续合并
-        line = lines[i]
-        if line in result:
-            idx = len(result) - 1 - result[::-1].index(line)
+            acc.extend(block[best:])
+        elif block[0] in acc:
+            idx = len(acc) - 1 - acc[::-1].index(block[0])
             match_len = 0
-            for j in range(min(len(lines) - i, len(result) - idx)):
-                if result[idx + j] == lines[i + j]:
-                    match_len = j + 1
-                else:
-                    break
-            if match_len > 0:
-                result.extend(lines[i + match_len:])
-                break
-        result.append(line)
-        i += 1
-    return result
+            for j in range(min(len(block), len(acc) - idx)):
+                if acc[idx + j] == block[j]: match_len = j + 1
+                else: break
+            acc.extend(block[match_len:])
+        else:
+            acc.extend(block)
+    return acc
 
+def extract_history(src, session_name=None):
+    """Extract [USER]/[Agent] history from session file."""
+    with open(src, 'r', encoding='utf-8', errors='replace') as f:
+        text = f.read()
+    if session_name is None:
+        session_name = os.path.splitext(os.path.basename(src))[0]
+    all_blocks = [parsed for m in _RE_HISTORY.finditer(text)
+                  if (parsed := _parse_history_block(m.group(1)))]
+    if all_blocks:
+        return _merge_history_blocks(all_blocks)
+    return []
 
-def _archive_to_monthly(file_path: str, l4_dir: str) -> None:
-    """将日志文件归档到月 zip.
+def format_history_block(session_name, history_lines):
+    """Format history lines into all_histories.txt block format."""
+    sep = '=' * 60
+    return f"{sep}\nSESSION: {session_name}\n{sep}\n" + '\n'.join(history_lines) + '\n'
 
-    Args:
-        file_path: 源日志文件路径.
-        l4_dir: L4 归档根目录.
-    """
-    mtime = os.path.getmtime(file_path)
-    dt = datetime.fromtimestamp(mtime)
-    archive_name = f"{dt.strftime('%Y-%m')}.zip"
-    archive_path = os.path.join(l4_dir, archive_name)
+import tempfile, shutil, zipfile, glob
+from collections import defaultdict
 
-    mode = "a" if os.path.isfile(archive_path) else "w"
-    with zipfile.ZipFile(archive_path, mode, zipfile.ZIP_DEFLATED) as zf:
-        arcname = os.path.basename(file_path)
-        if arcname not in zf.namelist():
-            zf.write(file_path, arcname)
+def _existing_sessions(l4_dir):
+    """Read session names already in all_histories.txt."""
+    hist_path = os.path.join(l4_dir, 'all_histories.txt')
+    if not os.path.exists(hist_path): return set()
+    with open(hist_path, 'r', encoding='utf-8') as f:
+        return {l.strip().replace('SESSION: ', '') for l in f if l.startswith('SESSION: ')}
+
+def batch_process(src, l4_dir=None, dry_run=True):
+    """Batch compress + extract history + archive. dry_run=True is safe default."""
+    l4_dir = os.path.normpath(l4_dir or L4_DIR)
+    os.makedirs(l4_dir, exist_ok=True)
+    raw_files = sorted(src) if isinstance(src, (list, tuple)) else \
+                sorted(glob.glob(os.path.join(src, 'model_responses_*.txt')))
+    if not raw_files:
+        print("No raw files found"); return {'processed': 0, 'skipped': 0, 'errors': 0, 'new_sessions': 0}
+
+    existing = _existing_sessions(l4_dir)
+    print(f"Found {len(raw_files)} raw, {len(existing)} existing in L4")
+
+    tmp_dir = tempfile.mkdtemp(prefix='cs_batch_')
+    results, skipped, errors = [], [], []
+
+    import time
+    cutoff = time.time() - 7200  # skip files modified within 2h
+
+    # Phase 1: Compress + Extract (to temp dir)
+    for fp in raw_files:
+        fname = os.path.basename(fp)
+        if os.path.getmtime(fp) > cutoff:
+            skipped.append((fname, 'recent(<2h)')); continue
+        try:
+            dst, info = compress_session(fp, tmp_dir)
+            if dst is None:
+                skipped.append((fname, info)); continue
+            sn = os.path.splitext(os.path.basename(dst))[0]
+            if sn in existing:
+                skipped.append((fname, f'dup:{sn}')); os.remove(dst); continue
+            results.append((sn, dst, extract_history(dst), info, fp))
+        except Exception as e:
+            errors.append((fname, str(e)))
+    results.sort(key=lambda x: x[0])
+
+    print(f"\nP1: {len(results)} new, {len(skipped)} skip, {len(errors)} err")
+    for f, r in skipped[:5]: print(f"  SKIP {f}: {r}")
+    for f, e in errors[:5]:  print(f"  ERR  {f}: {e}")
+    if results: print(f"  Range: {results[0][0]} → {results[-1][0]}")
+
+    if dry_run:
+        print("\n[DRY RUN] Pass dry_run=False to execute.")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return {'processed': len(results), 'skipped': len(skipped),
+                'errors': len(errors), 'new_sessions': len(results),
+                'sessions': [r[0] for r in results]}
+
+    # Phase 2: Append history
+    with open(os.path.join(l4_dir, 'all_histories.txt'), 'a', encoding='utf-8') as f:
+        for sn, _, hist, _, _ in results:
+            if hist: f.write('\n' + format_history_block(sn, hist))
+    print(f"Appended {len(results)} sessions to all_histories.txt")
+
+    # Phase 3: Archive to monthly zips
+    by_month = defaultdict(list)
+    for sn, cpath, _, info, _ in results:
+        year = info.get('year', '2026') if isinstance(info, dict) else '2026'
+        by_month[f"{year}-{sn[:2]}"].append((sn, cpath))
+    for mk, items in sorted(by_month.items()):
+        zpath = os.path.join(l4_dir, f"{mk}.zip")
+        mode = 'a' if os.path.exists(zpath) else 'w'
+        with zipfile.ZipFile(zpath, mode, zipfile.ZIP_DEFLATED) as zf:
+            names = set(zf.namelist()) if mode == 'a' else set()
+            for sn, cp in items:
+                if f"{sn}.txt" not in names: zf.write(cp, f"{sn}.txt")
+        print(f"  {mk}.zip: +{len(items)}")
+
+    # Phase 4: Delete raw files
+    to_del = [rp for *_, rp in results]
+    for fname, reason in skipped:
+        if 'recent' in reason: continue  # active session still being written
+        m = [f for f in raw_files if os.path.basename(f) == fname]
+        if m: to_del.append(m[0])
+    deleted = 0
+    for rp in to_del:
+        try: os.remove(rp); deleted += 1
+        except Exception: pass
+    print(f"Deleted {deleted}/{len(to_del)} raw files")
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    report = {'processed': len(results), 'skipped': len(skipped),
+              'errors': len(errors), 'new_sessions': len(results), 'deleted_raw': deleted}
+    print(f"\nDone: {report}")
+    return report
+
+# ── CLI ──
+RAW_DIR = os.path.abspath(
+    os.environ.get('ZA_MODEL_RESPONSES_DIR')
+    or os.path.join(os.getcwd(), 'workspace', 'sessions')
+)
+
+if __name__ == '__main__':
+    import argparse
+    ap = argparse.ArgumentParser(description='L4 session archiver')
+    ap.add_argument('src', nargs='?', default=RAW_DIR, help='raw files dir')
+    ap.add_argument('--run', action='store_true', help='actually execute (default: dry run)')
+    args = ap.parse_args()
+    batch_process(args.src, dry_run=not args.run)

@@ -132,7 +132,7 @@ def _make_start_long_term_update_handler(config: AgentConfig):
     ) -> Generator[str, None, dict]:
         yield "[Info] Start distilling good memory for long-term storage.\n"
 
-        sop_path = os.path.join(config.memory_dir, "memory_management_sop.md")
+        sop_path = os.path.join(config.memory_dir, "sops", "memory_management_sop.md")
         if os.path.exists(sop_path):
             result = "This is L0:\n" + file_read(sop_path, show_linenos=False)
         else:

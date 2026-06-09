@@ -54,7 +54,7 @@ def build_help_text(commands=HELP_COMMANDS) -> str:
 HELP_TEXT = build_help_text()
 FILE_HINT = "If you need to show files to user, use [FILE:filepath] in your response."
 TAG_PATS = [r"<" + t + r">.*?</" + t + r">" for t in ("thinking", "summary", "tool_use", "file_content")]
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BOT_CONFIG_ENV = "ZA_BOT_CONFIG_PATH"
 
 
 def _restore_globs() -> tuple:
@@ -279,7 +279,10 @@ def require_runtime(runner, label: str, **required) -> None:
     """验证必需的运行时配置已就绪."""
     missing = [k for k, v in required.items() if not v]
     if missing:
-        print(f"[{label}] ERROR: please set {', '.join(missing)} in mykey.py or mykey.json")
+        print(
+            f"[{label}] ERROR: please set {', '.join(missing)} "
+            f"in ${BOT_CONFIG_ENV} or environment variables"
+        )
         sys.exit(1)
     if runner.llmclient is None:
         print(f"[{label}] ERROR: no usable LLM backend found")
@@ -300,34 +303,65 @@ def redirect_log(script_file: str, log_name: str, label: str, allowed: set) -> N
 
 # —— 配置加载 ——
 
-def load_keys() -> dict:
-    """从项目根目录 mykey.json 或环境变量加载 bot 配置."""
+def bot_config_source() -> str:
+    """Return the active bot config source label."""
+    return os.environ.get(BOT_CONFIG_ENV, "").strip() or "environment"
+
+
+def _read_bot_config(path: str) -> dict:
+    cfg_path = os.path.expanduser(path)
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        if cfg_path.endswith((".yaml", ".yml")):
+            import yaml
+            data = yaml.safe_load(f) or {}
+        else:
+            data = json.load(f)
+    if not isinstance(data, dict):
+        return {}
     keys: dict = {}
-    # 1. 尝试 mykey.json
-    for search in (
-        os.path.join(PROJECT_ROOT, "mykey.json"),
-        os.path.join(os.getcwd(), "mykey.json"),
-    ):
-        try:
-            with open(search, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                keys.update(data)
-            break
-        except (FileNotFoundError, json.JSONDecodeError):
-            continue
-    # 2. 环境变量覆盖
+    bots = data.get("bots")
+    if isinstance(bots, dict):
+        keys.update(bots)
+    keys.update({k: v for k, v in data.items() if k != "bots"})
+    return keys
+
+
+def _env_value(key: str, value: str):
+    if key.endswith("_allowed_users"):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return value
+
+
+def load_keys() -> dict:
+    """Load bot runtime keys from ZA_BOT_CONFIG_PATH and environment variables."""
+    keys: dict = {}
+    config_path = os.environ.get(BOT_CONFIG_ENV, "").strip()
+    if config_path:
+        keys.update(_read_bot_config(config_path))
     env_map = {
         "tg_bot_token": "TG_BOT_TOKEN",
         "tg_allowed_users": "TG_ALLOWED_USERS",
         "discord_bot_token": "DISCORD_BOT_TOKEN",
         "discord_allowed_users": "DISCORD_ALLOWED_USERS",
+        "fs_app_id": "FS_APP_ID",
+        "fs_app_secret": "FS_APP_SECRET",
+        "fs_allowed_users": "FS_ALLOWED_USERS",
+        "wecom_bot_id": "WECOM_BOT_ID",
+        "wecom_secret": "WECOM_SECRET",
+        "wecom_welcome_message": "WECOM_WELCOME_MESSAGE",
+        "wecom_allowed_users": "WECOM_ALLOWED_USERS",
+        "dingtalk_client_id": "DINGTALK_CLIENT_ID",
+        "dingtalk_client_secret": "DINGTALK_CLIENT_SECRET",
+        "dingtalk_allowed_users": "DINGTALK_ALLOWED_USERS",
+        "qq_app_id": "QQ_APP_ID",
+        "qq_app_secret": "QQ_APP_SECRET",
+        "qq_allowed_users": "QQ_ALLOWED_USERS",
         "proxy": "BOT_PROXY",
     }
     for key, env in env_map.items():
         val = os.environ.get(env, "")
         if val:
-            keys[key] = val
+            keys[key] = _env_value(key, val)
     return keys
 
 
@@ -336,7 +370,7 @@ def load_keys() -> dict:
 class AgentBotMixin:
     """Bot 前端 mixin, 提供命令处理和 agent 交互.
 
-    适配 ZeroAgent 的 AgentRunner, 替代 GenericAgent 的 AgentChatMixin.
+    适配 ZeroAgent 的 AgentRunner.
     子类需实现 send_text() 和 (可选) send_done().
 
     Attributes:

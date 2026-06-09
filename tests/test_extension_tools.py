@@ -10,7 +10,7 @@ from zero_agent.tools.registry import ToolRegistry
 @pytest.mark.skip(
     reason="Extension tools (im/memory_plot/search/vision) are intentionally "
     "not exposed as standalone builtin modules. Vision is handled via SOP + "
-    "code_run calling memory/vision_api.ask_vision(). IM send is handled by "
+    "code_run calling zero_agent.utils.vision_api.ask_vision(). IM send is handled by "
     "frontend Bot processes. See builtin/__init__.py docstring for details."
 )
 def test_optional_extension_handlers_return_data(monkeypatch) -> None:

@@ -1,4 +1,4 @@
-"""Builtin tool implementations — strictly aligned with GenericAgent's 9-tool set.
+"""Builtin tool implementations for ZeroAgent's core tool set.
 
 Core tools (auto-registered by with_builtins()):
     code_run              — Execute Python/Shell code in isolated subprocess
@@ -15,7 +15,7 @@ Virtual/internal tools (handled by engine/Handler, NOT in schema):
     no_tool  — Triggered by engine when LLM produces no tool call
     bad_json — Triggered by engine when LLM produces malformed JSON arguments
 
-Other capabilities (NOT exposed as standalone tools, aligned with GenericAgent):
-    vision   — Via SOP + code_run: LLM writes Python to call memory/vision_api.ask_vision()
-    IM send  — Handled by frontend Bot processes (wechatapp/fsapp etc.), not agent tool
+Other capabilities (NOT exposed as standalone tools):
+    vision   — Via SOP + code_run: LLM writes Python to call zero_agent.utils.vision_api.ask_vision()
+    IM send  — Handled by bot processes, not agent tool
 """

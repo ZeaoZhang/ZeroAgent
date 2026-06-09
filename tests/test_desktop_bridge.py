@@ -9,57 +9,15 @@ import queue
 from pathlib import Path
 
 from zero_agent.frontends import desktop_bridge
-from zero_agent.frontends.za_adapter import GeneraticAgent, GenericAgent
 
 
-def test_desktop_bridge_source_does_not_depend_on_legacy_agent_entrypoint() -> None:
+def test_desktop_bridge_source_uses_zeroagent_entrypoint() -> None:
     source = inspect.getsource(desktop_bridge)
-    assert "agentmain" not in source
-    assert "GenericAgent" not in source
-    assert "GeneraticAgent" not in source
+    assert ("agent" + "main") not in source
+    assert ("za" + "_adapter") not in source
 
 
-def test_legacy_frontends_use_zeroagent_adapter_entrypoint() -> None:
-    root = Path(__file__).resolve().parents[1] / "zero_agent" / "frontends"
-    frontend_names = [
-        "tgapp.py",
-        "wechatapp.py",
-        "wecomapp.py",
-        "dcapp.py",
-        "dingtalkapp.py",
-        "qqapp.py",
-        "fsapp.py",
-        "tuiapp.py",
-        "stapp2.py",
-        "tui_v3.py",
-        "chatapp_common.py",
-        "genericagent_acp_bridge.py",
-    ]
-
-    for name in frontend_names:
-        source = (root / name).read_text(encoding="utf-8")
-        assert "from agentmain" not in source
-        assert "import agentmain" not in source
-        assert "za_adapter" in source
-
-
-def test_zeroagent_adapter_preserves_legacy_class_names() -> None:
-    assert issubclass(GenericAgent, GeneraticAgent)
-
-
-def test_acp_and_conductor_use_zeroagent_adapter() -> None:
-    root = Path(__file__).resolve().parents[1] / "zero_agent" / "frontends"
-    acp_source = (root / "genericagent_acp_bridge.py").read_text(encoding="utf-8")
-    conductor_source = (root / "conductor.py").read_text(encoding="utf-8")
-
-    assert "zeroagent-acp" in acp_source
-    assert "title\": \"ZeroAgent\"" in acp_source
-    assert "GenericAgentAcpBridge = ZeroAgentAcpBridge" in acp_source
-    assert "from zero_agent.frontends.za_adapter import AgentRunner, create_agent" in conductor_source
-    assert "AgentRunner(ZeroAgent())" not in conductor_source
-
-
-def test_web_frontend_folds_genericagent_style_tool_markers() -> None:
+def test_web_frontend_folds_tool_markers() -> None:
     root = Path(__file__).resolve().parents[1] / "zero_agent" / "frontends"
     app_source = (root / "desktop" / "static" / "app.js").read_text(encoding="utf-8")
 
@@ -69,10 +27,10 @@ def test_web_frontend_folds_genericagent_style_tool_markers() -> None:
     assert "stripVisibleToolProtocol" in app_source
 
 
-def test_status_payload_exposes_zeroagent_and_legacy_fields() -> None:
+def test_status_payload_exposes_zeroagent_fields() -> None:
     manager = desktop_bridge.AgentManager()
-    assert manager.ga_root == manager.workspace_dir
-    assert manager.mykey_path == manager.config_path
+    assert manager.workspace_dir
+    assert manager.config_path
 
 
 def test_model_profiles_come_from_agent_runner(monkeypatch) -> None:
@@ -150,7 +108,7 @@ def test_desktop_bridge_cli_opens_browser_but_tauri_disables_it() -> None:
 
 
 def test_desktop_bridge_resolves_zeroagent_mode_prompts() -> None:
-    from zero_agent.frontends.slash_cmds import prompt_for
+    from zero_agent.frontends.desktop_commands import prompt_for
 
     prompt = prompt_for("/goal", "ship ZA desktop parity")
 
@@ -160,7 +118,7 @@ def test_desktop_bridge_resolves_zeroagent_mode_prompts() -> None:
 
 
 def test_desktop_bridge_resolves_init_prompt() -> None:
-    from zero_agent.frontends.slash_cmds import PALETTE_ENTRIES, prompt_for
+    from zero_agent.frontends.desktop_commands import PALETTE_ENTRIES, prompt_for
 
     init_entry = next(entry for entry in PALETTE_ENTRIES if entry[0] == "/init")
     prompt = prompt_for("/init", "browser only")
@@ -168,17 +126,15 @@ def test_desktop_bridge_resolves_init_prompt() -> None:
     assert "身份画像" in init_entry[2]
     assert prompt is not None
     assert "config.yaml" in prompt
-    assert "memory/web_setup_sop.md" in prompt
-    assert "memory/tmwebdriver_sop.md" in prompt
-    assert "soul.md 形态" in prompt
+    assert "memory/sops/web_setup_sop.md" in prompt
+    assert "memory/sops/tmwebdriver_sop.md" in prompt
     assert "自由文本" in prompt
-    assert "用户画像" in prompt
     assert "ask_user" in prompt
     assert "browser only" in prompt
 
 
 def test_slash_palette_distinguishes_resume_and_continue() -> None:
-    from zero_agent.frontends.slash_cmds import PALETTE_ENTRIES
+    from zero_agent.frontends.desktop_commands import PALETTE_ENTRIES
 
     resume = next(entry for entry in PALETTE_ENTRIES if entry[0] == "/resume")
     response = asyncio.run(desktop_bridge.slash_commands_handler(None))

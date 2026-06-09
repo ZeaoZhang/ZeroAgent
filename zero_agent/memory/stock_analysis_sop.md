@@ -1,1 +1,0 @@
-Let me now update the L3 SOP (stock_analysis_sop.md) with the comprehensive tool listing and workflows based on what I've discovered.

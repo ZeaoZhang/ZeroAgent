@@ -37,7 +37,9 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     if args.reflect:
         # Reflect 反射模式
-        _run_reflect(agent, args.reflect)
+        if args.llm_no is not None:
+            agent.next_llm(args.llm_no)
+        _run_reflect(agent, args.reflect, _parse_reflect_args(args.reflect_arg))
     elif args.task:
         # 文件 I/O 批量模式
         _run_task_mode(agent, args.task)
@@ -87,6 +89,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="覆盖配置中的模型 ID",
     )
     parser.add_argument(
+        "--llm-no",
+        "--llm_no",
+        dest="llm_no",
+        type=int,
+        default=None,
+        help="按配置顺序选择第 N 个 LLM 后端（从 0 开始）",
+    )
+    parser.add_argument(
         "--max-turns",
         type=int,
         default=80,
@@ -101,6 +111,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "-r", "--reflect",
         default=None,
         help="Reflect 反射模式: 指定 reflect 模块文件路径",
+    )
+    parser.add_argument(
+        "--reflect-arg",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="传递给 reflect 模块 init() 的参数，可重复指定",
     )
     parser.add_argument(
         "--task",
@@ -506,18 +523,33 @@ def _print_welcome(agent: ZeroAgent) -> None:
     print()
 
 
-def _run_reflect(agent: ZeroAgent, module_path: str) -> None:
+def _parse_reflect_args(values: list[str] | None) -> dict[str, str]:
+    """Parse repeated KEY=VALUE reflect arguments."""
+    parsed: dict[str, str] = {}
+    for value in values or []:
+        if "=" not in value:
+            raise ValueError(f"--reflect-arg must be KEY=VALUE, got: {value}")
+        key, raw = value.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"--reflect-arg key is empty: {value}")
+        parsed[key] = raw
+    return parsed
+
+
+def _run_reflect(agent: ZeroAgent, module_path: str, init_args: Optional[dict[str, str]] = None) -> None:
     """Reflect 反射模式: 周期性检查并执行任务.
 
     Args:
         agent: ZeroAgent 实例.
         module_path: reflect 模块文件路径.
+        init_args: 传给 reflect 模块 init() 的参数.
     """
-    from zero_agent.reflect.runner import ReflectRunner
+    from zero_agent.runners.reflect_runner import ReflectRunner
 
     runner = ReflectRunner(agent, module_path)
     try:
-        runner.run_loop()
+        runner.run_loop(init_args or {})
     except KeyboardInterrupt:
         print("\n[Reflect interrupted]")
         runner.stop()

@@ -1,12 +1,12 @@
 # ZeroAgent
 
-ZeroAgent 是一个基于 `litellm` 的可复用自主 Agent 框架。从 GenericAgent 重构而来，保留 generator-based agent loop 的核心交互模式，同时把 LLM 后端、工具系统、记忆、插件、CLI 和反射式运行拆成可测试的模块。
+ZeroAgent 是一个基于 `litellm` 的可复用自主 Agent 框架，采用 generator-based agent loop 的核心交互模式，同时把 LLM 后端、工具系统、记忆、插件、CLI 和反射式运行拆成可测试的模块。
 
 ## 特性
 
 - **Generator-based Agent Loop**: LLM 调用和工具执行以 Python generator 流式产出状态，最终返回结构化结果。
 - **多后端与容错**: 支持多个 LLM backend、运行时切换、failover 和 spring-back。
-- **工具注册表**: `ToolRegistry.with_builtins()` 默认注册对齐 GenericAgent 的 9 个核心原子工具，并支持自定义工具注册。
+- **工具注册表**: `ToolRegistry.with_builtins()` 默认注册 9 个核心原子工具，并支持自定义工具注册。
 - **双语自适应**: 系统提示、工具描述和 handler 消息支持中文、英文和自动语言选择。
 - **文本工具调用回退**: 对不支持原生 tool calling 的模型，可从 XML/JSON 文本中解析工具调用。
 - **记忆与压缩**: 分层记忆管理、历史标签压缩、消息裁剪和 OCR/视觉记忆扩展。
@@ -55,7 +55,7 @@ pip install -e ".[all-extras]"
 
 ## 工具清单
 
-默认工具清单对齐 GenericAgent 核心原子工具，`ToolRegistry.with_builtins()` 只注册以下 9 个工具:
+`ToolRegistry.with_builtins()` 默认只注册以下 9 个核心工具:
 
 - `code_run`
 - `file_read`
@@ -67,7 +67,7 @@ pip install -e ".[all-extras]"
 - `start_long_term_update`
 - `ask_user`
 
-`search_web`、`vision`、`memory_plot`、`send_im` 是 ZeroAgent 的可选/实验性扩展模块，不作为 GenericAgent 核心能力声明，也不会默认注册进 `with_builtins()`。
+`search_web`、`vision`、`memory_plot`、`send_im` 是 ZeroAgent 的可选/实验性扩展模块，不会默认注册进 `with_builtins()`。
 
 ## 配置
 
@@ -212,11 +212,11 @@ zero_agent/
   core/        # Agent 编排、配置、handler、loop、hooks、异常和类型
   llm/         # LiteLLM session、failover、factory、SSE parser、格式转换
   tools/       # 工具注册表；默认核心工具和可选扩展工具模块
-  memory/      # 分层记忆、OCR、视觉 API、会话压缩
+  memory/      # 记忆管理与 L4 会话压缩
   reflect/     # 反射式运行、目标模式、调度、subagent/team worker
-  frontends/   # 支持的 Web2/Tauri/桌面前端、launcher、桌宠资源
+  frontends/   # Web2/Tauri desktop bridge、静态前端和 launcher
   runners/     # CLI 入口
-  utils/       # 配置向导、文件、文本、keychain、统计工具
+  utils/       # 配置向导、文件、文本、keychain、统计工具和 agent 辅助脚本
   plugins/     # Langfuse tracing 等插件
 tests/         # pytest 测试
 docs/          # quickstart、architecture、reflect 文档
@@ -228,7 +228,6 @@ docs/          # quickstart、architecture、reflect 文档
 - [Architecture](docs/architecture.md)
 - [Reflect](docs/reflect.md)
 - [Contributing](CONTRIBUTING.md)
-- [CLAUDE.md](CLAUDE.md)
 
 ## 开发
 
@@ -242,6 +241,7 @@ pytest tests/ -v
 
 编码约定:
 
+- Python 公共 API 使用 Google 风格 docstring（Args/Returns/Raises/Yields 按需出现）。
 - 所有公开函数参数和返回值使用类型标注。
 - 优先使用 dataclass 和依赖注入，避免模块级全局状态。
 - 异常遵循 `ZeroAgentError -> ConfigError / LLMError / ToolError` 层次。

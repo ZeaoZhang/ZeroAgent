@@ -100,13 +100,6 @@ fn settings_path() -> PathBuf {
         .join(".zero_agent_desktop_settings.json")
 }
 
-/// Legacy settings path, read for compatibility only.
-fn legacy_settings_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ga_desktop_settings.json")
-}
-
 fn read_settings(path: &PathBuf) -> Option<(String, String)> {
     if !path.exists() {
         return None;
@@ -114,13 +107,10 @@ fn read_settings(path: &PathBuf) -> Option<(String, String)> {
     let content = std::fs::read_to_string(path).ok()?;
     let val = serde_json::from_str::<serde_json::Value>(&content).ok()?;
     let python = val.get("python_path")
-        .or_else(|| val.get("pythonPath"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
     let project = val.get("project_dir")
-        .or_else(|| val.get("workspaceDir"))
-        .or_else(|| val.get("projectDir"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
@@ -139,10 +129,6 @@ pub fn get_or_discover_config() -> (String, String) {
     if let Some(config) = read_settings(&path) {
         return config;
     }
-    if let Some(config) = read_settings(&legacy_settings_path()) {
-        return config;
-    }
-
     // Auto-discover
     let python = find_python();
     let project = find_project_dir().unwrap_or_default();
@@ -151,9 +137,7 @@ pub fn get_or_discover_config() -> (String, String) {
     if !python.is_empty() && !project.is_empty() {
         let json = serde_json::json!({
             "python_path": python,
-            "pythonPath": python,
-            "project_dir": project,
-            "workspaceDir": project
+            "project_dir": project
         });
         let _ = std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap());
     }
@@ -176,15 +160,13 @@ fn wait_for_port(port: u16, timeout: Duration) -> bool {
     false
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 fn start_bridge_with_config(app_handle: tauri::AppHandle, python_path: String, project_dir: String) -> Result<(), String> {
     // Save to settings
     let path = settings_path();
     let obj = serde_json::json!({
         "python_path": python_path,
-        "pythonPath": python_path,
-        "project_dir": project_dir,
-        "workspaceDir": project_dir
+        "project_dir": project_dir
     });
     std::fs::write(&path, serde_json::to_string_pretty(&obj).unwrap())
         .map_err(|e| format!("Failed to write settings: {}", e))?;

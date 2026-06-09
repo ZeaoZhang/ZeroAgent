@@ -44,7 +44,7 @@ class TestResolvedLanguage:
 class TestResolvedToolLanguage:
     """AgentConfig.resolved_tool_language — model-based, for tool schemas.
 
-    GenericAgent 策略：工具描述语言由模型类型决定，与系统 locale 无关.
+    工具描述语言由模型类型决定，与系统 locale 无关.
     """
 
     def test_explicit_zh(self) -> None:
@@ -139,7 +139,7 @@ class TestResolvedToolLanguage:
 class TestBilingualTools:
     """Tool descriptions are in correct language based on model type.
 
-    GenericAgent strategy: tool language is determined by MODEL TYPE,
+    Tool language is determined by model type,
     NOT system locale. Chinese models (GLM/MiniMax/Kimi/Qwen/DeepSeek)
     get Chinese descriptions; all others default to English.
     """

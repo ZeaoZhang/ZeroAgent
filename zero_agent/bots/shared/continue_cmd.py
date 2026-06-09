@@ -1,7 +1,4 @@
-"""/continue 命令: list & restore past model_responses sessions.
-
-适配 ZeroAgent/AgentRunner, 去除对 GenericAgent 内部结构的 monkey-patch 依赖。
-"""
+"""/continue 命令: list and restore past model response sessions."""
 
 from __future__ import annotations
 
@@ -268,26 +265,8 @@ def reset_conversation(runner, message: str = "🆕 已开启新对话，当前�
     except Exception:  # abort 可能因多种原因失败, 不影响后续清理
         pass
     _snapshot_current_log()
-    if hasattr(runner, "clear_history"):
-        runner.clear_history()
-    else:
-        try:
-            runner.history.clear()
-        except AttributeError:
-            pass
-        # Transitional fallback for older adapters.
-        try:
-            client = runner.llmclient
-            if client is not None:
-                backend = getattr(client, "backend", None)
-                if backend is not None and hasattr(backend, "history"):
-                    backend.history = []
-                elif hasattr(client, "history"):
-                    client.history = []
-                if hasattr(client, "last_tools"):
-                    client.last_tools = ""
-        except AttributeError:
-            pass
+    runner.clear_history()
+    runner.clear_last_tools()
     return message
 
 
@@ -305,30 +284,15 @@ def restore(runner, path: str) -> tuple[str, bool]:
     name = os.path.basename(path)
     if history is not None:
         runner.abort()
-        if hasattr(runner, "replace_history"):
-            runner.replace_history(history)
-        else:
-            try:
-                client = runner.llmclient
-                if client is not None:
-                    backend = getattr(client, "backend", None)
-                    if backend is not None and hasattr(backend, "history"):
-                        backend.history = list(history)
-                    elif hasattr(client, "history"):
-                        client.history = list(history)
-            except AttributeError:
-                pass
-        return f"✅ 已恢复 {len(pairs)} 轮完整对话（{name}）\n(已写入 backend.history，可直接继续)", True
+        runner.replace_history(history)
+        return f"✅ 已恢复 {len(pairs)} 轮完整对话（{name}）\n(已写入当前会话历史，可直接继续)", True
     # 降级: text-based restore
     from zero_agent.bots.common import _restore_text_pairs, _restore_native_history
     summary = _restore_text_pairs(content) or _restore_native_history(content)
     if not summary:
         return f"❌ {name} 无法解析（非 native 且无摘要可提取）", False
     runner.abort()
-    try:
-        runner.history.extend(summary)
-    except AttributeError:
-        pass
+    runner.append_history_entries(summary)
     n = sum(1 for l in summary if l.startswith("[USER]: "))
     return f"⚠️ 非 native 格式，已降级恢复 {n} 轮摘要（{name}）\n(请输入新问题继续)", False
 

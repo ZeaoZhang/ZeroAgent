@@ -487,7 +487,7 @@ class BaseHandler:
 
         首个工具调用（_index == 0）时注入完整锚点上下文:
             压缩早期历史 + 最近 30 条摘要 + 工作记忆.
-        后续工具调用与 GenericAgent 对齐，仅返回空白续写提示.
+        后续工具调用仅返回空白续写提示.
 
         Args:
             args: 工具参数，可能包含 _index 等元信息.
@@ -504,7 +504,7 @@ class BaseHandler:
     def _build_anchor_prompt(self) -> str:
         """构建锚点 prompt：压缩早期历史 + 最近摘要 + 工作记忆.
 
-        类似 GenericAgent 的 _get_anchor_prompt，将 history_info 按窗口
+        将 history_info 按窗口
         分割为 <earlier_context>（压缩）和 <history>（最近 30 条）.
 
         Returns:

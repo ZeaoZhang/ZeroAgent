@@ -1,5 +1,5 @@
 {
-  "name": "genericagent-web2",
+  "name": "zero-agent-desktop",
   "version": "0.1.0",
   "scripts": {
     "tauri": "tauri"

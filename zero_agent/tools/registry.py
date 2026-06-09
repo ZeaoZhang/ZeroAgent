@@ -133,8 +133,6 @@ class ToolRegistry:
         """将工具 schema 导出为 JSON 文件.
 
         生成 OpenAI 和 Claude 两种格式的 JSON schema 文件，
-        与 GenericAgent assets/tools_schema.json 对齐.
-
         Args:
             output_dir: 输出目录，None 时使用 zero_agent/assets/.
 
@@ -201,7 +199,7 @@ class ToolRegistry:
                 # 内置模块不存在时跳过，不阻断注册流程
                 pass
 
-        ga_order = [
+        core_order = [
             "code_run",
             "file_read",
             "file_patch",
@@ -214,7 +212,7 @@ class ToolRegistry:
         ]
         ordered = {
             name: registry._tools[name]
-            for name in ga_order
+            for name in core_order
             if name in registry._tools
         }
         ordered.update(

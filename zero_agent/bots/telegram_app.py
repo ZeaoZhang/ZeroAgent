@@ -24,7 +24,7 @@ _TEMP_DIR = os.path.join(_PROJECT_ROOT, "temp")
 
 # —— Agent setup ——
 from zero_agent.core.agent import ZeroAgent
-from zero_agent.adapters.agent_runner import AgentRunner
+from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import (
     FILE_HINT,
     HELP_TEXT,
@@ -1219,7 +1219,7 @@ if __name__ == "__main__":
     _LOCK_SOCK = ensure_single_instance(19527, "Telegram")
     if not ALLOWED:
         print(
-            "[Telegram] ERROR: tg_allowed_users in mykey.json is empty or missing. "
+            "[Telegram] ERROR: tg_allowed_users is empty or missing in bot config. "
             "Set it to avoid unauthorized access."
         )
         sys.exit(1)

@@ -1,4 +1,4 @@
-"""Tests for reflect/runner.py — ReflectRunner harness."""
+"""Tests for runners/reflect_runner.py — ReflectRunner harness."""
 
 import importlib
 import os
@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from zero_agent.reflect.runner import ReflectRunner
+from zero_agent.runners.reflect_runner import ReflectRunner
 
 
 # ---- helpers ----

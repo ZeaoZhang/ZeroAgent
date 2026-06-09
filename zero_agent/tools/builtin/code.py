@@ -29,7 +29,7 @@ def _t(zh: str, en: str, lang: str) -> str:
 
 
 def _load_code_run_header() -> str:
-    """Return the optional compatibility header bundled with the package."""
+    """Return the optional code-run header bundled with the package."""
     try:
         return (
             resources.files("zero_agent.assets")
@@ -277,7 +277,7 @@ def _make_code_run_handler(config: AgentConfig):
         code_type = args.get("type", "python")
         code = args.get("script", "")
         if not code:
-            # 回退：从 LLM 响应代码块中提取（与 GenericAgent do_code_run 对齐）
+            # 回退：从 LLM 响应代码块中提取。
             code = handler._extract_code_block(_response, code_type)
             if not code:
                 return StepOutcome(
@@ -293,7 +293,7 @@ def _make_code_run_handler(config: AgentConfig):
                     "handler": handler,
                     "history": getattr(handler, "history_info", []),
                 }
-                # 如果可通过 handler 获取，则添加 parent 引用（兼容 GenericAgent 行为）
+                # 如果可通过 handler 获取，则添加 parent 引用。
                 try:
                     local_ns["parent"] = handler.parent
                 except Exception:

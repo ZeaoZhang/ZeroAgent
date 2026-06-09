@@ -1,9 +1,4 @@
-"""/btw 命令: side question — 不打断主 Agent 的临时 subagent 问答。
-
-适配 ZeroAgent/AgentRunner。与 GenericAgent 版本不同, ZeroAgent 的 litellm session
-不暴露 raw_ask/make_messages 内部接口, 因此 /btw 创建独立的 side runner,
-避免把临时插问排入主 runner 的串行任务队列。
-"""
+"""/btw 命令: side question — 不打断主 Agent 的临时 subagent 问答。"""
 
 from __future__ import annotations
 
@@ -11,7 +6,7 @@ import os
 import queue
 import time
 
-from zero_agent.adapters.agent_runner import AgentRunner
+from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.core.agent import ZeroAgent
 
 
@@ -49,7 +44,7 @@ _TIMEOUT_SEC = 120
 
 
 def _wrapper() -> str:
-    return _WRAPPER_EN if os.environ.get("GA_LANG") == "en" else _WRAPPER_ZH
+    return _WRAPPER_EN if os.environ.get("ZA_LANG") == "en" else _WRAPPER_ZH
 
 
 def _strip_cmd(query: str) -> str:

@@ -138,8 +138,8 @@ class TestToolRegistry:
         registry = ToolRegistry()
         assert registry.generate_openai_schema() == []
 
-    def test_with_builtins_registers_only_ga_core_tools(self) -> None:
-        """默认内置工具严格对齐 GenericAgent 的 9 个核心原子工具."""
+    def test_with_builtins_registers_only_core_tools(self) -> None:
+        """默认内置工具只包含 ZeroAgent 核心原子工具."""
         config = AgentConfig(
             llm_backends={
                 "default": LLMBackendConfig(

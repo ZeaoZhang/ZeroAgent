@@ -31,7 +31,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TEMP_DIR = os.path.join(_PROJECT_ROOT, "temp")
 
 from zero_agent.core.agent import ZeroAgent
-from zero_agent.adapters.agent_runner import AgentRunner
+from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import load_keys
 
 _KEYS = load_keys()

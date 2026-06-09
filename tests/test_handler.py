@@ -176,7 +176,7 @@ class TestBaseHandlerDispatch:
         self,
         mock_config,
     ) -> None:
-        """code_run 缺 script/代码块时应返回 GA 风格错误并轻量续写."""
+        """code_run 缺 script/代码块时应返回错误并轻量续写."""
         registry = ToolRegistry.with_builtins(mock_config)
         handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
 
@@ -210,12 +210,12 @@ class TestBaseHandlerDispatch:
         )
         assert result.next_prompt == "\n"
 
-    def test_real_registry_file_patch_bad_ref_matches_ga_next_prompt(
+    def test_real_registry_file_patch_bad_ref_uses_blank_next_prompt(
         self,
         mock_config,
         tmp_path,
     ) -> None:
-        """file_patch 引用展开失败时应像 GA 一样用空白续写提示."""
+        """file_patch 引用展开失败时应使用空白续写提示."""
         mock_config.workspace_dir = str(tmp_path)
         registry = ToolRegistry.with_builtins(mock_config)
         handler = BaseHandler(registry=registry, cwd=str(tmp_path))
@@ -238,10 +238,12 @@ class TestBaseHandlerDispatch:
         mock_config,
         tmp_path,
     ) -> None:
-        """读取 memory/SOP 文件时，GA 风格提示应进 next_prompt 而非污染工具结果."""
+        """读取 memory/SOP 文件时，提示应进 next_prompt 而非污染工具结果."""
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
-        sop = memory_dir / "plan_sop.md"
+        sops_dir = memory_dir / "sops"
+        sops_dir.mkdir()
+        sop = sops_dir / "plan_sop.md"
         sop.write_text("step one\nstep two\n", encoding="utf-8")
         mock_config.memory_dir = str(memory_dir)
         mock_config.workspace_dir = str(tmp_path)
@@ -260,7 +262,7 @@ class TestBaseHandlerDispatch:
         assert "SYSTEM TIPS" in result.next_prompt
         assert result.next_prompt.startswith("\n### [WORKING MEMORY]")
 
-    def test_real_registry_file_read_matches_ga_line_number_prefix(
+    def test_real_registry_file_read_uses_line_number_prefix(
         self,
         mock_config,
         tmp_path,
@@ -282,7 +284,7 @@ class TestBaseHandlerDispatch:
             "由于设置了show_linenos，以下返回信息为：(行号|)内容 。\n"
         )
 
-    def test_real_registry_file_read_sop_path_tip_matches_ga_heuristic(
+    def test_real_registry_file_read_sop_path_tip_uses_memory_heuristic(
         self,
         mock_config,
         tmp_path,
@@ -313,10 +315,12 @@ class TestBaseHandlerDispatch:
         mock_config,
         tmp_path,
     ) -> None:
-        """start_long_term_update 的结算 prompt 应包含 GA 同款全局记忆上下文."""
+        """start_long_term_update 的结算 prompt 应包含全局记忆上下文."""
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
-        (memory_dir / "memory_management_sop.md").write_text(
+        sops_dir = memory_dir / "sops"
+        sops_dir.mkdir()
+        (sops_dir / "memory_management_sop.md").write_text(
             "# Memory SOP\nread first\n",
             encoding="utf-8",
         )
@@ -597,7 +601,7 @@ class TestBaseHandlerWorking:
         assert "<history>\n\n</history>" in prompt
 
     def test_default_next_prompt_skip(self, mock_handler: BaseHandler) -> None:
-        """_index > 0 时与 GA 对齐，仅返回空白续写提示."""
+        """_index > 0 时仅返回空白续写提示."""
         mock_handler.working["key_info"] = "ctx"
         prompt = mock_handler._default_next_prompt({"_index": 1})
         assert "[System] Continue" not in prompt
@@ -613,7 +617,7 @@ class TestBaseHandlerWorking:
         assert "<key_info>test ctx</key_info>" in anchor
         assert "<history>" in anchor
 
-    def test_fold_history_keeps_ga_compatible_tail_limit(self) -> None:
+    def test_fold_history_keeps_tail_limit(self) -> None:
         lines = [f"[USER] task {i}" for i in range(75)]
         folded = BaseHandler._fold_history(lines)
         folded_lines = folded.splitlines()

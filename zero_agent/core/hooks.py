@@ -1,7 +1,7 @@
 """事件驱动的插件钩子系统.
 
 提供 8 个标准事件钩子点，支持插件注册、触发和自动发现。
-参照 GenericAgent 的 plugins/hooks.py，设计为干净的内置模块。
+提供干净的内置 hook 模块。
 """
 
 from __future__ import annotations

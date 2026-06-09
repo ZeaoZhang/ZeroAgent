@@ -1,7 +1,7 @@
 """Per-session LLM token cost tracking via HookSystem.
 
 使用 ZeroAgent 的 HookSystem (llm_after 事件) 进行 per-thread
-token 用量追踪, 避免 GenericAgent 的 monkey-patching 方式.
+token 用量追踪。
 
 Usage:
     from zero_agent.utils.cost_tracker import CostTracker

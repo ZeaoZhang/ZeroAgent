@@ -291,7 +291,7 @@ class TestAgentLoop:
         assert exit_reason["result"] == "CURRENT_TASK_DONE"
 
     def test_empty_next_prompt_completes_like_ga(self, mock_handler: BaseHandler) -> None:
-        """空 next_prompt 应与 GA 一样直接视为任务完成."""
+        """空 next_prompt 应直接视为任务完成."""
         def do_empty(self, args, response):
             yield "empty prompt\n"
             return StepOutcome({"result": "ok"}, next_prompt="")
@@ -326,7 +326,7 @@ class TestAgentLoop:
         self,
         mock_handler: BaseHandler,
     ) -> None:
-        """下一轮消息保持 GA 的 tool_results 字段，session 再标准化."""
+        """下一轮消息保持 tool_results 字段，session 再标准化."""
         client = _make_recording_client([
             MockResponse(
                 content="",
@@ -382,7 +382,7 @@ class TestAgentLoop:
 
         assert mock_handler.history_info[0] == "[USER]: inspect context"
 
-    def test_loop_records_initial_user_input_like_ga_compacted_history(
+    def test_loop_records_initial_user_input_in_compacted_history(
         self,
         mock_handler: BaseHandler,
     ) -> None:
@@ -507,7 +507,7 @@ class TestAgentLoop:
         self,
         mock_handler: BaseHandler,
     ) -> None:
-        """多工具调用后的 loop payload 保持 GA 的自定义 tool_results."""
+        """多工具调用后的 loop payload 保持自定义 tool_results."""
         client = _make_recording_client([
             MockResponse(
                 content="",

@@ -2,7 +2,7 @@ llm_backends:
   default:
     provider: openai
     api_key: "your_api_key_here"
-    api_base: "https://newapi-ai.sangfor.com/v1"
+    api_base: "https://api.deepseek.com"
     model: "deepseek-v4-flash"
     max_tokens: 8192
     temperature: 1.0

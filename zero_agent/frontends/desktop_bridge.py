@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from aiohttp import web, WSMsgType
 
-from zero_agent.adapters.agent_runner import AgentRunner
+from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import default_config_path, load_default_config
 
@@ -92,16 +92,6 @@ class AgentManager:
         self.config: Dict[str, Any] = {}
         self.sessions: Dict[str, Session] = {}
         self.active_session_id: Optional[str] = None
-
-    @property
-    def ga_root(self) -> str:
-        """Legacy compatibility field mapped to the ZeroAgent workspace root."""
-        return self.workspace_dir
-
-    @property
-    def mykey_path(self) -> str:
-        """Legacy compatibility field mapped to the ZeroAgent config path."""
-        return self.config_path
 
     def ensure_project_import_path(self) -> Path:
         root = Path(DEFAULT_PROJECT_ROOT).resolve()
@@ -160,7 +150,7 @@ class AgentManager:
 
     def create_session(self, cwd: Optional[str] = None) -> Session:
         sid = "sess-" + uuid.uuid4().hex[:12]
-        sess = Session(id=sid, cwd=str(cwd or self.ga_root))
+        sess = Session(id=sid, cwd=str(cwd or self.workspace_dir))
         with self.lock:
             self.sessions[sid] = sess
             self.active_session_id = sid
@@ -384,7 +374,7 @@ import base64
 import tempfile
 
 # Shared temp dir for image uploads (persists for process lifetime)
-_UPLOAD_DIR = Path(tempfile.gettempdir()) / "ga_web2_uploads"
+_UPLOAD_DIR = Path(tempfile.gettempdir()) / "zero_agent_web2_uploads"
 _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -503,8 +493,6 @@ async def ws_handler(request):
     hub.websockets.add(ws)
     await ws.send_str(json.dumps({
         "type": "bridge-ready",
-        "gaRoot": manager.ga_root,
-        "mykeyPath": manager.mykey_path,
         "workspaceDir": manager.workspace_dir,
         "configPath": manager.config_path,
         "http": True,
@@ -562,8 +550,6 @@ async def status_handler(request):
         "ok": True,
         "running": True,
         "ready": True,
-        "gaRoot": manager.ga_root,
-        "mykeyPath": manager.mykey_path,
         "workspaceDir": manager.workspace_dir,
         "configPath": manager.config_path,
         "sessionCount": len(manager.sessions),
@@ -575,8 +561,6 @@ async def status_handler(request):
 
 async def get_config_handler(request):
     return json_ok({
-        "gaRoot": manager.ga_root,
-        "mykeyPath": manager.mykey_path,
         "workspaceDir": manager.workspace_dir,
         "configPath": manager.config_path,
         "config": manager.config,
@@ -590,8 +574,6 @@ async def save_config_handler(request):
         manager.config.update(cfg)
     return json_ok({
         "ok": True,
-        "gaRoot": manager.ga_root,
-        "mykeyPath": manager.mykey_path,
         "workspaceDir": manager.workspace_dir,
         "configPath": manager.config_path,
         "config": manager.config,
@@ -604,7 +586,7 @@ async def model_profiles_handler(request):
 
 async def slash_commands_handler(request):
     try:
-        from zero_agent.frontends.slash_cmds import PALETTE_ENTRIES, prompt_for
+        from zero_agent.frontends.desktop_commands import PALETTE_ENTRIES, prompt_for
         locally_handled = {"/resume", "/scheduler"}
         commands = [
             {"cmd": cmd, "argHint": arg_hint, "description": desc}
@@ -629,7 +611,7 @@ async def slash_resolve_handler(request):
     if not command.startswith("/"):
         command = "/" + command
     try:
-        from zero_agent.frontends.slash_cmds import prompt_for
+        from zero_agent.frontends.desktop_commands import prompt_for
         prompt = prompt_for(command, args_text)
     except Exception as e:
         return json_ok({"ok": False, "error": f"Failed to resolve {command}: {type(e).__name__}: {e}"}, status=500)
@@ -640,9 +622,9 @@ async def slash_resolve_handler(request):
 
 async def scheduler_status_handler(request):
     try:
-        from zero_agent.frontends import slash_cmds
-        tasks = slash_cmds.list_scheduler_tasks()
-        running = slash_cmds.running_services()
+        from zero_agent.frontends import desktop_commands
+        tasks = desktop_commands.list_scheduler_tasks()
+        running = desktop_commands.running_services()
         return json_ok({
             "ok": True,
             "tasks": tasks,
@@ -655,9 +637,9 @@ async def scheduler_status_handler(request):
 
 async def scheduler_start_handler(request):
     try:
-        from zero_agent.frontends import slash_cmds
-        ok, message = slash_cmds.start_reflect_task("scheduler")
-        running = slash_cmds.running_services(use_cache=False)
+        from zero_agent.frontends import desktop_commands
+        ok, message = desktop_commands.start_reflect_task("scheduler")
+        running = desktop_commands.running_services(use_cache=False)
         return json_ok({
             "ok": ok,
             "message": message,
@@ -730,10 +712,10 @@ async def cancel_handler(request):
 async def path_open_handler(request):
     data = await read_json(request)
     kind = data.get("kind", "")
-    if kind in {"config", "mykey", "mykeyTemplate"}:
+    if kind == "config":
         target = Path(manager.config_path)
     else:
-        target = Path(data.get("path") or data.get("target") or manager.ga_root)
+        target = Path(data.get("path") or data.get("target") or manager.workspace_dir)
     target = target.resolve()
     if not target.exists():
         return json_ok({"ok": False, "error": f"File not found: {target}"})

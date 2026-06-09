@@ -3,12 +3,11 @@
 web_scan: 获取浏览器标签页列表和简化 HTML 内容.
 web_execute_js: 在浏览器中执行 JavaScript 并捕获结果.
 
-依赖 TMWebDriver 和 simphtml 库，未安装时工具会返回错误提示.
+依赖 ZeroAgent browser runtime 和浏览器扩展.
 """
 
 from __future__ import annotations
 
-import importlib
 import json
 import time
 from importlib import resources
@@ -45,34 +44,23 @@ def browser_extension_dir() -> str:
 
 
 def _load_tm_webdriver() -> Any:
-    """Load TMWebDriver from external GA install or vendored compatibility copy."""
+    """Load the ZeroAgent browser driver class."""
     try:
-        from TMWebDriver import TMWebDriver
-        return TMWebDriver
-    except ImportError:
-        pass
-
-    try:
-        from zero_agent.vendor.genericagent.tm_webdriver import TMWebDriver
-        return TMWebDriver
+        from zero_agent.browser.tm_webdriver import TMWebDriver
     except ImportError as exc:
         raise ImportError(f"{_BROWSER_EXTRA_HINT} ({exc})") from exc
+    return TMWebDriver
 
 
 def _load_simphtml() -> Any:
-    """Load simphtml from external GA install or vendored compatibility copy."""
     try:
-        import simphtml
-    except ImportError:
-        try:
-            from zero_agent.vendor.genericagent import simphtml
-        except ImportError as exc:
-            raise ImportError(f"{_BROWSER_EXTRA_HINT} ({exc})") from exc
+        from zero_agent.browser import simphtml
+    except ImportError as exc:
+        raise ImportError(f"{_BROWSER_EXTRA_HINT} ({exc})") from exc
 
     if not hasattr(simphtml, "BeautifulSoup"):
         raise ImportError(f"{_BROWSER_EXTRA_HINT} (beautifulsoup4 missing)")
 
-    importlib.reload(simphtml)
     return simphtml
 
 
@@ -407,7 +395,7 @@ def _make_web_execute_js_handler(config: AgentConfig):
             )
 
         import os
-        # 支持从工作目录读取脚本文件，兼容 GenericAgent 行为。
+        # 支持从工作目录读取脚本文件。
         script_ref = script.strip()
         candidate = script_ref if os.path.isabs(script_ref) else os.path.join(config.workspace_dir, script_ref)
         if os.path.isfile(candidate):

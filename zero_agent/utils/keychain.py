@@ -25,7 +25,7 @@ def _get_mask() -> bytes:
         user = os.getlogin()
     except OSError:
         user = getpass.getuser()
-    return hashlib.sha256(f"{user}@ga_keychain".encode()).digest()
+    return hashlib.sha256(f"{user}@zero_agent_keychain".encode()).digest()
 
 
 _MASK = _get_mask()

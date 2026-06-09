@@ -9,33 +9,17 @@ from __future__ import annotations
 import os
 import re
 import time
+from importlib import resources
 from typing import Any, Dict, Generator, List, Optional
 
 from zero_agent.core.config import AgentConfig, load_default_config
+from zero_agent.core.exceptions import ConfigError
 from zero_agent.core.handler import BaseHandler
 from zero_agent.core.hooks import HookSystem
 from zero_agent.core.loop import AgentLoop
 from zero_agent.memory.manager import MemoryManager
 from zero_agent.tools.registry import ToolRegistry
 from zero_agent.llm.factory import LLMFactory
-
-
-# 系统提示词模板 fallback：与 GenericAgent/assets/sys_prompt*.txt 保持等价。
-_SYSTEM_PROMPT_ZH = """# Role: 物理级全能执行者
-你拥有文件读写、脚本执行、用户浏览器JS注入、系统级干预的物理操作权限。禁止推诿"无法操作"——不空想，用工具探测。
-## 行动原则
-调用工具前先推演：当前阶段、上步结果是否符合预期、下步策略，必须在回复文本中用<summary>输出极简总结。
-- 探测优先：失败时先充分获取信息（日志/状态/上下文），关键信息存入工作记忆，再决定重试或换方案。不可逆操作先询问用户。
-- 失败升级：1次→读错误理解原因，2次→探测环境状态，3次→深度分析后换方案或问用户。禁止无新信息的重复操作。
-"""
-
-_SYSTEM_PROMPT_EN = """# Role: Physical-Level Omnipotent Executor
-You have full physical access: file I/O, script execution, browser JS injection, and system-level intervention. Never deflect with "can't do it" — don't speculate, use tools to probe.
-Summarize and reply in user's language or follow user's prompt.
-## Action Principles
-Before each tool call, reason: current phase, whether the last result met expectations, and next strategy and <summary> in reply text of each turn.
-- Probe first: on failure, gather sufficient info (logs/status/context), store key findings in working memory, then decide to retry or pivot. Ask the user before irreversible operations.
-- Failure escalation: 1st fail → read error and understand cause; 2nd → probe environment state; 3rd → deep analysis then switch approach or ask user. Never repeat an action without new information."""
 
 
 class ZeroAgent:
@@ -111,7 +95,6 @@ class ZeroAgent:
     def reload_config(self) -> bool:
         """若配置文件已变更则热重载配置并重建 LLM session.
 
-        与 GenericAgent 的 reload_mykeys() 对齐：
         检测 YAML 文件 mtime，变更时重新加载并重建 client.
 
         Returns:
@@ -194,7 +177,7 @@ class ZeroAgent:
         os.makedirs(self.config.workspace_dir, exist_ok=True)
         self.memory.init_memory()
 
-        # GA 每个任务创建新 handler，但继承短期工作记忆。
+        # 每个任务创建新 handler，但继承短期工作记忆。
         self.handler = self._new_task_handler()
         self.handler.reset_code_stop_signal()
 
@@ -230,7 +213,7 @@ class ZeroAgent:
         return handler
 
     def _new_task_handler(self) -> BaseHandler:
-        """Create a GA-compatible per-task handler and carry working memory."""
+        """Create a per-task handler and carry working memory."""
         old_handler = self.handler
         cls = type(old_handler) if old_handler is not None else BaseHandler
         try:
@@ -334,7 +317,7 @@ class ZeroAgent:
         return result
 
     def list_llms(self) -> list[tuple[int, str, bool]]:
-        """列出所有可用 LLM 后端 (兼容 GenericAgent 接口).
+        """列出所有可用 LLM 后端.
 
         Returns:
             [(index, display_name, is_active), ...] 列表.
@@ -346,7 +329,7 @@ class ZeroAgent:
         return result
 
     def next_llm(self, n: int = -1) -> None:
-        """切换到下一个或指定 LLM 后端 (兼容 GenericAgent 接口).
+        """切换到下一个或指定 LLM 后端.
 
         Args:
             n: 目标索引, -1 表示顺序切换到下一个.
@@ -363,7 +346,7 @@ class ZeroAgent:
         self.switch_backend(target_name)
 
     def get_llm_name(self) -> str:
-        """返回当前活跃 LLM 的 display 名称 (兼容 GenericAgent 接口)."""
+        """返回当前活跃 LLM 的 display 名称."""
         backends = self.list_backends()
         for name, model, active in backends:
             if active:
@@ -383,21 +366,16 @@ class ZeroAgent:
         return "unknown"
 
     def _build_system_prompt(self) -> str:
-        """构建与 GenericAgent 等价的默认系统提示词.
+        """构建默认系统提示词.
 
-        拼接顺序保持 GenericAgent.agentmain.get_system_prompt() 的语义:
-        资产文本 + Today 行 + 全局记忆上下文。
+        拼接顺序：资产文本 + Today 行 + 全局记忆上下文。
 
         Returns:
             系统提示词字符串.
         """
         lang = self.config.resolved_language
 
-        template = self._load_prompt_template(lang)
-        if template is None:
-            template = _SYSTEM_PROMPT_ZH if lang == "zh" else _SYSTEM_PROMPT_EN
-
-        prompt = template
+        prompt = self._load_system_prompt_template(lang)
         prompt += f"\nToday: {time.strftime('%Y-%m-%d %a')}\n"
         prompt += self.memory.get_global_memory_context()
 
@@ -414,37 +392,24 @@ class ZeroAgent:
         return prompt
 
     @staticmethod
-    def _load_prompt_template(lang: str) -> Optional[str]:
-        """从外部文件加载系统提示词模板.
-
-        查找顺序:
-            1. zero_agent/assets/sys_prompt.txt (zh) 或 sys_prompt_en.txt (en)
-            2. 返回 None 表示使用代码中的默认常量.
+    def _load_system_prompt_template(lang: str) -> str:
+        """Load the system prompt template from bundled assets.
 
         Args:
             lang: 语言代码 ("zh" 或 "en").
 
         Returns:
-            模板字符串，未找到时返回 None.
-        """
-        import os
+            系统提示词模板文本.
 
+        Raises:
+            ConfigError: 提示词资产不存在或不可读取.
+        """
         suffix = "" if lang == "zh" else "_en"
         filename = f"sys_prompt{suffix}.txt"
-
         try:
-            assets_dir = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "assets",
-            )
-            prompt_path = os.path.join(assets_dir, filename)
-            if os.path.isfile(prompt_path):
-                with open(prompt_path, encoding="utf-8") as f:
-                    return f.read()
-        except Exception:
-            pass
-
-        return None
+            return resources.files("zero_agent.assets").joinpath(filename).read_text(encoding="utf-8")
+        except (FileNotFoundError, ModuleNotFoundError, UnicodeDecodeError) as exc:
+            raise ConfigError(f"System prompt asset is required but unavailable: {filename}") from exc
 
     def _generate_tools_description(self, lang: str = "zh") -> str:
         """从注册中心生成工具描述文本.

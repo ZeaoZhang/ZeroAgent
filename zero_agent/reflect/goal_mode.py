@@ -1,5 +1,5 @@
 # reflect/goal_mode.py — Goal Mode: 持续自驱直到预算耗尽
-# 启动: set GOAL_STATE=temp/xxx.json && python agentmain.py --reflect reflect/goal_mode.py
+# 启动: set GOAL_STATE=temp/xxx.json && zero-agent --reflect zero_agent/reflect/goal_mode.py
 # 配置: agent按SOP写好state json，通过环境变量GOAL_STATE指定路径
 import os, json, time
 

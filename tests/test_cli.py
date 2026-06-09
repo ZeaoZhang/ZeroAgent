@@ -2,7 +2,9 @@
 
 import argparse
 
-from zero_agent.runners.cli import _load_config
+import pytest
+
+from zero_agent.runners.cli import _build_parser, _load_config, _parse_reflect_args
 
 
 def test_load_config_writes_max_turns_override(monkeypatch, tmp_path) -> None:
@@ -23,3 +25,25 @@ def test_load_config_writes_max_turns_override(monkeypatch, tmp_path) -> None:
     ))
 
     assert config.max_turns == 37
+
+
+def test_parser_accepts_llm_no_and_reflect_args() -> None:
+    args = _build_parser().parse_args([
+        "--reflect", "zero_agent/reflect/goal_mode.py",
+        "--llm-no", "1",
+        "--reflect-arg", "goal_state=temp/goal.json",
+    ])
+
+    assert args.llm_no == 1
+    assert args.reflect_arg == ["goal_state=temp/goal.json"]
+
+
+def test_parse_reflect_args() -> None:
+    parsed = _parse_reflect_args(["base_url=http://127.0.0.1:8000", "name=w1"])
+
+    assert parsed == {"base_url": "http://127.0.0.1:8000", "name": "w1"}
+
+
+def test_parse_reflect_args_rejects_invalid_values() -> None:
+    with pytest.raises(ValueError):
+        _parse_reflect_args(["not-a-pair"])

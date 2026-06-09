@@ -70,8 +70,9 @@ class TestLogMemoryAccess:
         cwd_dir = tmp_path / "cwd"
         workspace_dir.mkdir()
         memory_dir.mkdir()
+        (memory_dir / "sops").mkdir()
         cwd_dir.mkdir()
-        target = memory_dir / "memory_management_sop.md"
+        target = memory_dir / "sops" / "memory_management_sop.md"
         target.write_text("SOP body\n", encoding="utf-8")
 
         config = AgentConfig(

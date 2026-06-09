@@ -29,7 +29,7 @@ EXIT_THREAD_TEXTS = {"退出该子区", "退出此子区", "退出子区"}
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
 from zero_agent.core.agent import ZeroAgent
-from zero_agent.adapters.agent_runner import AgentRunner
+from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import (
     AgentBotMixin,
     FILE_HINT,

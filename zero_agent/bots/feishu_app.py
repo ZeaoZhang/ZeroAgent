@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib.util
 import json
 import os
 import queue as Q
@@ -26,11 +25,10 @@ import threading
 import time
 import traceback
 import uuid
-from pathlib import Path
 
 from zero_agent.core.agent import ZeroAgent
-from zero_agent.adapters.agent_runner import AgentRunner
-from zero_agent.bots.common import AgentBotMixin, FILE_HINT, split_text, load_keys
+from zero_agent.runners.agent_runner import AgentRunner
+from zero_agent.bots.common import AgentBotMixin, FILE_HINT, bot_config_source, split_text, load_keys
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -51,72 +49,14 @@ except ImportError:
     print("Please install lark-oapi: pip install lark-oapi")
     sys.exit(1)
 
-# —— Path helpers ——
-def _ensure_dir(path):
-    path = Path(path)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _workspace_root_dir():
-    root = os.environ.get("GA_WORKSPACE_ROOT")
-    if root:
-        return _ensure_dir(Path(root).expanduser().resolve())
-    return _ensure_dir(Path(_PROJECT_ROOT).resolve())
-
-
-def _workspace_config_dir(root=None):
-    base = Path(root).expanduser().resolve() if root else _workspace_root_dir()
-    if base.name == "ga_config":
-        return _ensure_dir(base)
-    return _ensure_dir(base / "ga_config")
-
-
-def _load_dict_config(path):
-    path = Path(path)
-    if not path.exists():
-        return None
-    try:
-        if path.suffix == ".py":
-            mod_name = f"_fs_mykey_{uuid.uuid4().hex}"
-            spec = importlib.util.spec_from_file_location(mod_name, path)
-            if not spec or not spec.loader:
-                return None
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            data = {k: v for k, v in vars(module).items() if not k.startswith("_")}
-        else:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-        return data if isinstance(data, dict) else None
-    except Exception as e:
-        print(f"[ERROR] load config failed {path}: {e}")
-        return None
-
-
-def _resolve_mykey_path():
-    workspace_root = _workspace_root_dir()
-    config_root = _workspace_config_dir(workspace_root)
-    candidates = [
-        config_root / "mykey.json",
-        config_root / "mykey.py",
-        workspace_root / "mykey.json",
-        workspace_root / "mykey.py",
-        Path(_PROJECT_ROOT) / "mykey.json",
-        Path(_PROJECT_ROOT) / "mykey.py",
-    ]
-    for c in candidates:
-        if _load_dict_config(c):
-            return c
-    return candidates[0]
-
-
 def _ensure_runtime_paths():
-    workspace_root = _workspace_root_dir()
-    config_root = _workspace_config_dir(workspace_root)
-    os.environ.setdefault("GA_WORKSPACE_ROOT", str(workspace_root))
-    os.environ.setdefault("GA_USER_DATA_DIR", str(config_root))
-    return str(workspace_root), str(config_root)
+    workspace_root = os.path.abspath(os.environ.get("ZA_WORKSPACE_ROOT") or _PROJECT_ROOT)
+    config_root = os.path.abspath(os.environ.get("ZA_USER_DATA_DIR") or os.path.join(workspace_root, ".zero_agent"))
+    os.makedirs(workspace_root, exist_ok=True)
+    os.makedirs(config_root, exist_ok=True)
+    os.environ.setdefault("ZA_WORKSPACE_ROOT", workspace_root)
+    os.environ.setdefault("ZA_USER_DATA_DIR", config_root)
+    return workspace_root, config_root
 
 
 _ensure_runtime_paths()
@@ -153,14 +93,11 @@ runner.verbose = False
 
 # —— Config ——
 def _feishu_config():
-    path = _resolve_mykey_path()
-    cfg = _load_dict_config(path) or {}
-    # 同时尝试 load_keys 加载 env/mykey.json 中的飞书配置
-    cfg.update({k: v for k, v in load_keys().items() if k.startswith("fs_")})
+    cfg = {k: v for k, v in load_keys().items() if k.startswith("fs_")}
     app_id = str(cfg.get("fs_app_id", "") or "").strip()
     app_secret = str(cfg.get("fs_app_secret", "") or "").strip()
     allowed = {str(x).strip() for x in cfg.get("fs_allowed_users", []) if str(x).strip()}
-    return app_id, app_secret, allowed, (not allowed or "*" in allowed), str(path)
+    return app_id, app_secret, allowed, (not allowed or "*" in allowed), bot_config_source()
 
 
 APP_ID, APP_SECRET, ALLOWED_USERS, PUBLIC_ACCESS, CONFIG_PATH = _feishu_config()
@@ -865,7 +802,7 @@ def main():
     global client, APP_ID, APP_SECRET, ALLOWED_USERS, PUBLIC_ACCESS, CONFIG_PATH
     APP_ID, APP_SECRET, ALLOWED_USERS, PUBLIC_ACCESS, CONFIG_PATH = _feishu_config()
     if not APP_ID or not APP_SECRET:
-        print(f"错误: 请在 mykey 配置中填写 fs_app_id 和 fs_app_secret\n配置文件: {CONFIG_PATH}", flush=True)
+        print(f"错误: 请在 bot 配置中填写 fs_app_id 和 fs_app_secret\n配置来源: {CONFIG_PATH}", flush=True)
         sys.exit(1)
     handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(handle_message).build()
     retry_delay = 5
@@ -873,7 +810,7 @@ def main():
         try:
             client = create_client()
             cli = lark.ws.Client(APP_ID, APP_SECRET, event_handler=handler, log_level=lark.LogLevel.INFO)
-            print("=" * 50 + "\n飞书 Agent 已启动（长连接模式）\n" + f"App ID: {APP_ID}\n配置: {CONFIG_PATH}\n等待消息...\n" + "=" * 50, flush=True)
+            print("=" * 50 + "\n飞书 Agent 已启动（长连接模式）\n" + f"App ID: {APP_ID}\n配置来源: {CONFIG_PATH}\n等待消息...\n" + "=" * 50, flush=True)
             cli.start()
             retry_delay = 5
         except KeyboardInterrupt:

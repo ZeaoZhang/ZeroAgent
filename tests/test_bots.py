@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import tempfile
@@ -97,9 +98,37 @@ class TestCommonHelpers:
         assert to_allowed_set(["123", "456"]) == {"123", "456"}
 
     def test_load_keys_from_env(self, monkeypatch):
+        monkeypatch.delenv("ZA_BOT_CONFIG_PATH", raising=False)
         monkeypatch.setenv("TG_BOT_TOKEN", "test_token")
         keys = load_keys()
         assert keys.get("tg_bot_token") == "test_token"
+
+    def test_load_keys_from_explicit_bot_config(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("TG_BOT_TOKEN", raising=False)
+        cfg_path = tmp_path / "bot-config.json"
+        cfg_path.write_text(
+            json.dumps({
+                "bots": {
+                    "tg_bot_token": "from_file",
+                    "tg_allowed_users": ["1001", "1002"],
+                }
+            }),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ZA_BOT_CONFIG_PATH", str(cfg_path))
+
+        keys = load_keys()
+
+        assert keys["tg_bot_token"] == "from_file"
+        assert keys["tg_allowed_users"] == ["1001", "1002"]
+
+    def test_allowed_users_env_values_are_split(self, monkeypatch):
+        monkeypatch.delenv("ZA_BOT_CONFIG_PATH", raising=False)
+        monkeypatch.setenv("TG_ALLOWED_USERS", "1001, 1002")
+
+        keys = load_keys()
+
+        assert keys["tg_allowed_users"] == ["1001", "1002"]
 
 
 # —— continue_cmd.py ——

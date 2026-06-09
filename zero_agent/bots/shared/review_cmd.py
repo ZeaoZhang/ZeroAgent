@@ -7,31 +7,30 @@
 from __future__ import annotations
 
 import os
+from importlib import resources
+from pathlib import Path
 from typing import Optional
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _PROMPT_DIR = "review_sop"
 _INLINE_PROMPT_ZH = "review_inline_prompt.txt"
 _INLINE_PROMPT_EN = "review_inline_prompt.en.txt"
-_STUB_FALLBACK = (
-    "[/review in-session] (⚠️ prompt 文件缺失: {fpath} → {err})\n\n"
-    "# 本轮用户请求\n{user_request}\n\n"
-    "请按 memory/code_review_principles.md 评审, 直接 echo 报告到对话。\n"
-    "不要写 review.md, 不要打 [ROUND END]。"
-)
 
 
-def _render_prompt(user_request: str) -> str:
+def _render_prompt(user_request: str, memory_dir: str) -> str:
     """加载 /review inline prompt 并注入 user_request."""
-    lang = os.environ.get("GA_LANG", "").strip().lower()
+    lang = os.environ.get("ZA_LANG", "").strip().lower()
     fname = _INLINE_PROMPT_EN if lang == "en" else _INLINE_PROMPT_ZH
-    fpath = os.path.join(_PROJECT_ROOT, "memory", _PROMPT_DIR, fname)
-    ga_root = _PROJECT_ROOT.replace("\\", "/")
-    try:
-        with open(fpath, "r", encoding="utf-8") as f:
-            return f.read().format(user_request=user_request, ga_root=ga_root)
-    except Exception as e:
-        return _STUB_FALLBACK.format(fpath=fpath, err=e, user_request=user_request)
+    fpath = resources.files("zero_agent.assets").joinpath(_PROMPT_DIR, fname)
+    project_root = str(_PROJECT_ROOT).replace("\\", "/")
+    principles_path = (
+        Path(memory_dir).resolve() / "sops" / "code_review_principles.md"
+    ).as_posix()
+    return fpath.read_text(encoding="utf-8").format(
+        user_request=user_request,
+        project_root=project_root,
+        principles_path=principles_path,
+    )
 
 
 def _help_text() -> str:
@@ -44,7 +43,8 @@ def _help_text() -> str:
         "  `/review 我刚改了 review_cmd.py, 关注 prompt 注入`\n"
         "  `/review 审 frontends 目录下所有改过的文件`\n\n"
         "产出: 直接对话 markdown(不写文件、不开 subagent)。\n"
-        "协议: `memory/review_sop/review_inline_prompt.txt` + `memory/code_review_principles.md`"
+        "协议: `zero_agent/assets/review_sop/review_inline_prompt.txt` + "
+        "`memory/sops/code_review_principles.md`"
     )
 
 
@@ -68,7 +68,7 @@ def handle(agent, body: str, display_queue) -> Optional[str]:
     if body in ("help", "?", "-h", "--help"):
         display_queue.put({"done": _help_text(), "source": "system"})
         return None
-    en = os.environ.get("GA_LANG", "").strip().lower() == "en"
+    en = os.environ.get("ZA_LANG", "").strip().lower() == "en"
     user_request = body or (_DEFAULT_REQUEST_EN if en else _DEFAULT_REQUEST_ZH)
     header = _HEADER_EN if en else _HEADER_ZH
-    return header + _render_prompt(user_request)
+    return header + _render_prompt(user_request, agent.config.memory_dir)

@@ -1,1 +1,1 @@
-"""Bundled compatibility assets for optional ZeroAgent runtimes."""
+"""Bundled assets for optional ZeroAgent runtimes."""
