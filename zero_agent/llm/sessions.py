@@ -81,17 +81,17 @@ class LiteLLMSession:
             self._trim_keep_rate = 0.3
 
     def reset_tool_protocol_cache(self) -> None:
-        """Force the next tool-enabled call to resend the full GA protocol."""
+        """Clear the compatibility marker used by older frontends."""
         self._last_tools_json = ""
 
     @property
     def last_tools(self) -> str:
-        """GA-compatible alias for the mounted-tool protocol cache."""
+        """Compatibility alias; native-only mode does not cache text tools."""
         return self._last_tools_json
 
     @last_tools.setter
     def last_tools(self, value: str) -> None:
-        """GA-compatible alias for the mounted-tool protocol cache."""
+        """Compatibility alias; native-only mode does not cache text tools."""
         self._last_tools_json = value
 
     def chat(
@@ -123,8 +123,7 @@ class LiteLLMSession:
             self._trim_history()
             full_messages = self._build_messages()
 
-        # 对 file_write 工具做特殊处理：content 参数不进入 schema，
-        # 防止 LLM 把大段文件内容放进 tool call arguments
+        # Native-only mode passes provider tool schemas through unchanged.
         tools = self._sanitize_tools(tools)
 
         # 记录 prompt 日志
@@ -264,25 +263,6 @@ class LiteLLMSession:
             if not classify_interruption(mock):
                 mock.stop_reason = "tool_use"
 
-        # 如果 litellm 未返回 tool_calls，尝试从文本中回退解析
-        if not mock.tool_calls and collected_content:
-            text_calls = self._parse_text_tool_calls(collected_content)
-            if text_calls:
-                from zero_agent.llm.base import MockFunction, MockToolCall
-                mock.tool_calls = [
-                    MockToolCall(
-                        function=MockFunction(
-                            name=tc["tool_name"],
-                            arguments=json.dumps(tc["args"], ensure_ascii=False)
-                            if isinstance(tc["args"], dict) else str(tc["args"]),
-                        ),
-                        id=tc["id"],
-                    )
-                    for tc in text_calls
-                ]
-                if not classify_interruption(mock):
-                    mock.stop_reason = "tool_use"
-
         # 将助手消息追加到历史
         self._record_usage(
             getattr(final_response, "usage", None),
@@ -317,25 +297,6 @@ class LiteLLMSession:
             )
         yield mock.content
 
-        # 文本回退：litellm 未返回 tool_calls 时尝试从文本解析
-        if not mock.tool_calls and mock.content:
-            text_calls = self._parse_text_tool_calls(mock.content)
-            if text_calls:
-                from zero_agent.llm.base import MockFunction, MockToolCall
-                mock.tool_calls = [
-                    MockToolCall(
-                        function=MockFunction(
-                            name=tc["tool_name"],
-                            arguments=json.dumps(tc["args"], ensure_ascii=False)
-                            if isinstance(tc["args"], dict) else str(tc["args"]),
-                        ),
-                        id=tc["id"],
-                    )
-                    for tc in text_calls
-                ]
-                if not classify_interruption(mock):
-                    mock.stop_reason = "tool_use"
-
         self._record_usage(getattr(response, "usage", None))
         self._record_assistant(mock)
         return mock
@@ -356,8 +317,6 @@ class LiteLLMSession:
         Returns:
             litellm.completion() 的关键字参数字典.
         """
-        if tools:
-            messages = self._with_tool_instruction(messages, tools)
         messages = self._provider_messages(messages)
 
         kwargs: Dict[str, Any] = {
@@ -426,72 +385,6 @@ class LiteLLMSession:
             kwargs["api_mode"] = self.config.api_mode
 
         return kwargs
-
-    def _with_tool_instruction(
-        self,
-        messages: List[Dict[str, Any]],
-        tools: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """Inject GA-compatible per-call tool protocol while tools are mounted."""
-        instruction = self._prepare_tool_instruction(tools)
-        if not instruction:
-            return messages
-
-        patched = [dict(msg) for msg in messages]
-        for msg in patched:
-            if str(msg.get("role", "")).lower() == "system":
-                content = str(msg.get("content") or "")
-                msg["content"] = f"{content}\n\n{instruction}" if content else instruction
-                return patched
-
-        return [{"role": "system", "content": instruction}, *patched]
-
-    def _prepare_tool_instruction(self, tools: List[Dict[str, Any]]) -> str:
-        """Build the same always-on interaction protocol GA adds at call time."""
-        if not tools:
-            return ""
-
-        tools_json = json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
-        use_en = os.environ.get("GA_LANG") == "en"
-
-        if self._last_tools_json == tools_json:
-            return (
-                "\n### Tools: still active, **ready to call**. Protocol unchanged.\n"
-                if use_en
-                else "\n### 工具库状态：持续有效（code_run/file_read等），**可正常调用**。调用协议沿用。\n"
-            )
-
-        self._last_tools_json = tools_json
-        if use_en:
-            return (
-                "\n### Interaction Protocol (must follow strictly, always in effect)\n"
-                "Follow these steps to think and act:\n"
-                "1. **Think**: Analyze the current situation and strategy inside "
-                "`<thinking>` tags.\n"
-                "2. **Summarize**: Output a minimal one-line (<30 words) physical "
-                "snapshot in `<summary>`: new info from last tool result + current "
-                "tool call intent. This goes into long-term working memory. Must "
-                "contain real information, no filler.\n"
-                "3. **Act**: If you need to call tools, output one or more "
-                "**<tool_use> blocks** after your reply, then stop.\n"
-                "\n"
-                'Format: ```<tool_use>{"name": "tool_name", "arguments": {...}}</tool_use>```\n\n'
-                f"### Tools (mounted, always in effect):\n{tools_json}\n"
-            )
-
-        return (
-            "\n### 交互协议 (必须严格遵守，持续有效)\n"
-            "请按照以下步骤思考并行动：\n"
-            "1. **思考**: 在 `<thinking>` 标签中先进行思考，分析现状和策略。\n"
-            "2. **总结**: 在 `<summary>` 中输出*极为简短*的高度概括的单行（<30字）"
-            "物理快照，包括上次工具调用结果产生的新信息+本次工具调用意图。"
-            "此内容将进入长期工作记忆，记录关键信息，严禁输出无实际信息增量的描述。\n"
-            "3. **行动**: 如需调用工具，请在回复正文之后输出一个（或多个）"
-            "**<tool_use>块**，然后结束。\n"
-            "\n"
-            'Format: ```<tool_use>{"name": "tool_name", "arguments": {...}}</tool_use>```\n\n'
-            f"### Tools (mounted, always in effect):\n{tools_json}\n"
-        )
 
     def _provider_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Return messages in the wire format expected by the configured API."""
@@ -649,159 +542,17 @@ class LiteLLMSession:
     def _sanitize_tools(
         tools: Optional[List[Dict[str, Any]]],
     ) -> Optional[List[Dict[str, Any]]]:
-        """清理工具 schema：移除 file_write 的 content 参数描述.
-
-        防止 LLM 把大段文件内容放进 tool call arguments 而非 reply body.
+        """Return a detached copy of native provider tool schemas.
 
         Args:
             tools: 原始工具 schema 列表.
 
         Returns:
-            清理后的工具 schema 列表.
+            Provider-native tool schema copy, unchanged semantically.
         """
         if not tools:
             return tools
-        sanitized = []
-        for t in tools:
-            func = t.get("function", {})
-            if func.get("name") == "file_write":
-                props = func.get("parameters", {}).get("properties", {})
-                if "content" in props:
-                    t = json.loads(json.dumps(t, ensure_ascii=False))
-                    params = t["function"]["parameters"]
-                    params["properties"].pop("content", None)
-                    required = params.get("required")
-                    if isinstance(required, list):
-                        params["required"] = [
-                            name for name in required if name != "content"
-                        ]
-                    extra = ". Content must be placed in <file_content> tags in reply body, not in args"
-                    desc = t["function"].get("description", "")
-                    if extra not in desc:
-                        t["function"]["description"] = desc + extra
-            sanitized.append(t)
-        return sanitized
-
-    # ---- 文本工具调用回退解析 ----
-
-    @staticmethod
-    def _parse_text_tool_calls(text: str) -> list[dict]:
-        """从纯文本中提取工具调用，用于不支持原生 tool_calling 的模型.
-
-        支持两种模式:
-            1. XML: <tool_use>{"name":..., "arguments":...}</tool_use>
-            2. JSON 数组: [{"type":"tool_use","name":...,"input":...}]
-
-        Args:
-            text: LLM 响应的纯文本内容.
-
-        Returns:
-            工具调用列表 [{"tool_name": str, "args": dict, "id": str}].
-        """
-        import json as _json
-        import re as _re
-
-        results: list[dict] = []
-
-        # 模式 1: XML <tool_use> 标签
-        xml_pattern = _re.compile(
-            r"<tool_use>\s*(\{.*?\})\s*</tool_use>", _re.DOTALL
-        )
-        for match in xml_pattern.finditer(text):
-            try:
-                data = _json.loads(match.group(1))
-                results.append({
-                    "tool_name": data.get("name", "unknown"),
-                    "args": data.get("arguments", data.get("input", {})),
-                    "id": f"text_fallback_{len(results)}",
-                })
-            except _json.JSONDecodeError:
-                continue
-
-        if results:
-            return results
-
-        # 模式 2: JSON 数组格式
-        json_array_pattern = _re.compile(
-            r"\[\s*\{.*?\"type\"\s*:\s*\"tool_use\".*?\}\s*\]", _re.DOTALL
-        )
-        for match in json_array_pattern.finditer(text):
-            try:
-                arr = _json.loads(match.group(0))
-                for item in arr:
-                    if item.get("type") == "tool_use":
-                        results.append({
-                            "tool_name": item.get("name", "unknown"),
-                            "args": item.get("input", item.get("arguments", {})),
-                            "id": item.get("id", f"text_fallback_{len(results)}"),
-                        })
-            except _json.JSONDecodeError:
-                continue
-
-        if results:
-            return results
-
-        # 模式 3: 宽松的 <tool_call> 或类似标签订阅
-        loose_pattern = _re.compile(
-            r"<(?:tool_use|tool_call|function_call)>\s*(.*?)\s*</(?:tool_use|tool_call|function_call)>",
-            _re.DOTALL,
-        )
-        for match in loose_pattern.finditer(text):
-            raw = match.group(1).strip()
-            tool_name = "unknown"
-            args = {}
-            name_match = _re.search(r"\"name\"\s*:\s*\"(\w+)\"", raw)
-            if name_match:
-                tool_name = name_match.group(1)
-            args_match = _re.search(
-                r"\"(?:arguments|input|args)\"\s*:\s*(\{.*?\})", raw, _re.DOTALL
-            )
-            if args_match:
-                try:
-                    args = _json.loads(args_match.group(1))
-                except _json.JSONDecodeError:
-                    args = {"raw": raw}
-            else:
-                args = {"raw": raw}
-            results.append({
-                "tool_name": tool_name,
-                "args": args,
-                "id": f"text_fallback_{len(results)}",
-            })
-
-        # 模式 4: 裸 JSON 对象（无 XML 包装）
-        # 检测 {"name": ..., "arguments": ...} 格式
-        if '"name":' in text and '"arguments":' in text:
-            decoder = _json.JSONDecoder()
-            for match in _re.finditer(r"\{", text):
-                try:
-                    data, _ = decoder.raw_decode(text[match.start():])
-                except _json.JSONDecodeError:
-                    continue
-                if not isinstance(data, dict):
-                    continue
-                try:
-                    func_name = (
-                        data.get('name') or data.get('function')
-                        or data.get('tool')
-                    )
-                    args = (
-                        data.get('arguments') or data.get('args')
-                        or data.get('params') or data.get('parameters') or {}
-                    )
-                    if func_name:
-                        results.append({
-                            "tool_name": func_name,
-                            "args": args if isinstance(args, dict)
-                                    else {"raw": str(args)},
-                            "id": data.get(
-                                "id", f"text_fallback_{len(results)}"
-                            ),
-                        })
-                except (AttributeError, TypeError):
-                    pass
-
-        return results
+        return json.loads(json.dumps(tools, ensure_ascii=False))
 
     # ---- 粘连 JSON 解析 ----
 

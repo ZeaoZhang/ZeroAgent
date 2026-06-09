@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any, Dict, Generator, Optional
 
-from zero_agent.core.interruption import classify_interruption
+from zero_agent.core.completion_gate import CompletionGate, CompletionGateAction
 from zero_agent.core.types import StepOutcome
 from zero_agent.tools.registry import ToolRegistry
 
@@ -59,6 +59,14 @@ class BaseHandler:
         self._done_hooks: list = []
         self._empty_ct: int = 0
         self.history_info: list = []  # 每轮摘要历史，用于上下文压缩
+        self.completion_gate = CompletionGate(
+            retry_prompt_factory=self._native_tool_retry_prompt,
+            large_code_prompt_factory=self._large_code_block_retry_prompt,
+            plan_verification_prompt_factory=self._plan_verification_retry_prompt,
+            in_plan_mode=self._in_plan_mode,
+            check_plan_completion=self._check_plan_completion,
+            exit_plan_mode=self._exit_plan_mode,
+        )
 
     # ---- Stop Signal ----
 
@@ -193,6 +201,8 @@ class BaseHandler:
         """
         args["_index"] = index
         args["_tool_num"] = tool_num
+        if tool_name != "no_tool":
+            self.completion_gate.reset()
 
         # tool_before 钩子
         self._trigger_hook("tool_before", {
@@ -284,40 +294,6 @@ class BaseHandler:
     # ---- 内容提取辅助方法 ----
 
     @staticmethod
-    def _extract_file_content(response: Any) -> Optional[str]:
-        """从 LLM 响应中提取 <file_content> 标签内容.
-
-        支持大小写变体、标签属性、以及 thinking/reasoning 内容中的标签.
-
-        Args:
-            response: LLM 响应对象（MockResponse）.
-
-        Returns:
-            提取的文件内容，未找到时返回 None.
-        """
-        import re as _re
-
-        # 主搜索池：content + thinking
-        sources = [getattr(response, "content", "") or ""]
-        thinking = getattr(response, "thinking", "") or ""
-        if thinking:
-            sources.append(thinking)
-
-        combined = "\n".join(sources)
-        if not combined.strip():
-            return None
-
-        # 支持: <file_content>, <FILE_CONTENT>, <file_content attr="v"> 等
-        match = _re.search(
-            r"<\s*file_content[^>]*>(.*?)<\s*/\s*file_content\s*>",
-            combined, _re.DOTALL | _re.IGNORECASE,
-        )
-        if match:
-            return match.group(1).strip()
-
-        return None
-
-    @staticmethod
     def _extract_code_block(
         response: Any,
         lang: str = "",
@@ -384,6 +360,50 @@ class BaseHandler:
         )
         return StepOutcome(None, next_prompt=f"[System] {msg}", should_exit=False)
 
+    def _native_tool_retry_prompt(self) -> str:
+        """Prompt the model to use provider-native tool calls or finish clearly."""
+        return self._tl(
+            "[System] 上一轮回复看起来需要工具操作，但没有发出任何原生工具调用。"
+            "ZeroAgent 只执行 provider-native tool_calls；不要在正文中写 "
+            "<tool_use>、<tool_call>、<function_call> 或 <file_content>。"
+            "如果仍需检查、读取、运行或写入，请重新生成并使用原生工具调用；"
+            "如果任务已经完成，请直接给出最终结论和证据。",
+            "[System] The previous reply appeared to require tool work, but no "
+            "provider-native tool_calls were emitted. ZeroAgent only executes "
+            "native tool calls; do not write <tool_use>, <tool_call>, "
+            "<function_call>, or <file_content> in reply text. If tool work is "
+            "still needed, regenerate with native tool calls; if the task is "
+            "complete, provide the final answer and evidence directly.",
+        )
+
+    def _plan_verification_retry_prompt(self) -> str:
+        """Prompt plan-mode agents to verify before claiming completion."""
+        return self._tl(
+            "⛔ [验证拦截] 检测到你在 plan 模式下声称完成，但未执行 [VERIFY] 验证步骤。"
+            "请先按 plan_sop 启动验证 subagent，获得 VERDICT 后才能声称完成。",
+            "⛔ [Verify Intercept] You claimed completion in plan mode "
+            "without running [VERIFY]. Please run verification first.",
+        )
+
+    def _large_code_block_retry_prompt(self) -> str:
+        """Prompt after a large bare code block is emitted without tool calls."""
+        return self._tl(
+            "[System] 检测到你在上一轮回复中主要内容是较大代码块，"
+            "且本轮未调用任何工具。\n"
+            "如果这些代码需要执行、写入文件或进一步分析，请重新组织回复并显式调用相应工具"
+            "（例如：code_run、file_write、file_patch 等）；\n"
+            "如果只是向用户展示或讲解代码片段，请在回复中补充自然语言说明，"
+            "并明确是否还需要额外的实际操作。",
+            "[System] Your last reply consisted mainly of a large code block "
+            "without calling any tools.\n"
+            "If this code needs to be executed, written to a file, or further "
+            "analyzed, please reorganize your reply and explicitly call the "
+            "appropriate tool (e.g., code_run, file_write, file_patch);\n"
+            "If you are only showing or explaining the code to the user, "
+            "please add natural language explanation and clarify whether "
+            "any additional actions are needed.",
+        )
+
     # ---- do_no_tool ----
 
     def do_no_tool(
@@ -407,99 +427,44 @@ class BaseHandler:
         Returns:
             StepOutcome.
         """
-        content = getattr(response, "content", "") or ""
-        thinking = getattr(response, "thinking", "") or ""
-
-        # 空响应
-        if not response or (not content.strip() and not thinking.strip()):
-            yield self._tl(
-                "[Warn] LLM 返回空响应，重试...\n",
-                "[Warn] LLM returned empty response, retrying...\n",
+        decision = self.completion_gate.evaluate(response)
+        if decision.action != CompletionGateAction.ALLOW:
+            self._annotate_completion_gate(args, decision)
+            yield self._tl(decision.message_zh, decision.message_en)
+            if decision.action == CompletionGateAction.EXIT:
+                return StepOutcome(decision.data, should_exit=True)
+            if decision.reason in {
+                "blank_response",
+                "interruption:incomplete",
+                "interruption:max_tokens",
+            }:
+                return self._retry_or_exit(decision.prompt or "")
+            return StepOutcome(
+                decision.data,
+                next_prompt=decision.prompt,
+                should_exit=False,
             )
-            return self._retry_or_exit(
-                "[System] Blank response, regenerate and tooluse"
-            )
 
-        interruption = classify_interruption(response)
-        if interruption:
-            return self._retry_or_exit(interruption.retry_prompt)
-
-        # Plan mode: 拦截未验证的完成声明
-        plan_mode_complete_kw = [
-            "任务完成", "全部完成", "已完成所有",
-            "🏁", "All tasks complete", "All done", "finished all",
-        ]
-        if self._in_plan_mode() and any(kw in content for kw in plan_mode_complete_kw):
-            if (
-                "VERDICT" not in content
-                and "[VERIFY]" not in content
-                and "验证subagent" not in content
-            ):
-                yield self._tl(
-                    "[Warn] Plan 模式完成声明拦截.\n",
-                    "[Warn] Plan mode completion claim intercepted.\n",
-                )
-                return StepOutcome({}, next_prompt=self._tl(
-                    "⛔ [验证拦截] 检测到你在 plan 模式下声称完成，但未执行 [VERIFY] 验证步骤。"
-                    "请先按 plan_sop 启动验证 subagent，获得 VERDICT 后才能声称完成。",
-                    "⛔ [Verify Intercept] You claimed completion in plan mode "
-                    "without running [VERIFY]. Please run verification first.",
-                ))
-
-        # 检测包含较大代码块但未调用工具的情况
-        code_block_pattern = r"```[a-zA-Z0-9_]*\n[\s\S]{50,}?```"
-        blocks = re.findall(code_block_pattern, content)
-        if len(blocks) == 1:
-            m = re.search(code_block_pattern, content)
-            after_block = content[m.end():]
-            if not after_block.strip():
-                # 移除 thinking/summary 标签后检查残留
-                residual = content.replace(m.group(0), "")
-                residual = re.sub(
-                    r"<thinking>[\s\S]*?</thinking>", "", residual, flags=re.IGNORECASE
-                )
-                residual = re.sub(
-                    r"<summary>[\s\S]*?</summary>", "", residual, flags=re.IGNORECASE
-                )
-                clean_residual = re.sub(r"\s+", "", residual)
-                if len(clean_residual) <= 30:
-                    yield self._tl(
-                        "[Info] 检测到大代码块未调用工具，提示 LLM 调用工具.\n",
-                        "[Info] Large code block without tool call detected, prompting LLM.\n",
-                    )
-                    next_prompt = self._tl(
-                        "[System] 检测到你在上一轮回复中主要内容是较大代码块，"
-                        "且本轮未调用任何工具。\n"
-                        "如果这些代码需要执行、写入文件或进一步分析，请重新组织回复并显式调用相应工具"
-                        "（例如：code_run、file_write、file_patch 等）；\n"
-                        "如果只是向用户展示或讲解代码片段，请在回复中补充自然语言说明，"
-                        "并明确是否还需要额外的实际操作。",
-                        "[System] Your last reply consisted mainly of a large code block "
-                        "without calling any tools.\n"
-                        "If this code needs to be executed, written to a file, or further "
-                        "analyzed, please reorganize your reply and explicitly call the "
-                        "appropriate tool (e.g., code_run, file_write, file_patch);\n"
-                        "If you are only showing or explaining the code to the user, "
-                        "please add natural language explanation and clarify whether "
-                        "any additional actions are needed.",
-                    )
-                    return StepOutcome({}, next_prompt=next_prompt)
-
-        # Plan mode: 检查 plan.md 是否全部完成
-        if self._in_plan_mode():
-            remaining = self._check_plan_completion()
-            if remaining == 0:
-                self._exit_plan_mode()
-                yield self._tl(
-                    "[Info] Plan 完成：plan.md 中 0 个 [ ] 残留，退出 plan 模式.\n",
-                    "[Info] Plan complete: 0 unchecked [ ] in plan.md, exiting plan mode.\n",
-                )
+        for zh, en in decision.allow_messages:
+            yield self._tl(zh, en)
 
         yield self._tl(
             "[Info] Final response to user.\n",
             "[Info] Final response to user.\n",
         )
         return StepOutcome(response, next_prompt=None)
+
+    @staticmethod
+    def _annotate_completion_gate(
+        args: Dict[str, Any],
+        decision: Any,
+    ) -> None:
+        metadata = dict(decision.metadata or {})
+        args["_completion_gate"] = {
+            "action": decision.action.value,
+            "reason": decision.reason,
+            **metadata,
+        }
 
     def _retry_or_exit(self, prompt: str) -> StepOutcome:
         """重试计数，连续 3 次空响应则硬退出.
@@ -645,10 +610,20 @@ class BaseHandler:
             # 从第一个工具调构造摘要
             tc = tool_calls[0] if tool_calls else {"tool_name": "no_tool", "args": {}}
             tool_name = tc["tool_name"]
-            clean_args = {k: v for k, v in tc.get("args", {}).items()
-                          if not k.startswith("_")}
+            clean_args = {
+                k: v for k, v in tc.get("args", {}).items()
+                if not k.startswith("_")
+            }
             if tool_name == "no_tool":
-                summary = self._tl("直接回答了用户问题", "Answered the user directly")
+                gate = tc.get("args", {}).get("_completion_gate", {})
+                reason = gate.get("reason") if isinstance(gate, dict) else None
+                if reason:
+                    summary = self._tl(
+                        f"Completion gate 纠正/停止: {reason}",
+                        f"Completion gate corrected/stopped: {reason}",
+                    )
+                else:
+                    summary = self._tl("直接回答了用户问题", "Answered the user directly")
             else:
                 args_str = str(clean_args)
                 if len(args_str) > 40:

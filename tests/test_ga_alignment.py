@@ -100,14 +100,39 @@ def _make_ga_tool_client():
     return module.ToolClient(Backend())
 
 
-def test_builtin_tool_schema_matches_ga_english_exactly(mock_config) -> None:
-    assert (
-        ToolRegistry.with_builtins(mock_config).generate_openai_schema()
-        == _ga_schema("tools_schema.json")
+def _by_tool_name(schema: list[dict]) -> dict[str, dict]:
+    return {tool["function"]["name"]: tool for tool in schema}
+
+
+def _assert_schema_matches_ga_except_native_file_write(
+    za_schema: list[dict],
+    ga_schema: list[dict],
+) -> None:
+    za_tools = _by_tool_name(za_schema)
+    ga_tools = _by_tool_name(ga_schema)
+
+    assert list(za_tools) == list(ga_tools)
+    for name in za_tools:
+        if name == "file_write":
+            continue
+        assert za_tools[name] == ga_tools[name]
+
+    file_write = za_tools["file_write"]["function"]
+    parameters = file_write["parameters"]
+    assert "content" in parameters["properties"]
+    assert "content" in parameters.get("required", [])
+    assert "<file_content>" not in file_write["description"]
+    assert "tool_use" not in file_write["description"]
+
+
+def test_builtin_tool_schema_matches_ga_english_except_native_file_write(mock_config) -> None:
+    _assert_schema_matches_ga_except_native_file_write(
+        ToolRegistry.with_builtins(mock_config).generate_openai_schema(),
+        _ga_schema("tools_schema.json"),
     )
 
 
-def test_builtin_tool_schema_matches_ga_chinese_exactly() -> None:
+def test_builtin_tool_schema_matches_ga_chinese_except_native_file_write() -> None:
     config = AgentConfig(
         language="zh",
         llm_backends={
@@ -123,9 +148,9 @@ def test_builtin_tool_schema_matches_ga_chinese_exactly() -> None:
         memory_dir="/tmp/mem",
     )
 
-    assert (
-        ToolRegistry.with_builtins(config).generate_openai_schema()
-        == _ga_schema("tools_schema_cn.json")
+    _assert_schema_matches_ga_except_native_file_write(
+        ToolRegistry.with_builtins(config).generate_openai_schema(),
+        _ga_schema("tools_schema_cn.json"),
     )
 
 
@@ -258,7 +283,7 @@ def test_system_prompt_appends_ga_peer_hint_when_enabled(
 
 
 @pytest.mark.parametrize("language", ["zh", "en"])
-def test_tool_protocol_prompt_matches_ga_exactly(monkeypatch, language: str) -> None:
+def test_text_tool_protocol_prompt_is_removed(monkeypatch, language: str) -> None:
     monkeypatch.delenv("ZA_LANG", raising=False)
     if language == "en":
         monkeypatch.setenv("GA_LANG", "en")
@@ -276,10 +301,15 @@ def test_tool_protocol_prompt_matches_ga_exactly(monkeypatch, language: str) -> 
         }
     ]
     za_session = _make_session()
-    ga_client = _make_ga_tool_client()
 
-    assert za_session._prepare_tool_instruction(tools) == ga_client._prepare_tool_instruction(tools)
-    assert za_session._prepare_tool_instruction(tools) == ga_client._prepare_tool_instruction(tools)
+    assert not hasattr(za_session, "_prepare_tool_instruction")
+    kwargs = za_session._build_completion_kwargs(
+        messages=[{"role": "system", "content": "system"}, {"role": "user", "content": "go"}],
+        tools=tools,
+        stream=True,
+    )
+    assert kwargs["messages"][0]["content"] == "system"
+    assert kwargs["tools"] == tools
 
 
 def test_next_turn_messages_keep_ga_tool_results_shape() -> None:

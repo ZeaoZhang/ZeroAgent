@@ -127,7 +127,7 @@ def test_fix_messages_fills_missing_tool_results_after_assistant_tool_calls() ->
     assert "missing" in following[1]["content"]
 
 
-def test_sanitize_file_write_required_matches_properties(mock_config) -> None:
+def test_sanitize_tools_keeps_native_file_write_content_schema(mock_config) -> None:
     from zero_agent.tools.registry import ToolRegistry
 
     registry = ToolRegistry.with_builtins(mock_config)
@@ -139,8 +139,9 @@ def test_sanitize_file_write_required_matches_properties(mock_config) -> None:
     )
     parameters = file_write["function"]["parameters"]
 
-    assert "content" not in parameters["properties"]
-    assert "content" not in parameters.get("required", [])
+    assert "content" in parameters["properties"]
+    assert "content" in parameters.get("required", [])
+    assert "<file_content>" not in file_write["function"]["description"]
 
 
 def test_completion_kwargs_include_provider_for_openai_compatible_backend() -> None:
@@ -165,7 +166,7 @@ def test_completion_kwargs_include_provider_for_openai_compatible_backend() -> N
     assert kwargs["api_base"] == "https://api.deepseek.com"
 
 
-def test_completion_kwargs_inject_tool_instruction_when_tools_mounted(monkeypatch) -> None:
+def test_completion_kwargs_use_native_tools_without_text_protocol(monkeypatch) -> None:
     monkeypatch.delenv("ZA_LANG", raising=False)
     monkeypatch.setenv("GA_LANG", "en")
     session = _make_session()
@@ -190,15 +191,14 @@ def test_completion_kwargs_inject_tool_instruction_when_tools_mounted(monkeypatc
     )
 
     system = kwargs["messages"][0]["content"]
-    assert "system prompt" in system
-    assert "Interaction Protocol" in system
-    assert "If you need to call tools" in system
-    assert "<tool_use>" in system
-    assert '"name":"file_read"' in system
+    assert system == "system prompt"
+    assert "Interaction Protocol" not in system
+    assert "<tool_use>" not in system
+    assert '"name":"file_read"' not in system
     assert kwargs["tools"] == tools
 
 
-def test_completion_kwargs_repeats_short_tool_instruction_for_same_tools(monkeypatch) -> None:
+def test_completion_kwargs_do_not_cache_text_tool_protocol(monkeypatch) -> None:
     monkeypatch.delenv("ZA_LANG", raising=False)
     monkeypatch.setenv("GA_LANG", "en")
     session = _make_session()
@@ -224,25 +224,59 @@ def test_completion_kwargs_repeats_short_tool_instruction_for_same_tools(monkeyp
         stream=True,
     )
 
-    system = kwargs["messages"][0]["content"]
-    assert "Tools: still active" in system
-    assert "**ready to call**" in system
-    assert '"name":"code_run"' not in system
+    assert len(kwargs["messages"]) == 1
+    assert kwargs["messages"][0]["role"] == "user"
+    assert "second" in str(kwargs["messages"][0]["content"])
+    assert "<tool_use>" not in str(kwargs["messages"])
+    assert kwargs["tools"] == tools
+    assert session.last_tools == ""
 
 
-def test_parse_text_tool_calls_accepts_bare_nested_json_object() -> None:
-    calls = LiteLLMSession._parse_text_tool_calls(
-        '先读取文件\n{"name":"file_read","arguments":{"path":"a/b.json",'
-        '"options":{"encoding":"utf-8"}}}'
+def test_text_tool_syntax_is_not_parsed_as_native_tool_call(monkeypatch) -> None:
+    class FakeMessage:
+        content = (
+            '先读取文件\n<tool_use>{"name":"file_read",'
+            '"arguments":{"path":"a/b.json"}}</tool_use>'
+        )
+        tool_calls = None
+
+    class FakeChoice:
+        message = FakeMessage()
+        finish_reason = "stop"
+
+    class FakeResponse:
+        choices = [FakeChoice()]
+
+    monkeypatch.setattr(
+        "zero_agent.llm.sessions.litellm.completion",
+        lambda **kwargs: FakeResponse(),
     )
 
-    assert calls == [
-        {
-            "tool_name": "file_read",
-            "args": {"path": "a/b.json", "options": {"encoding": "utf-8"}},
-            "id": "text_fallback_0",
-        }
-    ]
+    session = _make_session()
+    session.config.stream = False
+    gen = session.chat(
+        messages=[{"role": "user", "content": "read"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "file_read",
+                    "description": "Read",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    )
+    assert next(gen) == FakeMessage.content
+    try:
+        next(gen)
+    except StopIteration as exc:
+        response = exc.value
+    else:
+        raise AssertionError("chat generator should finish")
+
+    assert response.tool_calls == []
+    assert response.stop_reason == "stop"
 
 
 def test_compress_history_tags_matches_ga_tag_replacement() -> None:

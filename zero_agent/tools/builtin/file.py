@@ -306,8 +306,11 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         name="file_write",
         description=_t(
             "用于文件的新建、全量覆盖或追加写入。对于精细的代码修改，应优先使用 file_patch。"
+            "必须在原生工具参数 content 中提供完整写入内容；不会从回复正文、代码块或标签中提取内容。"
             "写入内容支持 {{file:路径:起始行:结束行}} 语法引用文件片段，写入前自动展开",
-            "Create/overwrite/append files. HUGE edits ONLY. Supports "
+            "Create/overwrite/append files. HUGE edits ONLY. Provide the complete "
+            "file text in the native content argument; reply-body text, code "
+            "fences, or tags are ignored. Supports "
             "{{file:path:startLine:endLine}}, auto-expanded",
             lang,
         ),
@@ -330,6 +333,7 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
                     "default": "overwrite",
                 },
             },
+            "required": ["path", "content"],
         },
         handler=_make_file_write_handler(config),
         category="file",
@@ -420,21 +424,15 @@ def _make_file_write_handler(config: AgentConfig):
         action_str = {"prepend": "Prepending to", "append": "Appending to"}.get(mode, "Overwriting")
         yield f"[Action] {action_str} file: {os.path.basename(path)}\n"
 
-        content = args.get("content", "")
-        if not content:
-            # 回退: 从 LLM 响应中提取 <file_content> 标签
-            content = handler._extract_file_content(_response)
-        if not content:
-            # 二级回退: 从响应中提取代码块
-            content = handler._extract_code_block(_response)
-        if not content:
+        content = args.get("content")
+        if not isinstance(content, str) or not content.strip():
             yield "[Status] ERR 失败: 缺少 content 参数\n"
             return {
                 "status": "error",
                 "msg": (
-                    "No content found. Blank is not supported. Put content inside "
-                    "<file_content>...</file_content> tags in your reply body "
-                    "before call file_write."
+                    "file_write content argument is required and must be a "
+                    "non-empty string. Native-only mode does not read reply-body "
+                    "text, code fences, or <file_content> tags."
                 ),
                 "_za_next_prompt": "\n",
             }

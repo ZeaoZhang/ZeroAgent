@@ -121,12 +121,36 @@ class TestBaseHandlerDispatch:
         assert result.data["status"] == "INTERRUPT"
         assert result.data["data"]["question"] == "继续吗？"
 
-    def test_real_registry_file_write_missing_content_matches_ga(
+    def test_real_registry_file_write_with_native_content_succeeds(
         self,
         mock_config,
         tmp_path,
     ) -> None:
-        """file_write 缺 content 时像 GA 一样报错并继续，不写自然语言正文."""
+        """file_write 只接受 native tool arguments 中的 content."""
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
+        target = tmp_path / "out.txt"
+
+        result = _exhaust(handler.dispatch(
+            "file_write",
+            {
+                "path": str(target),
+                "mode": "overwrite",
+                "content": "native content\n",
+            },
+            MockResponse(content=""),
+        ))
+
+        assert result.data["status"] == "success"
+        assert "### [WORKING MEMORY]" in result.next_prompt
+        assert target.read_text(encoding="utf-8") == "native content\n"
+
+    def test_real_registry_file_write_missing_content_requires_native_arg(
+        self,
+        mock_config,
+        tmp_path,
+    ) -> None:
+        """file_write 缺 content 时不再从正文或代码块回退提取."""
         registry = ToolRegistry.with_builtins(mock_config)
         handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
         target = tmp_path / "out.txt"
@@ -134,11 +158,17 @@ class TestBaseHandlerDispatch:
         result = _exhaust(handler.dispatch(
             "file_write",
             {"path": str(target), "mode": "overwrite"},
-            MockResponse(content="我准备写入文件。"),
+            MockResponse(
+                content=(
+                    "我准备写入文件。\n"
+                    "<file_content>should not write</file_content>\n"
+                    "```text\nalso should not write\n```"
+                ),
+            ),
         ))
 
         assert result.data["status"] == "error"
-        assert "No content found" in result.data["msg"]
+        assert "content argument is required" in result.data["msg"]
         assert result.next_prompt == "\n"
         assert not target.exists()
 
@@ -329,6 +359,24 @@ class TestBaseHandlerDoNoTool:
         result = _exhaust(gen)
         assert result.next_prompt is None
 
+    def test_normal_response_with_action_word_completes(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """普通最终回答里的 reading/checking 不应被误判为工具意图."""
+        gen = mock_handler.do_no_tool(
+            {},
+            MockResponse(
+                content=(
+                    "Reading the existing context, the requested change is "
+                    "complete. The checking logic is now covered by tests."
+                ),
+            ),
+        )
+        result = _exhaust(gen)
+
+        assert result.next_prompt is None
+
     def test_incomplete_response_retries(self, mock_handler: BaseHandler) -> None:
         """流异常中断触发重试."""
         content = "some text [!!! 流异常中断 in the end"
@@ -375,6 +423,151 @@ class TestBaseHandlerDoNoTool:
         # 应该触发提示
         assert result.next_prompt is not None
         assert "代码" in result.next_prompt
+
+    def test_text_tool_protocol_without_native_call_retries(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """正文里的工具协议 tag 不能被当成完成回复."""
+        content = (
+            '准备读取。\n<tool_use>{"name":"file_read",'
+            '"arguments":{"path":"config.py"}}</tool_use>'
+        )
+        gen = mock_handler.do_no_tool({}, MockResponse(content=content))
+        result = _exhaust(gen)
+
+        assert result.next_prompt is not None
+        assert "native" in result.next_prompt.lower()
+        assert result.data == {}
+
+    def test_file_content_without_native_call_retries(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """裸 <file_content> 是协议错误，不是可执行 side-channel."""
+        gen = mock_handler.do_no_tool(
+            {},
+            MockResponse(content="<file_content>x = 1</file_content>"),
+        )
+        result = _exhaust(gen)
+
+        assert result.next_prompt is not None
+        assert "file_content" in result.next_prompt
+        assert result.data == {}
+
+    def test_action_intent_without_native_call_retries(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """只说要检查/读取但未发出 native tool_calls 时继续催促工具调用."""
+        gen = mock_handler.do_no_tool(
+            {},
+            MockResponse(content="让我检查项目配置情况。"),
+        )
+        result = _exhaust(gen)
+
+        assert result.next_prompt is not None
+        assert "tool" in result.next_prompt.lower()
+        assert result.data == {}
+
+    def test_english_future_action_intent_without_native_call_retries(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """明确未来动作意图仍会被 native-only guard 拦截."""
+        gen = mock_handler.do_no_tool(
+            {},
+            MockResponse(content="Sure, let me check the project config."),
+        )
+        result = _exhaust(gen)
+
+        assert result.next_prompt is not None
+        assert "native" in result.next_prompt.lower()
+        assert result.data == {}
+
+    def test_action_intent_retry_budget_exits(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """动作承诺纠正只重试一次，避免无工具纠正循环."""
+        first = _exhaust(mock_handler.do_no_tool(
+            {},
+            MockResponse(content="让我检查项目配置情况。"),
+        ))
+        second = _exhaust(mock_handler.do_no_tool(
+            {},
+            MockResponse(content="我来查看配置文件。"),
+        ))
+
+        assert first.should_exit is False
+        assert first.next_prompt is not None
+        assert second.should_exit is True
+        assert second.next_prompt is None
+
+    def test_text_tool_protocol_retry_budget_exits(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """旧文本工具协议最多纠正两次，第三次硬停止."""
+        content = (
+            '<tool_use>{"name":"file_read","arguments":{"path":"x"}}</tool_use>'
+        )
+
+        first = _exhaust(mock_handler.do_no_tool({}, MockResponse(content=content)))
+        second = _exhaust(mock_handler.do_no_tool({}, MockResponse(content=content)))
+        third = _exhaust(mock_handler.do_no_tool({}, MockResponse(content=content)))
+
+        assert first.should_exit is False
+        assert second.should_exit is False
+        assert third.should_exit is True
+
+    def test_native_tool_call_resets_completion_gate_budget(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """成功进入 native 工具分发后，completion gate 的纠正预算重置."""
+        first = _exhaust(mock_handler.do_no_tool(
+            {},
+            MockResponse(content="让我检查项目配置情况。"),
+        ))
+        assert first.next_prompt is not None
+
+        _exhaust(mock_handler.dispatch(
+            "echo",
+            {"message": "ok"},
+            MockResponse(content="", tool_calls=[]),
+        ))
+
+        second = _exhaust(mock_handler.do_no_tool(
+            {},
+            MockResponse(content="我来查看配置文件。"),
+        ))
+        assert second.should_exit is False
+        assert second.next_prompt is not None
+
+    def test_no_tool_retry_is_annotated_for_turn_summary(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """gate retry 的 no_tool 轮次不应记为直接回答用户."""
+        args: dict = {}
+        result = _exhaust(mock_handler.do_no_tool(
+            args,
+            MockResponse(content="让我检查项目配置情况。"),
+        ))
+        assert result.next_prompt is not None
+
+        mock_handler.turn_end_callback(
+            MockResponse(content="让我检查项目配置情况。"),
+            [{"tool_name": "no_tool", "args": args}],
+            [],
+            turn=1,
+            next_prompt=result.next_prompt,
+            exit_reason={},
+        )
+
+        assert "promissory_action" in mock_handler.history_info[-1]
+        assert "直接回答" not in mock_handler.history_info[-1]
 
     def test_three_empty_retries_exits(self, mock_handler: BaseHandler) -> None:
         """连续 3 次空响应 → should_exit=True."""
