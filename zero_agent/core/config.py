@@ -114,6 +114,7 @@ class AgentConfig:
         language: 界面语言 "auto" | "zh" | "en".
         incremental_output: 是否增量输出流式内容到 UI.
         log_dir: LLM 调用日志目录.
+        litellm_model_cost_map: LiteLLM 模型价格/上下文窗口表缓存路径.
     """
 
     llm_backends: dict[str, LLMBackendConfig] = field(default_factory=dict)
@@ -128,6 +129,7 @@ class AgentConfig:
     failover_backends: list[str] = field(default_factory=list)
     log_dir: Optional[str] = None
     peer_hint: bool = False
+    litellm_model_cost_map: Optional[str] = None
 
     @property
     def resolved_language(self) -> str:
@@ -219,7 +221,13 @@ class AgentConfig:
         Args:
             base_dir: 基准目录（通常为配置文件所在目录）.
         """
-        for attr in ("workspace_dir", "memory_dir", "sessions_dir", "log_dir"):
+        for attr in (
+            "workspace_dir",
+            "memory_dir",
+            "sessions_dir",
+            "log_dir",
+            "litellm_model_cost_map",
+        ):
             val = getattr(self, attr)
             if val and not os.path.isabs(val):
                 setattr(self, attr, os.path.normpath(os.path.join(base_dir, val)))
@@ -249,6 +257,7 @@ class AgentConfig:
         memory_dir = os.environ.get("ZA_MEMORY_DIR", "./memory")
         language = os.environ.get("ZA_LANG", "auto")
         peer_hint = os.environ.get("ZA_PEER_HINT", "").lower() in ("1", "true", "yes", "on")
+        litellm_model_cost_map = os.environ.get("ZA_LITELLM_MODEL_COST_MAP") or None
 
         return cls(
             llm_backends={
@@ -266,6 +275,7 @@ class AgentConfig:
             memory_dir=memory_dir,
             language=language,
             peer_hint=peer_hint,
+            litellm_model_cost_map=litellm_model_cost_map,
         )
 
     @classmethod
@@ -289,13 +299,14 @@ class AgentConfig:
             max_turns=data.get("max_turns", 80),
             workspace_dir=data.get("workspace_dir", "./workspace"),
             memory_dir=data.get("memory_dir", "./memory"),
-            sessions_dir=data.get("sessions_dir", "./sessions"),
+            sessions_dir=data.get("sessions_dir", "./workspace/sessions"),
             verbose=data.get("verbose", True),
             language=data.get("language", "auto"),
             incremental_output=data.get("incremental_output", False),
             failover_backends=data.get("failover_backends", []),
             log_dir=data.get("log_dir"),
             peer_hint=data.get("peer_hint", False),
+            litellm_model_cost_map=data.get("litellm_model_cost_map"),
         )
 
 

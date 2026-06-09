@@ -10,3 +10,7 @@ llm_backends:
 max_turns: 80
 verbose: true
 language: "zh"
+workspace_dir: "./workspace"
+memory_dir: "./memory"
+sessions_dir: "./workspace/sessions"
+# litellm_model_cost_map: "./model_prices_and_context_window.json"

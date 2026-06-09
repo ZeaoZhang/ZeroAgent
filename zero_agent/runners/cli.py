@@ -9,11 +9,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from typing import Optional
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import AgentConfig, default_config_path, load_default_config
+from zero_agent.core.exceptions import LLMError
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -179,6 +181,9 @@ def _run_oneshot(agent: ZeroAgent, task: str) -> None:
     except KeyboardInterrupt:
         agent.abort()
         print("\n[Interrupted]")
+    except LLMError as exc:
+        _print_llm_error(exc)
+        sys.exit(1)
 
 
 def _run_repl(agent: ZeroAgent) -> None:
@@ -216,6 +221,8 @@ def _run_repl(agent: ZeroAgent) -> None:
         except KeyboardInterrupt:
             agent.abort()
             print("\n[Interrupted]")
+        except LLMError as exc:
+            _print_llm_error(exc)
 
 
 def _setup_readline() -> None:
@@ -475,6 +482,7 @@ def _run_task_mode(agent: ZeroAgent, io_dir: str) -> None:
     print(f"[Task Mode] 任务: {task[:100]}...")
 
     output_lines: list[str] = []
+    failed = False
     gen = agent.run(task)
     try:
         for chunk in gen:
@@ -484,6 +492,11 @@ def _run_task_mode(agent: ZeroAgent, io_dir: str) -> None:
     except KeyboardInterrupt:
         agent.abort()
         output_lines.append("\n[Interrupted]")
+    except LLMError as exc:
+        message = _format_llm_error(exc)
+        _print_llm_error(exc)
+        output_lines.append(f"\n[Error] {message}\n")
+        failed = True
 
     # 写入输出
     with open(output_path, "w", encoding="utf-8") as f:
@@ -500,7 +513,33 @@ def _run_task_mode(agent: ZeroAgent, io_dir: str) -> None:
         f.write(log_entry + "\n")
     print(f"[Task Mode] 日志已追加: {log_path}")
 
+    if failed:
+        sys.exit(1)
+
     return False
+
+
+def _format_llm_error(exc: LLMError) -> str:
+    """Return a compact user-facing LLM error message."""
+    message = str(exc).strip()
+    replacements = (
+        "litellm.APIError: APIError: OpenAIException - ",
+        "APIError: OpenAIException - ",
+        "OpenAIException - ",
+        "litellm.APIError: ",
+    )
+    for prefix in replacements:
+        message = message.replace(prefix, "")
+    message = re.sub(r"\s+", " ", message)
+    if "Your request was blocked" in message:
+        message += (
+            " 服务端已拒绝该请求；请检查 API key、模型权限、网关策略或请求内容。"
+        )
+    return message
+
+
+def _print_llm_error(exc: LLMError) -> None:
+    print(f"\n[LLM Error] {_format_llm_error(exc)}", file=sys.stderr)
 
 
 def _print_welcome(agent: ZeroAgent) -> None:

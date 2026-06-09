@@ -4,7 +4,13 @@ import argparse
 
 import pytest
 
-from zero_agent.runners.cli import _build_parser, _load_config, _parse_reflect_args
+from zero_agent.core.exceptions import LLMError
+from zero_agent.runners.cli import (
+    _build_parser,
+    _format_llm_error,
+    _load_config,
+    _parse_reflect_args,
+)
 
 
 def test_load_config_writes_max_turns_override(monkeypatch, tmp_path) -> None:
@@ -47,3 +53,17 @@ def test_parse_reflect_args() -> None:
 def test_parse_reflect_args_rejects_invalid_values() -> None:
     with pytest.raises(ValueError):
         _parse_reflect_args(["not-a-pair"])
+
+
+def test_format_llm_error_removes_litellm_noise() -> None:
+    err = LLMError(
+        "LLM 调用失败 [default]: litellm.APIError: APIError: "
+        "OpenAIException - Your request was blocked."
+    )
+
+    message = _format_llm_error(err)
+
+    assert "Give Feedback" not in message
+    assert "litellm.APIError" not in message
+    assert "Your request was blocked." in message
+    assert "服务端已拒绝该请求" in message

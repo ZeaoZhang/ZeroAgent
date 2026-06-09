@@ -42,6 +42,7 @@ logs/
 
 # Workspace / task directories
 workspace/
+sessions/
 /memory/
 task_*/
 temp/

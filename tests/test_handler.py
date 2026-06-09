@@ -310,6 +310,32 @@ class TestBaseHandlerDispatch:
         assert "SYSTEM TIPS" in result.next_prompt
         assert result.next_prompt.startswith("\n### [WORKING MEMORY]")
 
+    def test_file_read_memory_alias_resolves_outside_workspace(
+        self,
+        mock_config,
+        tmp_path,
+    ) -> None:
+        """memory/... paths should resolve to config.memory_dir, not workspace/memory."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        memory_dir = tmp_path / "memory"
+        sop_dir = memory_dir / "sops"
+        sop_dir.mkdir(parents=True)
+        (sop_dir / "goal_mode_sop.md").write_text("goal body\n", encoding="utf-8")
+        mock_config.workspace_dir = str(workspace)
+        mock_config.memory_dir = str(memory_dir)
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=str(workspace))
+
+        result = _exhaust(handler.dispatch(
+            "file_read",
+            {"path": "memory/sops/goal_mode_sop.md", "count": 5},
+            MockResponse(content=""),
+        ))
+
+        assert "goal body" in result.data
+        assert "File not found" not in result.data
+
     def test_real_registry_start_long_term_update_includes_global_memory(
         self,
         mock_config,

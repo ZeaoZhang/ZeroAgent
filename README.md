@@ -96,6 +96,7 @@ default_backend: default
 max_turns: 80
 workspace_dir: ./workspace
 memory_dir: ./memory
+sessions_dir: ./workspace/sessions
 language: auto
 
 llm_backends:
@@ -189,6 +190,52 @@ python -m zero_agent.frontends.desktop_bridge
 
 The Web UI and Tauri desktop app use the same static frontend under
 `zero_agent/frontends/desktop/static`.
+
+## 打包桌面 App
+
+桌面 App 使用 Tauri 2 打包，前端静态资源位于
+`zero_agent/frontends/desktop/static`，后端 bridge 仍使用当前 Python 环境运行。
+打包前需要准备:
+
+- Python 环境已安装 UI 依赖：`pip install -e ".[ui]"`
+- 已安装 Node.js / npm
+- 已安装 Rust toolchain 和 Tauri 对应平台依赖
+
+macOS 上推荐使用仓库脚本完成构建、安装和启动验证:
+
+```bash
+./scripts/restart.sh
+```
+
+该脚本会停止已运行的 ZeroAgent desktop/bridge 进程，重新安装 editable
+Python 包，执行 Tauri release build，安装最新 DMG 到
+`/Applications/ZeroAgent.app`，然后启动并检查
+`http://127.0.0.1:14168/status`。
+
+只打包不安装/不启动:
+
+```bash
+./scripts/restart.sh --skip-install --no-start
+```
+
+手动打包:
+
+```bash
+pip install -e ".[ui]"
+cd zero_agent/frontends/desktop
+npm ci
+npm run tauri -- build
+```
+
+构建产物位置:
+
+- macOS DMG: `zero_agent/frontends/desktop/src-tauri/target/release/bundle/dmg/`
+- Windows NSIS installer: `zero_agent/frontends/desktop/src-tauri/target/release/bundle/nsis/`
+
+首次启动时，桌面 App 会读取 `~/.zero_agent_desktop_settings.json`
+中的 `python_path` 和 `project_dir` 来启动 Python bridge。`scripts/restart.sh`
+会自动写入该文件；如果手动打包后看到 Setup 窗口，按提示选择当前项目目录和
+Python 解释器即可。
 
 ## REPL 命令
 

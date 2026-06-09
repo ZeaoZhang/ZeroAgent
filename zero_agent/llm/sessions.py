@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
 import litellm
@@ -21,6 +22,51 @@ from zero_agent.core.interruption import (
 )
 from zero_agent.llm.base import MockResponse
 from zero_agent.llm.converters import msgs_claude_to_openai
+
+
+def _model_cost_map_path(path: str | os.PathLike[str] | None = None) -> Path | None:
+    raw = str(path) if path else os.environ.get("ZA_LITELLM_MODEL_COST_MAP")
+    if raw:
+        return Path(raw).expanduser()
+    return None
+
+
+def register_model_cost_map(path: str | os.PathLike[str] | None = None) -> bool:
+    """Overlay LiteLLM's bundled cost map with a configured local cache."""
+    resolved = _model_cost_map_path(path)
+    if resolved is None or not resolved.is_file():
+        return False
+
+    try:
+        data = json.loads(resolved.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return False
+        try:
+            from litellm.litellm_core_utils.get_model_cost_map import (
+                _expand_model_aliases,
+            )
+
+            data = _expand_model_aliases(data)
+        except Exception:
+            pass
+
+        litellm.model_cost.update(data)
+        if hasattr(litellm, "add_known_models"):
+            litellm.add_known_models(model_cost_map=data)
+
+        try:
+            from litellm.utils import _invalidate_model_cost_lowercase_map
+
+            _invalidate_model_cost_lowercase_map()
+        except Exception:
+            pass
+    except Exception:
+        return False
+
+    return True
+
+
+litellm.suppress_debug_info = True
 
 
 class LiteLLMSession:

@@ -187,10 +187,12 @@ def test_repository_has_no_removed_name_fragments() -> None:
         ".mypy_cache",
         ".pytest_cache",
         ".ruff_cache",
+        ".venv",
         "__pycache__",
         "build",
         "dist",
         "node_modules",
+        "sessions",
         "target",
         "zero_agent.egg-info",
     }

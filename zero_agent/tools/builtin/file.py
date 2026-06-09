@@ -354,6 +354,10 @@ def _resolve_path(path: str, config: AgentConfig) -> str:
         return ""
     if os.path.isabs(path):
         return path
+    normalized = os.path.normpath(path)
+    parts = normalized.split(os.sep)
+    if parts and parts[0] == os.path.basename(os.path.normpath(config.memory_dir)):
+        return os.path.normpath(os.path.join(config.memory_dir, *parts[1:]))
     return os.path.normpath(os.path.join(config.workspace_dir, path))
 
 

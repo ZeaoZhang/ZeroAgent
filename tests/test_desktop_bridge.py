@@ -8,6 +8,7 @@ import json
 import queue
 from pathlib import Path
 
+from zero_agent.core.config import AgentConfig, LLMBackendConfig
 from zero_agent.frontends import desktop_bridge
 
 
@@ -31,6 +32,31 @@ def test_status_payload_exposes_zeroagent_fields() -> None:
     manager = desktop_bridge.AgentManager()
     assert manager.workspace_dir
     assert manager.config_path
+
+
+def test_agent_manager_uses_configured_workspace_and_sessions(monkeypatch, tmp_path) -> None:
+    config = AgentConfig(
+        llm_backends={
+            "default": LLMBackendConfig(
+                name="default",
+                provider="openai",
+                api_key="sk-test",
+                api_base="https://api.openai.com/v1",
+                model="gpt-test",
+            ),
+        },
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "workspace" / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+
+    manager = desktop_bridge.AgentManager()
+
+    assert manager.workspace_dir == str(tmp_path / "workspace")
+    assert manager.sessions_dir == str(tmp_path / "workspace" / "sessions")
+    assert manager.config["workspace_dir"] == str(tmp_path / "workspace")
+    assert "api_key" not in manager.config["llm_backends"]["default"]
 
 
 def test_model_profiles_come_from_agent_runner(monkeypatch) -> None:
@@ -150,10 +176,13 @@ def test_slash_palette_distinguishes_resume_and_continue() -> None:
 
 
 def test_resume_session_listing_defaults_to_ten(monkeypatch, tmp_path) -> None:
+    configured_sessions_dir = tmp_path / "configured-sessions"
+    seen_sessions_dirs = []
+
     class DummyContinue:
         @staticmethod
-        def set_sessions_dir(_path):
-            pass
+        def set_sessions_dir(path):
+            seen_sessions_dirs.append(path)
 
         @staticmethod
         def list_sessions(exclude_pid=None):
@@ -164,11 +193,13 @@ def test_resume_session_listing_defaults_to_ten(monkeypatch, tmp_path) -> None:
 
     manager = desktop_bridge.AgentManager()
     monkeypatch.setattr(manager, "workspace_dir", str(tmp_path))
+    monkeypatch.setattr(manager, "sessions_dir", str(configured_sessions_dir))
     monkeypatch.setattr(manager, "ensure_project_import_path", lambda: None)
     monkeypatch.setitem(__import__("sys").modules, "zero_agent.bots.shared.continue_cmd", DummyContinue)
 
     sessions = manager.list_resume_sessions()
 
+    assert seen_sessions_dirs == [str(configured_sessions_dir)]
     assert len(sessions) == 10
     assert sessions[0]["index"] == 1
     assert sessions[-1]["index"] == 10

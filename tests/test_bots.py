@@ -6,6 +6,7 @@ import json
 import os
 import queue
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -134,6 +135,14 @@ class TestCommonHelpers:
 # —— continue_cmd.py ——
 
 class TestContinueCmd:
+    def test_default_sessions_dir_points_to_repo_workspace(self):
+        from importlib import reload
+        import zero_agent.bots.shared.continue_cmd as continue_cmd
+
+        continue_cmd = reload(continue_cmd)
+        root = Path(__file__).resolve().parents[1]
+        assert continue_cmd._sessions_dir == str(root / "workspace" / "sessions")
+
     def test_pairs_empty(self):
         assert _pairs("") == []
 

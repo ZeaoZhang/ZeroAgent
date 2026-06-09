@@ -10,7 +10,7 @@ from typing import Dict, Union
 
 from zero_agent.core.config import AgentConfig, LLMBackendConfig
 from zero_agent.core.exceptions import ConfigError
-from zero_agent.llm.sessions import LiteLLMSession
+from zero_agent.llm.sessions import LiteLLMSession, register_model_cost_map
 from zero_agent.llm.failover import AutoFailoverSession
 
 
@@ -77,6 +77,7 @@ class LLMFactory:
         if not config.llm_backends:
             raise ConfigError("没有配置任何 LLM 后端")
 
+        register_model_cost_map(config.litellm_model_cost_map)
         primary_session = LLMFactory._get_primary_session(config)
 
         if config.failover_backends:
@@ -105,6 +106,7 @@ class LLMFactory:
         if not config.llm_backends:
             raise ConfigError("没有配置任何 LLM 后端")
 
+        register_model_cost_map(config.litellm_model_cost_map)
         sessions: Dict[str, Union[LiteLLMSession, AutoFailoverSession]] = {}
         for name, backend_cfg in config.llm_backends.items():
             session = LLMFactory.create_session(
@@ -185,6 +187,7 @@ class LLMFactory:
             backups.append(LLMFactory.create_session(
                 backend_cfg,
                 log_dir=config.log_dir,
+                sessions_dir=config.sessions_dir,
             ))
 
         health_interval = LLMFactory._get_health_interval(config, primary.name)

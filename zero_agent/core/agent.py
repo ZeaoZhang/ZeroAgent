@@ -19,7 +19,18 @@ from zero_agent.core.hooks import HookSystem
 from zero_agent.core.loop import AgentLoop
 from zero_agent.memory.manager import MemoryManager
 from zero_agent.tools.registry import ToolRegistry
-from zero_agent.llm.factory import LLMFactory
+
+
+class _LLMFactoryProxy:
+    """Lazy proxy so CLI config is loaded before importing LiteLLM."""
+
+    def create_all_sessions(self, config: AgentConfig):
+        from zero_agent.llm.factory import LLMFactory as RealLLMFactory
+
+        return RealLLMFactory.create_all_sessions(config)
+
+
+LLMFactory = _LLMFactoryProxy()
 
 
 class ZeroAgent:
@@ -111,9 +122,6 @@ class ZeroAgent:
 
         old_backend = self.config.default_backend
         self.config = new_config
-
-        # 重建所有 LLM session
-        from zero_agent.llm.factory import LLMFactory
 
         try:
             new_sessions = LLMFactory.create_all_sessions(new_config)

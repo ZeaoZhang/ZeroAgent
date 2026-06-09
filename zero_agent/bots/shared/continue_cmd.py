@@ -8,8 +8,9 @@ import json
 import os
 import re
 import time
+from pathlib import Path
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[3])
 _sessions_dir = os.path.join(_PROJECT_ROOT, "workspace", "sessions")
 _sessions_glob = os.path.join(_sessions_dir, "model_responses_*.txt")
 _BLOCK_RE = re.compile(

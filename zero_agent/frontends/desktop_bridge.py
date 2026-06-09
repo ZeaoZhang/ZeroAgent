@@ -39,7 +39,7 @@ from aiohttp import web, WSMsgType
 
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.core.agent import ZeroAgent
-from zero_agent.core.config import default_config_path, load_default_config
+from zero_agent.core.config import AgentConfig, default_config_path, load_default_config
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -84,14 +84,56 @@ class Session:
     last_error: str = ""
 
 
+def _resolve_runtime_path(path: str | os.PathLike[str] | None) -> str:
+    if not path:
+        return ""
+    return str(Path(path).expanduser().resolve())
+
+
+def _public_config_snapshot(config: AgentConfig) -> Dict[str, Any]:
+    return {
+        "default_backend": config.default_backend,
+        "max_turns": config.max_turns,
+        "workspace_dir": config.workspace_dir,
+        "memory_dir": config.memory_dir,
+        "sessions_dir": config.sessions_dir,
+        "log_dir": config.log_dir,
+        "language": config.language,
+        "verbose": config.verbose,
+        "incremental_output": config.incremental_output,
+        "failover_backends": list(config.failover_backends),
+        "litellm_model_cost_map": config.litellm_model_cost_map,
+        "llm_backends": {
+            name: {
+                "provider": backend.provider,
+                "api_base": backend.api_base,
+                "model": backend.model,
+            }
+            for name, backend in config.llm_backends.items()
+        },
+    }
+
+
 class AgentManager:
     def __init__(self):
         self.lock = threading.RLock()
-        self.workspace_dir = str(DEFAULT_PROJECT_ROOT)
-        self.config_path = str(default_config_path())
-        self.config: Dict[str, Any] = {}
+        base_config = self._load_base_config()
+        self.workspace_dir = _resolve_runtime_path(base_config.workspace_dir)
+        self.sessions_dir = _resolve_runtime_path(base_config.sessions_dir)
+        self.config_path = str(getattr(base_config, "_source_path", default_config_path()))
+        self.config: Dict[str, Any] = _public_config_snapshot(base_config)
         self.sessions: Dict[str, Session] = {}
         self.active_session_id: Optional[str] = None
+
+    def _load_base_config(self) -> AgentConfig:
+        try:
+            return load_default_config()
+        except Exception as exc:
+            print(f"load default config failed: {exc}", file=sys.stderr)
+            return AgentConfig(
+                workspace_dir=str(DEFAULT_PROJECT_ROOT),
+                sessions_dir=str(DEFAULT_PROJECT_ROOT / "workspace" / "sessions"),
+            )
 
     def ensure_project_import_path(self) -> Path:
         root = Path(DEFAULT_PROJECT_ROOT).resolve()
@@ -105,7 +147,8 @@ class AgentManager:
         try:
             os.chdir(sess.cwd or self.workspace_dir)
             config = copy.deepcopy(load_default_config())
-            config.workspace_dir = sess.cwd or config.workspace_dir
+            config.workspace_dir = _resolve_runtime_path(sess.cwd or config.workspace_dir)
+            config.sessions_dir = _resolve_runtime_path(config.sessions_dir)
             agent = ZeroAgent(config=config)
             return AgentRunner(agent)
         finally:
@@ -181,7 +224,7 @@ class AgentManager:
         self.ensure_project_import_path()
         continue_cmd = importlib.import_module("zero_agent.bots.shared.continue_cmd")
 
-        continue_cmd.set_sessions_dir(str(Path(self.workspace_dir) / "workspace" / "sessions"))
+        continue_cmd.set_sessions_dir(self.sessions_dir)
         sessions = continue_cmd.list_sessions(exclude_pid=os.getpid())
         out: list[dict] = []
         for idx, (path, mtime, preview, rounds) in enumerate(sessions[:limit], 1):
@@ -208,7 +251,7 @@ class AgentManager:
         self.ensure_project_import_path()
         continue_cmd = importlib.import_module("zero_agent.bots.shared.continue_cmd")
 
-        continue_cmd.set_sessions_dir(str(Path(self.workspace_dir) / "workspace" / "sessions"))
+        continue_cmd.set_sessions_dir(self.sessions_dir)
         sessions = continue_cmd.list_sessions(exclude_pid=os.getpid())
         target_idx = index - 1
         if not (0 <= target_idx < len(sessions)):
