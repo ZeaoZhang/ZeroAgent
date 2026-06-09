@@ -36,7 +36,9 @@ const sessionListEl = $('session-list');
 const sessionTitleEl = $('session-title');
 const statusBadge = $('status-badge');
 const statusText = $('status-text');
-const settingsModal = $('settings-modal');
+const settingsDock = $('settings-dock');
+const settingsBtn = $('settings-btn');
+const settingsPanel = $('settings-panel');
 const errorBanner = $('error-banner');
 const diagnosticsPanel = $('diagnostics-panel');
 const diagnosticsLogEl = $('diagnostics-log');
@@ -1911,16 +1913,6 @@ async function runAgentSlash(command, args = '', displayText = null) {
   }
 }
 
-async function invokeMode(command) {
-  const label = command === '/goal'
-    ? 'Goal or condition'
-    : command === '/autorun'
-      ? 'Autonomous task seed'
-      : 'Mode argument';
-  const args = window.prompt(`${label} (optional):`, '') || '';
-  await runAgentSlash(command, args.trim(), `${command}${args.trim() ? ' ' + args.trim() : ''}`);
-}
-
 function showSystem(text) {
   const msg = { role: 'system', content: text };
   const sess = state.sessions.get(state.activeId);
@@ -2020,7 +2012,7 @@ function applyTheme() {
   document.documentElement.setAttribute('data-theme', cfg.theme || 'auto');
 }
 
-// ─── Settings modal ──────────────────────────────────────────────────────
+// ─── Settings panel ──────────────────────────────────────────────────────
 function renderModelOptions() {
   const select = $('cfg-llm');
   const selected = String(getActiveConfig().llmNo || 0);
@@ -2057,14 +2049,28 @@ async function loadModelProfiles() {
   }
 }
 
+function isSettingsOpen() {
+  return !!settingsPanel && !settingsPanel.classList.contains('hidden');
+}
+
+function setSettingsOpen(open) {
+  if (!settingsPanel) return;
+  settingsPanel.classList.toggle('hidden', !open);
+  if (settingsBtn) settingsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
 function openSettings() {
   renderModelOptions();
   const cfg = getActiveConfig();
   $('cfg-llm').value = String(cfg.llmNo || 0);
-  settingsModal.classList.remove('hidden');
+  setSettingsOpen(true);
   loadModelProfiles();
 }
-function closeSettings() { settingsModal.classList.add('hidden'); }
+function closeSettings() { setSettingsOpen(false); }
+function toggleSettings() {
+  if (isSettingsOpen()) closeSettings();
+  else openSettings();
+}
 
 async function openConfigFile(openFn, label) {
   try {
@@ -2362,16 +2368,20 @@ sendBtn.addEventListener('click', () => {
 
 // ─── Buttons ─────────────────────────────────────────────────────────────
 $('new-session-btn').addEventListener('click', newSession);
-$('settings-btn').addEventListener('click', openSettings);
+settingsBtn.addEventListener('click', toggleSettings);
 $('close-settings').addEventListener('click', closeSettings);
 $('cancel-settings').addEventListener('click', closeSettings);
 $('save-settings').addEventListener('click', saveSettings);
 $('open-config').addEventListener('click', () => openConfigFile(window.zeroAgent.openConfig, 'config.yaml'));
-$('goal-mode-btn').addEventListener('click', () => invokeMode('/goal'));
-$('auto-run-btn').addEventListener('click', () => invokeMode('/autorun'));
 $('error-dismiss').addEventListener('click', hideError);
 
-settingsModal.querySelector('.modal-backdrop').addEventListener('click', closeSettings);
+document.addEventListener('mousedown', (e) => {
+  if (isSettingsOpen() && settingsDock && !settingsDock.contains(e.target)) closeSettings();
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && isSettingsOpen()) closeSettings();
+});
 
 // ─── Message Search (Cmd/Ctrl+F) ─────────────────────────────────────────
 (function initSearch() {

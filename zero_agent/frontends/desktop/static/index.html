@@ -49,34 +49,6 @@
           <div id="image-previews" class="image-previews"></div>
           <textarea id="input" rows="1" placeholder="Type a message, or /help"></textarea>
           <div class="composer-bottom">
-            <div class="composer-hints">
-              <button id="settings-btn" class="icon-btn ghost" title="Settings" aria-label="Settings">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                  <circle cx="12" cy="12" r="3"/>
-                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-                </svg>
-                <span class="hint-label">Settings</span>
-              </button>
-              <button id="goal-mode-btn" class="icon-btn ghost" title="Goal mode" aria-label="Goal mode">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                  <circle cx="12" cy="12" r="8"/>
-                  <circle cx="12" cy="12" r="3"/>
-                  <path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>
-                </svg>
-                <span class="hint-label">Goal</span>
-              </button>
-              <button id="auto-run-btn" class="icon-btn ghost" title="Autonomous action" aria-label="Autonomous action">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M9 7v10l8-5-8-5z"/>
-                  <path d="M4 12a8 8 0 0 1 13.7-5.7"/>
-                  <path d="M18 3v4h-4"/>
-                  <path d="M20 12a8 8 0 0 1-13.7 5.7"/>
-                  <path d="M6 21v-4h4"/>
-                </svg>
-                <span class="hint-label">Auto</span>
-              </button>
-
-            </div>
             <button id="send-btn" class="send-btn" title="Send (Enter)">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M5 12h14M13 6l6 6-6 6"/>
@@ -87,15 +59,19 @@
       </div>
     </main>
 
-    <!-- Settings modal -->
-    <div id="settings-modal" class="modal hidden">
-      <div class="modal-backdrop"></div>
-      <div class="modal-body">
-        <div class="modal-header">
+    <div id="settings-dock" class="settings-dock">
+      <button id="settings-btn" class="settings-trigger" title="Settings" aria-label="Settings" aria-expanded="false" aria-controls="settings-panel">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+      <section id="settings-panel" class="settings-panel hidden" aria-label="Settings">
+        <div class="settings-panel-header">
           <h2>Settings</h2>
           <button class="icon-btn ghost" id="close-settings">✕</button>
         </div>
-        <div class="modal-content">
+        <div class="settings-panel-content">
           <div class="form-row">
             <label for="cfg-llm">Model</label>
             <select id="cfg-llm">
@@ -111,11 +87,11 @@
             <small>Configure providers, API keys, workspace, and runtime defaults in <code>config.yaml</code>.</small>
           </div>
         </div>
-        <div class="modal-footer">
-          <button class="btn ghost" id="cancel-settings">Cancel</button>
+        <div class="settings-panel-footer">
+          <button class="btn ghost" id="cancel-settings">Close</button>
           <button class="btn primary" id="save-settings">Save</button>
         </div>
-      </div>
+      </section>
     </div>
 
 

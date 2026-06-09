@@ -73,7 +73,7 @@ html, body {
   margin: 0; padding: 0; height: 100%;
   font-family: var(--font);
   font-size: 14px;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   color: var(--text);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
@@ -238,7 +238,7 @@ body.platform-darwin .tab-strip {
   font-size: 13px;
   font-weight: 600;
   margin: 0;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 
 .badge {
@@ -287,7 +287,7 @@ body.platform-darwin .tab-strip {
   font-size: 36px;
   color: var(--text-muted);
   margin-bottom: 12px;
-  letter-spacing: 0.1em;
+  letter-spacing: 0;
 }
 .empty-title {
   font-size: 18px;
@@ -403,7 +403,7 @@ body.platform-darwin .tab-strip {
 .turn-tag {
   text-transform: uppercase;
   font-size: 10px;
-  letter-spacing: 0.08em;
+  letter-spacing: 0;
   color: var(--text-faint);
   font-weight: 600;
   flex-shrink: 0;
@@ -437,11 +437,11 @@ body.platform-darwin .tab-strip {
 /* Markdown content */
 .md {
   line-height: 1.72;
-  letter-spacing: -0.006em;
+  letter-spacing: 0;
 }
 .md p { margin: 0 0 10px; }
 .md p:last-child { margin-bottom: 0; }
-.md h1, .md h2, .md h3 { margin: 16px 0 8px; font-family: var(--font-display); font-weight: 600; letter-spacing: -0.02em; }
+.md h1, .md h2, .md h3 { margin: 16px 0 8px; font-family: var(--font-display); font-weight: 600; letter-spacing: 0; }
 .md h1 { font-size: 18px; }
 .md h2 { font-size: 16px; }
 .md h3 { font-size: 14px; }
@@ -593,23 +593,8 @@ body.platform-darwin .tab-strip {
 .composer-bottom {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 4px 8px 8px 14px;
-}
-
-.composer-hints {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.composer-hints .icon-btn.ghost {
-  font-size: 11px;
-  padding: 3px 7px;
-  gap: 4px;
-}
-.hint-label {
-  font-size: 11px;
-  color: var(--text-muted);
+  justify-content: flex-end;
+  padding: 4px 8px 8px;
 }
 
 .command-palette {
@@ -724,47 +709,76 @@ body.platform-darwin .tab-strip {
 
 .hidden { display: none !important; }
 
-/* ─── Modal ────────────────────────────────────────────────────────────── */
-.modal {
+/* ─── Settings panel ───────────────────────────────────────────────────── */
+.settings-dock {
   position: fixed;
-  inset: 0;
+  left: 16px;
+  bottom: 16px;
+  z-index: 55;
+}
+
+.settings-trigger {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text-muted);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 100;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
-.modal-backdrop {
+
+.settings-trigger:hover,
+.settings-trigger[aria-expanded="true"] {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.settings-panel {
   position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.25);
-  backdrop-filter: blur(2px);
-}
-.modal-body {
-  position: relative;
+  left: 0;
+  bottom: 148px;
+  width: min(340px, calc(100vw - 32px));
+  max-height: min(420px, calc(100vh - 190px));
   background: var(--bg);
-  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
   box-shadow: var(--shadow-strong);
-  width: 460px;
-  max-width: 90vw;
-  max-height: 88vh;
   display: flex;
   flex-direction: column;
 }
-.modal-header {
-  padding: 14px 18px;
+.settings-panel-header {
+  padding: 12px 14px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--border);
 }
-.modal-header h2 { margin: 0; font-size: 15px; font-weight: 600; }
-.modal-content { padding: 16px 18px; overflow-y: auto; }
-.modal-footer {
-  padding: 12px 18px;
+.settings-panel-header h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.settings-panel-content { padding: 14px; overflow-y: auto; }
+.settings-panel-footer {
+  padding: 10px 14px;
   border-top: 1px solid var(--border);
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+@media (max-width: 980px) {
+  .settings-dock {
+    bottom: 148px;
+  }
+
+  .settings-panel {
+    bottom: 42px;
+    max-height: min(420px, calc(100vh - 190px));
+  }
 }
 
 .form-row {
