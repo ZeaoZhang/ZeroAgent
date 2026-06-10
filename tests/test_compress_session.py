@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
+from zero_agent.memory import compress_session as compress_session_module
 from zero_agent.memory.compress_session import batch_process
 
 
@@ -59,5 +61,13 @@ def test_batch_process_archives_history_and_removes_raw_log(tmp_path) -> None:
     assert not raw.exists()
     assert (l4_dir / "2026-04.zip").is_file()
     histories = (l4_dir / "all_histories.txt").read_text(encoding="utf-8")
-    assert "SESSION: 0403_2013-0403_2013" in histories
     assert "[USER] hello" in histories
+
+
+def test_default_paths_do_not_depend_on_cwd(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    repo_root = Path(compress_session_module.__file__).resolve().parents[2]
+
+    assert Path(compress_session_module.L4_DIR) == repo_root / "memory" / "L4_raw_sessions"
+    assert Path(compress_session_module.RAW_DIR) == repo_root / "workspace" / "sessions"

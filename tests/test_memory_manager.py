@@ -56,12 +56,14 @@ class TestMemoryManager:
             mgr.init_memory()
 
             ctx = mgr.get_global_memory_context()
+            memory_dir = os.path.join(tmp, "memory")
+            l1_path = os.path.join(memory_dir, "global_mem_insight.txt")
             assert f"cwd = {os.path.join(tmp, 'workspace')} (./)" in ctx
-            assert "[Memory] (../memory)" in ctx
+            assert f"[Memory] ({memory_dir})" in ctx
             assert (
                 ZA_ASSETS / "insight_fixed_structure.txt"
             ).read_text(encoding="utf-8") in ctx
-            assert "../memory/global_mem_insight.txt:" in ctx
+            assert f"{l1_path}:" in ctx
 
             insight = (
                 Path(tmp) / "memory" / "global_mem_insight.txt"

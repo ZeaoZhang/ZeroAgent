@@ -19,8 +19,8 @@ L1: global_mem_insight.txt (极简索引层 - 严格控制 ≤30 行)
     ↓ 导航指向 (Pointer)  
 L2: global_mem.txt (事实库层 - 现短但会膨胀)  
     ↓ 详细引用 (Reference)  
-L3: ../memory/sops/ (记录库层 - SOP 文档)  
-L4: ../memory/L4_raw_sessions/ (历史会话层 - scheduler反射自动收集，可定位过往上下文)  
+L3: [Memory]/sops/ (记录库层 - SOP 文档)  
+L4: [Memory]/L4_raw_sessions/ (历史会话层 - scheduler反射自动收集，可定位过往上下文)  
 ```
 ---
 ## 各层职责与原则

@@ -99,9 +99,10 @@ class MemoryManager:
         """
         prompt = "\n"
         prompt += f"cwd = {self.workspace_dir} (./)\n"
-        prompt += "\n[Memory] (../memory)\n"
+        prompt += f"\n[Memory] ({self.memory_dir})\n"
         prompt += _asset_text(f"insight_fixed_structure{self._lang_suffix()}.txt")
-        prompt += "\n../memory/global_mem_insight.txt:\n"
+        l1_path = os.path.join(self.memory_dir, "global_mem_insight.txt")
+        prompt += f"\n{l1_path}:\n"
 
         # L1 索引内容
         l1_path = os.path.join(self.memory_dir, "global_mem_insight.txt")

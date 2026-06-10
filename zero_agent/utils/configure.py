@@ -15,7 +15,7 @@ import sys
 from getpass import getpass
 from typing import Optional
 
-from zero_agent.core.config import default_config_path
+from zero_agent.core.config import default_config_path, project_root
 
 
 # 预定义提供商配置
@@ -85,7 +85,7 @@ def _auto_configure() -> None:
         "https://api.anthropic.com" if provider == "anthropic" else "",
     )
     model = os.environ.get("ZA_LLM_MODEL", "")
-    workspace = os.environ.get("ZA_WORKSPACE_DIR", "./workspace")
+    workspace = os.environ.get("ZA_WORKSPACE_DIR", str(project_root() / "workspace"))
 
     if not api_key:
         print("[Error] 未设置 ZA_LLM_API_KEY 环境变量")
@@ -140,7 +140,7 @@ def _interactive_configure() -> None:
 
     # 步骤 5: 工作目录
     print()
-    default_ws = os.path.join(os.getcwd(), "workspace")
+    default_ws = str(project_root() / "workspace")
     workspace = _prompt("工作目录", default=default_ws)
 
     # 步骤 6: 生成并写入配置

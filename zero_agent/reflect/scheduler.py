@@ -1,6 +1,8 @@
 import os, json, time as _time, socket as _socket, logging
 from datetime import datetime, timedelta
 
+from zero_agent.core.config import project_root
+
 # 端口锁：防止重复启动，bind失败时runner会直接崩溃退出
 # reload时mod.__dict__保留_lock，跳过重复绑定
 try: _lock
@@ -14,7 +16,7 @@ ONCE = False
 
 _dir = os.path.dirname(os.path.abspath(__file__))
 TASKS = os.path.abspath(
-    os.environ.get("ZA_SCHED_TASKS_DIR") or os.path.join(os.getcwd(), "sche_tasks")
+    os.environ.get("ZA_SCHED_TASKS_DIR") or str(project_root() / "sche_tasks")
 )
 DONE  = os.path.join(TASKS, 'done')
 _LOG  = os.path.join(TASKS, 'scheduler.log')
@@ -142,7 +144,7 @@ def check():
             )
             l4_dir = os.path.abspath(
                 os.environ.get("ZA_L4_DIR")
-                or os.path.join(os.getcwd(), "memory", "L4_raw_sessions")
+                or str(project_root() / "memory" / "L4_raw_sessions")
             )
             r = batch_process(raw_dir, l4_dir, dry_run=False)
             print(f'[L4 cron] {r}')

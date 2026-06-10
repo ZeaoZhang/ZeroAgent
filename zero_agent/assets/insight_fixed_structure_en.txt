@@ -1,4 +1,4 @@
-Facts(L2): ../memory/global_mem.txt | CodeRoot: ../ | SOPs(L3): ../memory/sops/*.md | META-SOP(L0): ../memory/sops/memory_management_sop.md
+Facts(L2): global_mem.txt under [Memory] | CodeRoot: workspace project root | SOPs(L3): sops/*.md under [Memory] | META-SOP(L0): sops/memory_management_sop.md under [Memory]
 L1 Insight is a minimal index; sync L1 when L2/L3 changes; keep index minimal. Read META-SOP(L0) before writing any memory.
 
 [CONSTITUTION]

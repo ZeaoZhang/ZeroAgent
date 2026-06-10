@@ -255,11 +255,12 @@ class AgentConfig:
         max_turns = int(os.environ.get("ZA_MAX_TURNS", "80"))
         workspace_dir = os.environ.get("ZA_WORKSPACE_DIR", "./workspace")
         memory_dir = os.environ.get("ZA_MEMORY_DIR", "./memory")
+        sessions_dir = os.environ.get("ZA_SESSIONS_DIR", "./workspace/sessions")
         language = os.environ.get("ZA_LANG", "auto")
         peer_hint = os.environ.get("ZA_PEER_HINT", "").lower() in ("1", "true", "yes", "on")
         litellm_model_cost_map = os.environ.get("ZA_LITELLM_MODEL_COST_MAP") or None
 
-        return cls(
+        config = cls(
             llm_backends={
                 "default": LLMBackendConfig(
                     name="default",
@@ -273,10 +274,13 @@ class AgentConfig:
             max_turns=max_turns,
             workspace_dir=workspace_dir,
             memory_dir=memory_dir,
+            sessions_dir=sessions_dir,
             language=language,
             peer_hint=peer_hint,
             litellm_model_cost_map=litellm_model_cost_map,
         )
+        config._resolve_paths(os.getcwd())
+        return config
 
     @classmethod
     def _from_dict(cls, data: dict) -> "AgentConfig":

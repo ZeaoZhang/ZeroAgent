@@ -1,4 +1,4 @@
-Facts(L2): ../memory/global_mem.txt | CodeRoot: ../ | SOPs(L3): ../memory/sops/*.md | META-SOP(L0): ../memory/sops/memory_management_sop.md
+Facts(L2): global_mem.txt under [Memory] | CodeRoot: workspace project root | SOPs(L3): sops/*.md under [Memory] | META-SOP(L0): sops/memory_management_sop.md under [Memory]
 L1 Insight是极简索引，L2/L3变更时同步L1，索引必须极简。写记忆前先读META-SOP(L0)。
 
 [CONSTITUTION]

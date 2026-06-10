@@ -2,9 +2,14 @@
 Format A (JSON): kept as-is.  Format B (Raw): strip sys prompt & assistant echo.
 """
 import re, os, json
+from pathlib import Path
 from datetime import datetime
 
-L4_DIR = os.path.abspath(os.path.join(os.getcwd(), 'memory', 'L4_raw_sessions'))
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+L4_DIR = os.path.abspath(
+    os.environ.get('ZA_L4_RAW_SESSIONS_DIR')
+    or _REPO_ROOT / 'memory' / 'L4_raw_sessions'
+)
 
 _RE_PROMPT   = re.compile(r'^=== Prompt ===(?: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}))?', re.M)
 _RE_RESPONSE = re.compile(r'^=== Response ===(?: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}))?', re.M)
@@ -239,7 +244,7 @@ def batch_process(src, l4_dir=None, dry_run=True):
 # ── CLI ──
 RAW_DIR = os.path.abspath(
     os.environ.get('ZA_MODEL_RESPONSES_DIR')
-    or os.path.join(os.getcwd(), 'workspace', 'sessions')
+    or _REPO_ROOT / 'workspace' / 'sessions'
 )
 
 if __name__ == '__main__':

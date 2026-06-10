@@ -1,16 +1,127 @@
-llm_backends:
-  default:
-    provider: openai
-    api_key: "your_api_key_here"
-    api_base: "https://api.deepseek.com"
-    model: "deepseek-v4-flash"
-    max_tokens: 8192
-    temperature: 1.0
+# ZeroAgent example configuration
+#
+# Copy this file to config.yaml, then replace API keys, API bases, and models.
+# Do not commit real API keys.
 
+# Backend selected on startup. Must match a key under llm_backends.
+default_backend: claude
+
+# Optional failover order. Each name must match a key under llm_backends.
+# Example: [openai_compat]
+failover_backends: []
+
+# Agent runtime settings.
 max_turns: 80
 verbose: true
-language: "zh"
-workspace_dir: "./workspace"
-memory_dir: "./memory"
-sessions_dir: "./workspace/sessions"
-# litellm_model_cost_map: "./model_prices_and_context_window.json"
+language: auto          # auto | zh | en
+incremental_output: false
+peer_hint: false
+
+# Paths are resolved relative to config.yaml when they are not absolute.
+workspace_dir: ./workspace
+memory_dir: ./memory
+sessions_dir: ./workspace/sessions
+log_dir: null
+
+# Optional local LiteLLM model price/context-window cache.
+# litellm_model_cost_map: ./model_prices_and_context_window.json
+
+llm_backends:
+  # Claude / Anthropic Messages API through LiteLLM.
+  claude:
+    provider: anthropic
+    api_key: sk-ant-xxx
+    api_base: https://api.anthropic.com
+    model: claude-sonnet-4-6
+
+    # Generation options.
+    context_window: 30000
+    max_tokens: null
+    temperature: 1.0
+    stream: true
+
+    # Retry, timeout, proxy, and TLS options.
+    max_retries: 4
+    connect_timeout: 5
+    read_timeout: 30
+    proxy: null
+    verify: true
+
+    # Custom request headers. Useful for relays, gateways, and vendor metadata.
+    extra_headers: {}
+    # extra_headers:
+    #   X-Custom-Header: value
+    #   X-Request-Source: ZeroAgent
+
+    # Claude thinking options. Enable only for models/endpoints that support it.
+    thinking_type: null
+    thinking_budget_tokens: null
+
+    # OpenAI-style reasoning option for models/endpoints that support it.
+    reasoning_effort: null
+
+    # OpenAI service tier option for supported endpoints.
+    service_tier: null
+
+    # Failover health-check behavior.
+    health_check_interval: 60
+    spring_back_multiplier: 1.0
+
+    # chat_completions is the default. responses is for OpenAI Responses API.
+    api_mode: chat_completions
+
+  # OpenAI official or OpenAI-compatible Chat Completions endpoint.
+  # Uncomment this backend and set default_backend: openai_compat to use it.
+  #
+  # openai_compat:
+  #   provider: openai
+  #   api_key: sk-xxx
+  #   api_base: https://api.openai.com/v1
+  #   model: gpt-4o
+  #   context_window: 128000
+  #   max_tokens: null
+  #   temperature: 1.0
+  #   stream: true
+  #   max_retries: 4
+  #   connect_timeout: 5
+  #   read_timeout: 30
+  #   proxy: null
+  #   verify: true
+  #   extra_headers: {}
+  #   reasoning_effort: null
+  #   service_tier: null
+  #   health_check_interval: 60
+  #   spring_back_multiplier: 1.0
+  #   api_mode: chat_completions
+  #
+  # Example OpenAI-compatible relays:
+  #   api_base: https://api.deepseek.com/v1
+  #   model: deepseek-chat
+  #
+  #   api_base: https://openrouter.ai/api/v1
+  #   model: anthropic/claude-sonnet-4
+  #   extra_headers:
+  #     HTTP-Referer: https://example.com
+  #     X-Title: ZeroAgent
+
+  # OpenAI Responses API mode. Use only with endpoints that support Responses API.
+  #
+  # openai_responses:
+  #   provider: openai
+  #   api_key: sk-xxx
+  #   api_base: https://api.openai.com/v1
+  #   model: gpt-4.1
+  #   stream: true
+  #   api_mode: responses
+  #   extra_headers: {}
+
+  # Claude-compatible relay using Anthropic wire protocol.
+  #
+  # claude_compat:
+  #   provider: anthropic
+  #   api_key: sk-ant-or-relay-key
+  #   api_base: https://your-claude-compatible-host
+  #   model: claude-sonnet-4-6
+  #   stream: true
+  #   extra_headers:
+  #     X-Custom-Header: value
