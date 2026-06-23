@@ -27,7 +27,7 @@ from urllib.parse import quote
 
 import requests
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _TEMP_DIR = os.path.join(_PROJECT_ROOT, "temp")
 
 from zero_agent.core.agent import ZeroAgent

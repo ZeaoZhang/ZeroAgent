@@ -82,6 +82,11 @@ class Session:
     thread: Optional[threading.Thread] = None
     cancel_requested: bool = False
     last_error: str = ""
+    # New fields for frontend redesign
+    model_override: Optional[str] = None  # Override model for this session
+    token_usage: Dict[str, int] = field(default_factory=lambda: {"input": 0, "output": 0, "total": 0, "limit": 200000})
+    group_id: Optional[str] = None  # Session group ID
+    sub_agents: List[Dict[str, Any]] = field(default_factory=list)  # Track spawned sub-agents
 
 
 def _resolve_runtime_path(path: str | os.PathLike[str] | None) -> str:
@@ -149,6 +154,9 @@ class AgentManager:
             config = copy.deepcopy(load_default_config())
             config.workspace_dir = _resolve_runtime_path(sess.cwd or config.workspace_dir)
             config.sessions_dir = _resolve_runtime_path(config.sessions_dir)
+            # Apply model override if set
+            if sess.model_override:
+                config.default_backend = sess.model_override
             agent = ZeroAgent(config=config)
             return AgentRunner(agent)
         finally:
@@ -175,6 +183,10 @@ class AgentManager:
             "updatedAt": sess.updated_at,
             "lastError": sess.last_error,
             "msgSeq": sess.msg_seq,
+            "modelOverride": sess.model_override,
+            "tokenUsage": sess.token_usage,
+            "groupId": sess.group_id,
+            "subAgents": sess.sub_agents,
         }
         if include_messages:
             out["messages"] = list(sess.messages)
@@ -527,6 +539,9 @@ def emit_session_state(sess: Session, state_name: str):
         "seq": sess.msg_seq,
         "updatedAt": sess.updated_at,
         "title": sess.title,
+        "tokenUsage": sess.token_usage,
+        "modelOverride": sess.model_override,
+        "groupId": sess.group_id,
     })
 
 
@@ -773,6 +788,76 @@ async def path_open_handler(request):
     return json_ok({"ok": True, "path": str(target)})
 
 
+async def set_model_handler(request):
+    """Set model override for a session"""
+    sid = request.match_info["sid"]
+    data = await read_json(request)
+    model_name = data.get("modelName") or data.get("modelNo")
+
+    sess = manager.get_session(sid)
+    sess.model_override = str(model_name) if model_name else None
+    sess.updated_at = time.time()
+
+    emit_session_state(sess, "model-changed")
+    return json_ok({"ok": True, "sessionId": sid, "modelOverride": sess.model_override})
+
+
+async def get_tokens_handler(request):
+    """Get token usage for a session"""
+    sid = request.match_info["sid"]
+    sess = manager.get_session(sid)
+    return json_ok({"ok": True, "sessionId": sid, "tokenUsage": sess.token_usage})
+
+
+async def set_session_group_handler(request):
+    """Assign session to a group"""
+    sid = request.match_info["sid"]
+    data = await read_json(request)
+    group_id = data.get("groupId")
+
+    sess = manager.get_session(sid)
+    sess.group_id = group_id
+    sess.updated_at = time.time()
+
+    return json_ok({"ok": True, "sessionId": sid, "groupId": group_id})
+
+
+async def list_groups_handler(request):
+    """List all session groups"""
+    # Groups are managed in frontend for now, backend just stores group_id
+    groups = {}
+    for sess in manager.sessions.values():
+        if sess.group_id:
+            if sess.group_id not in groups:
+                groups[sess.group_id] = {"id": sess.group_id, "name": sess.group_id, "sessionIds": []}
+            groups[sess.group_id]["sessionIds"].append(sess.id)
+    return json_ok({"ok": True, "groups": list(groups.values())})
+
+
+async def get_agents_handler(request):
+    """Get sub-agents for a session"""
+    sid = request.match_info["sid"]
+    sess = manager.get_session(sid)
+    return json_ok({"ok": True, "sessionId": sid, "agents": sess.sub_agents})
+
+
+async def cancel_agent_handler(request):
+    """Cancel a sub-agent"""
+    sid = request.match_info["sid"]
+    aid = request.match_info["aid"]
+    sess = manager.get_session(sid)
+
+    # Find and mark agent as cancelled
+    for agent in sess.sub_agents:
+        if agent.get("id") == aid:
+            agent["status"] = "cancelled"
+            agent["updated_at"] = time.time()
+            break
+
+    return json_ok({"ok": True, "sessionId": sid, "agentId": aid})
+
+
+
 def create_app():
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_get("/ws", ws_handler)
@@ -793,6 +878,12 @@ def create_app():
     app.router.add_post("/session/{sid}/prompt", prompt_handler)
     app.router.add_get("/session/{sid}/messages", messages_handler)
     app.router.add_post("/session/{sid}/cancel", cancel_handler)
+    app.router.add_post("/session/{sid}/model", set_model_handler)
+    app.router.add_get("/session/{sid}/tokens", get_tokens_handler)
+    app.router.add_post("/session/{sid}/group", set_session_group_handler)
+    app.router.add_get("/session/{sid}/agents", get_agents_handler)
+    app.router.add_post("/session/{sid}/agents/{aid}/cancel", cancel_agent_handler)
+    app.router.add_get("/groups", list_groups_handler)
     app.router.add_post("/path/open", path_open_handler)
 
     # Serve static frontend (desktop/static/)

@@ -6,7 +6,7 @@ window.process = window.process || { platform: navigator.platform.toLowerCase().
 
 // ─── State ────────────────────────────────────────────────────────────────
 const state = {
-  sessions: new Map(),      // localSessionId -> { id, bridgeSessionId, title, messages: [], cwd, config, diagnostics }
+  sessions: new Map(),      // localSessionId -> { id, bridgeSessionId, title, messages: [], cwd, config, diagnostics, groupId, modelOverride, tokenUsage }
   activeId: null,
   bridgeReady: false,
   defaultConfig: { theme: 'auto', llmNo: 0, workspaceDir: '' },
@@ -15,6 +15,10 @@ const state = {
   restartingBridge: false,
   bridgeNoticeMessage: null,
   runtimeBySessionId: new Map(),
+  sessionGroups: new Map(),  // groupId -> { name, sessionIds: [], collapsed: false }
+  activeAgents: new Map(),   // sessionId -> [agent]
+  leftDrawerCollapsed: localStorage.getItem('leftDrawerCollapsed') === 'true',
+  rightDrawerCollapsed: localStorage.getItem('rightDrawerCollapsed') !== 'false',
 };
 
 // Helper: get config/diagnostics for the active session (or defaults)
@@ -29,20 +33,10 @@ function getActiveDiagnostics() {
 
 // ─── DOM refs ─────────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
-const messagesEl = $('messages');
-const inputEl = $('input');
-const sendBtn = $('send-btn');
-const sessionListEl = $('session-list');
-const sessionTitleEl = $('session-title');
-const statusBadge = $('status-badge');
-const statusText = $('status-text');
-const settingsDock = $('settings-dock');
-const settingsBtn = $('settings-btn');
-const settingsPanel = $('settings-panel');
-const errorBanner = $('error-banner');
-const diagnosticsPanel = $('diagnostics-panel');
-const diagnosticsLogEl = $('diagnostics-log');
-const commandPaletteEl = $('command-palette');
+let messagesEl, inputEl, sendBtn, sessionListEl, sessionTitleEl, statusBadge, statusText;
+let errorBanner, commandPaletteEl, leftDrawer, rightDrawer, agentList;
+let modelStatus, currentModelEl, tokenUsageEl, modelPickerModal, modelList;
+let diagnosticsLogEl, diagnosticsPanel;
 
 
 // ─── Diagnostics ─────────────────────────────────────────────────────────
@@ -78,7 +72,9 @@ function formatDiagnostics() {
 }
 
 function renderDiagnostics() {
-  if (diagnosticsLogEl) diagnosticsLogEl.textContent = formatDiagnostics();
+  if (diagnosticsLogEl) {
+    diagnosticsLogEl.textContent = formatDiagnostics();
+  }
 }
 
 function openDiagnostics() {
@@ -759,6 +755,9 @@ function createLocalSession(id, title, bridgeSessionId = id) {
     untitled: isUntitledSessionTitle(title),
     config: { ...state.defaultConfig },
     diagnostics: [],
+    modelOverride: null,
+    tokenUsage: { input: 0, output: 0, total: 0, limit: 200000 },
+    groupId: null,
   };
   getSessionRuntime(sess);
   // Keep freshly-created chats visually quiet: the empty state is enough guidance.
@@ -779,7 +778,8 @@ function setActiveSession(id) {
   sessionTitleEl.textContent = sess.title;
   renderMessages();
   renderSessionList();
-  renderDiagnostics();
+  updateModelStatus();
+  renderAgentPanel();
   const runtime = getSessionRuntime(sess);
   setBusy(runtime.busy, runtime.busy ? 'Agent is responding…' : null, sess);
   // When switching to a session that is still running, ensure the live draft
@@ -811,87 +811,159 @@ function setActiveSession(id) {
 }
 
 function renderSessionList() {
-  // Preserve the + button (must remain in DOM as anchor for insertBefore)
-  const newBtn = document.getElementById('new-session-btn');
-  // Remove only existing tab elements, never the + button
-  sessionListEl.querySelectorAll('.session-tab').forEach((el) => el.remove());
-  if (state.sessions.size === 0) return;
+  sessionListEl.innerHTML = '';
+
+  // Group sessions by groupId
+  const grouped = new Map();
+  const ungrouped = [];
+
   for (const sess of state.sessions.values()) {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = 'session-tab' + (sess.id === state.activeId ? ' active' : '');
-    item.setAttribute('role', 'tab');
-    item.setAttribute('aria-selected', sess.id === state.activeId ? 'true' : 'false');
-    item.setAttribute('data-session-id', sess.id);
-    item.title = sess.title;
-    // ─── Drag-and-drop reorder ───
-    item.draggable = true;
-    item.addEventListener('dragstart', (e) => {
-      e.dataTransfer.setData('text/plain', sess.id);
-      e.dataTransfer.effectAllowed = 'move';
-      item.classList.add('dragging');
+    if (sess.groupId && state.sessionGroups.has(sess.groupId)) {
+      if (!grouped.has(sess.groupId)) grouped.set(sess.groupId, []);
+      grouped.get(sess.groupId).push(sess);
+    } else {
+      ungrouped.push(sess);
+    }
+  }
+
+  // Render groups
+  for (const [groupId, group] of state.sessionGroups.entries()) {
+    const sessions = grouped.get(groupId) || [];
+    if (sessions.length === 0) continue;
+
+    const groupEl = document.createElement('div');
+    groupEl.className = 'session-group' + (group.collapsed ? ' collapsed' : '');
+
+    const headerEl = document.createElement('div');
+    headerEl.className = 'session-group-header';
+    headerEl.innerHTML = `
+      <span class="expand-icon">▼</span>
+      <span>${escapeHtml(group.name)}</span>
+    `;
+    headerEl.addEventListener('click', () => toggleGroup(groupId));
+    groupEl.appendChild(headerEl);
+
+    const sessionsEl = document.createElement('div');
+    sessionsEl.className = 'session-group-sessions';
+    sessions.forEach(sess => {
+      sessionsEl.appendChild(createSessionItem(sess));
     });
-    item.addEventListener('dragend', () => {
-      item.classList.remove('dragging');
-      sessionListEl.querySelectorAll('.session-tab.drag-over').forEach(el => el.classList.remove('drag-over'));
+    groupEl.appendChild(sessionsEl);
+    sessionListEl.appendChild(groupEl);
+  }
+
+  // Render ungrouped sessions
+  if (ungrouped.length > 0) {
+    ungrouped.forEach(sess => {
+      sessionListEl.appendChild(createSessionItem(sess));
     });
-    item.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      item.classList.add('drag-over');
-    });
-    item.addEventListener('dragleave', () => {
-      item.classList.remove('drag-over');
-    });
-    item.addEventListener('drop', (e) => {
-      e.preventDefault();
-      item.classList.remove('drag-over');
-      const draggedId = e.dataTransfer.getData('text/plain');
-      if (draggedId && draggedId !== sess.id) {
-        reorderSession(draggedId, sess.id);
-      }
-    });
-    // Per-tab status dot
-    const dot = document.createElement('span');
-    dot.className = 'tab-dot';
-    const runtime = getSessionRuntime(sess);
-    if (runtime && runtime.busy) dot.classList.add('busy');
-    item.appendChild(dot);
-    // Tab label
-    const label = document.createElement('span');
-    label.className = 'tab-label';
-    label.textContent = sess.title;
-    item.appendChild(label);
-    // Close button (Chrome-style ×)
-    const closeBtn = document.createElement('span');
-    closeBtn.className = 'tab-close';
-    closeBtn.setAttribute('role', 'button');
-    closeBtn.setAttribute('aria-label', 'Close tab');
-    closeBtn.textContent = '×';
-    closeBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      closeSession(sess.id);
-    });
-    item.appendChild(closeBtn);
-    item.addEventListener('click', () => setActiveSession(sess.id));
-    sessionListEl.insertBefore(item, newBtn);
+  }
+
+  // Initialize drawer collapse state
+  if (state.leftDrawerCollapsed) {
+    leftDrawer.classList.add('collapsed');
+  }
+  if (state.rightDrawerCollapsed) {
+    rightDrawer.classList.add('collapsed');
   }
 }
 
-// ─── Tab drag reorder helper ─────────────────────────────────────────────────
-function reorderSession(draggedId, targetId) {
-  const entries = [...state.sessions.entries()];
-  const fromIdx = entries.findIndex(([id]) => id === draggedId);
-  const toIdx = entries.findIndex(([id]) => id === targetId);
-  if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
-  const [moved] = entries.splice(fromIdx, 1);
-  entries.splice(toIdx, 0, moved);
-  state.sessions = new Map(entries);
+function createSessionItem(sess) {
+  const item = document.createElement('div');
+  item.className = 'session-item' + (sess.id === state.activeId ? ' active' : '');
+  item.setAttribute('data-session-id', sess.id);
+  item.title = sess.title;
+
+  const dot = document.createElement('span');
+  dot.className = 'session-dot';
+  const runtime = getSessionRuntime(sess);
+  if (runtime && runtime.busy) dot.classList.add('busy');
+  if (sess.lastError) dot.classList.add('error');
+  item.appendChild(dot);
+
+  const label = document.createElement('span');
+  label.className = 'session-label';
+  label.textContent = sess.title;
+  item.appendChild(label);
+
+  const deleteBtn = document.createElement('span');
+  deleteBtn.className = 'session-delete';
+  deleteBtn.innerHTML = '×';
+  deleteBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (confirm(`Delete session "${sess.title}"?`)) {
+      closeSession(sess.id);
+    }
+  });
+  item.appendChild(deleteBtn);
+
+  item.addEventListener('click', () => setActiveSession(sess.id));
+
+  // Right-click context menu for grouping
+  item.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showSessionContextMenu(e, sess);
+  });
+
+  return item;
+}
+
+function showSessionContextMenu(e, sess) {
+  // Simple implementation: prompt for group name
+  const groupName = prompt('输入分组名称（留空则移除分组）:', sess.groupId || '');
+  if (groupName !== null) {
+    assignSessionToGroup(sess.id, groupName || null);
+  }
+}
+
+async function assignSessionToGroup(sessionId, groupName) {
+  const sess = state.sessions.get(sessionId);
+  if (!sess) return;
+
+  // Create group if it doesn't exist
+  if (groupName && !state.sessionGroups.has(groupName)) {
+    state.sessionGroups.set(groupName, {
+      id: groupName,
+      name: groupName,
+      sessionIds: [],
+      collapsed: false
+    });
+  }
+
+  sess.groupId = groupName;
+
+  // Update backend
+  const bridgeUrl = window.zeroAgent.bridgeUrl || 'http://127.0.0.1:14168';
+  try {
+    await fetch(`${bridgeUrl}/session/${sess.bridgeSessionId}/group`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupId: groupName })
+    });
+  } catch (err) {
+    console.error('Failed to update group:', err);
+  }
+
   renderSessionList();
 }
 
+function toggleGroup(groupId) {
+  const group = state.sessionGroups.get(groupId);
+  if (group) {
+    group.collapsed = !group.collapsed;
+    renderSessionList();
+  }
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+
 function closeSession(id) {
-  if (state.sessions.size <= 1) return; // Don't close the last tab
+  if (state.sessions.size <= 1) return; // Don't close the last session
   // Notify bridge to delete this session
   const sess = state.sessions.get(id);
   if (sess && sess.bridgeSessionId) {
@@ -902,11 +974,13 @@ function closeSession(id) {
   const idx = keys.indexOf(id);
   state.sessions.delete(id);
   state.runtimeBySessionId.delete(id);
+  state.activeAgents.delete(id);
+
   if (state.activeId === id) {
-    // Switch to adjacent tab (prefer right, fallback left)
-    const newIdx = Math.min(idx, keys.length - 2);
+    // Switch to adjacent session
     const remaining = [...state.sessions.keys()];
-    setActiveSession(remaining[Math.max(0, Math.min(newIdx, remaining.length - 1))]);
+    const newIdx = Math.max(0, Math.min(idx, remaining.length - 1));
+    setActiveSession(remaining[newIdx]);
   } else {
     renderSessionList();
   }
@@ -1122,6 +1196,20 @@ function handleNotification(msg) {
   if (msg.type === 'session-state') {
     const sess = findSessionByBridgeId(msg.sessionId);
     if (!sess) return;
+
+    // Update token usage and model override if provided
+    if (msg.tokenUsage) {
+      sess.tokenUsage = msg.tokenUsage;
+      if (isActiveSession(sess)) updateModelStatus();
+    }
+    if (msg.modelOverride !== undefined) {
+      sess.modelOverride = msg.modelOverride;
+      if (isActiveSession(sess)) updateModelStatus();
+    }
+    if (msg.groupId !== undefined) {
+      sess.groupId = msg.groupId;
+    }
+
     const runtime = getSessionRuntime(sess);
     if ((msg.state === 'running' || msg.status === 'running') && !runtime.polling) {
       runtime.busy = true;
@@ -1137,6 +1225,31 @@ function handleNotification(msg) {
     }
     // Update tab dot regardless
     renderSessionList();
+    return;
+  }
+
+  // Handle agent events
+  if (msg.type === 'agent-spawned') {
+    const sess = findSessionByBridgeId(msg.sessionId);
+    if (sess && msg.agent) {
+      const agents = state.activeAgents.get(sess.id) || [];
+      agents.push(msg.agent);
+      state.activeAgents.set(sess.id, agents);
+      if (isActiveSession(sess)) renderAgentPanel();
+    }
+    return;
+  }
+
+  if (msg.type === 'agent-status') {
+    const sess = findSessionByBridgeId(msg.sessionId);
+    if (sess && msg.agentId) {
+      const agents = state.activeAgents.get(sess.id) || [];
+      const agent = agents.find(a => a.id === msg.agentId);
+      if (agent) {
+        agent.status = msg.status;
+        if (isActiveSession(sess)) renderAgentPanel();
+      }
+    }
     return;
   }
   if (msg.method !== 'session/update') return;
@@ -1612,6 +1725,7 @@ const LOCAL_SLASH_COMMANDS = [
   { cmd: '/stop', argHint: '', description: '取消当前请求' },
   { cmd: '/restart', argHint: '', description: '重启 bridge' },
   { cmd: '/settings', argHint: '', description: '打开设置' },
+  { cmd: '/model', argHint: '', description: '选择模型' },
   { cmd: '/theme', argHint: 'light|dark|auto', description: '切换主题' },
   { cmd: '/cwd', argHint: '[path]', description: '显示当前目录或在指定目录新建会话' },
 ];
@@ -1851,7 +1965,11 @@ async function handleSlash(cmd) {
       await restartBridge();
       break;
     case 'settings':
-      openSettings();
+      showSystem('/settings has been removed. Use /llm to switch models or edit config.yaml directly.');
+      break;
+    case 'model':
+    case 'llm':
+      openModelPicker();
       break;
     case 'theme':
       if (['light', 'dark', 'auto'].includes(arg)) {
@@ -2009,12 +2127,32 @@ function hideError() { errorBanner.classList.add('hidden'); }
 // ─── Theme ───────────────────────────────────────────────────────────────
 function applyTheme() {
   const cfg = getActiveConfig();
-  document.documentElement.setAttribute('data-theme', cfg.theme || 'auto');
+  const theme = cfg.theme || 'auto';
+  document.documentElement.setAttribute('data-theme', theme);
+
+  // Update theme toggle icon
+  const btn = $('theme-toggle-btn');
+  if (btn) {
+    const svg = btn.querySelector('svg');
+    if (svg) {
+      if (theme === 'dark') {
+        // Moon icon
+        svg.innerHTML = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+      } else if (theme === 'light') {
+        // Sun icon
+        svg.innerHTML = '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32l1.41-1.41"/>';
+      } else {
+        // Auto icon (sun/moon hybrid)
+        svg.innerHTML = '<circle cx="12" cy="12" r="4"/><path d="M12 1v6m0 6v10M1 12h10m6 0h6"/>';
+      }
+    }
+  }
 }
 
 // ─── Settings panel ──────────────────────────────────────────────────────
 function renderModelOptions() {
   const select = $('cfg-llm');
+  if (!select) return; // Settings panel doesn't exist, skip
   const selected = String(getActiveConfig().llmNo || 0);
   const profiles = Array.isArray(state.modelProfiles) ? state.modelProfiles : [];
   const options = profiles.length ? profiles : [{ llmNo: 0, name: 'Default / Auto' }];
@@ -2062,7 +2200,8 @@ function setSettingsOpen(open) {
 function openSettings() {
   renderModelOptions();
   const cfg = getActiveConfig();
-  $('cfg-llm').value = String(cfg.llmNo || 0);
+  const cfgLlm = $('cfg-llm');
+  if (cfgLlm) cfgLlm.value = String(cfg.llmNo || 0);
   setSettingsOpen(true);
   loadModelProfiles();
 }
@@ -2085,18 +2224,21 @@ async function openConfigFile(openFn, label) {
 
 async function saveSettings() {
   const saveBtn = $('save-settings');
-  saveBtn.disabled = true;
+  if (saveBtn) saveBtn.disabled = true;
   try {
     const sess = state.sessions.get(state.activeId);
     if (!sess) throw new Error('No active session');
     const cfg = sess.config;
-    cfg.llmNo = Math.max(0, parseInt($('cfg-llm').value, 10) || 0);
+    const cfgLlm = $('cfg-llm');
+    if (cfgLlm) {
+      cfg.llmNo = Math.max(0, parseInt(cfgLlm.value, 10) || 0);
+    }
     await window.zeroAgent.saveConfig(cfg);
     closeSettings();
   } catch (err) {
     showError('Failed to save settings: ' + (err.message || err));
   } finally {
-    saveBtn.disabled = false;
+    if (saveBtn) saveBtn.disabled = false;
   }
 }
 
@@ -2225,82 +2367,7 @@ window.zeroAgent.onBridgeLog((text) => {
   addDiagnostic('info', 'Bridge log', text);
 });
 
-// ─── Input handling ──────────────────────────────────────────────────────
-inputEl.addEventListener('input', () => {
-  // auto-resize
-  inputEl.style.height = 'auto';
-  inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
-  updateSendButton();
-  updateCommandPalette();
-});
-
-// IME composition fix - triple guard for CJK input methods (macOS especially)
-let _imeComposing = false;
-inputEl.addEventListener('compositionstart', () => { _imeComposing = true; });
-inputEl.addEventListener('compositionend', () => { _imeComposing = false; });
-
-inputEl.addEventListener('keydown', (e) => {
-  if (!commandPaletteEl.classList.contains('hidden')) {
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      moveCommandPalette(1);
-      return;
-    }
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      moveCommandPalette(-1);
-      return;
-    }
-    if (e.key === 'Tab') {
-      e.preventDefault();
-      applyCommandSuggestion(commandPaletteItems[commandPaletteIndex]);
-      return;
-    }
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      closeCommandPalette();
-      return;
-    }
-    if (e.key === 'Enter' && !e.shiftKey && commandPaletteItems.length) {
-      e.preventDefault();
-      applyCommandSuggestion(commandPaletteItems[commandPaletteIndex]);
-      return;
-    }
-  }
-  if (e.key === 'Enter' && !e.shiftKey) {
-    if (e.isComposing || _imeComposing || e.keyCode === 229) return; // IME active, ignore
-    e.preventDefault();
-    submitInput();
-  } else if (e.key === 'Escape' && getActiveSessionRuntime()?.busy) {
-    e.preventDefault();
-    cancelPrompt();
-  }
-});
-
-// ─── Image paste handling ─────────────────────────────────────────────────
-const imagePreviews = document.getElementById('image-previews');
-const pendingImages = []; // Array of { dataUrl, id }
-
-inputEl.addEventListener('paste', (e) => {
-  const items = e.clipboardData?.items;
-  if (!items) return;
-  for (const item of items) {
-    if (item.type.startsWith('image/')) {
-      e.preventDefault();
-      const file = item.getAsFile();
-      if (!file) continue;
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result;
-        const id = `img-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-        pendingImages.push({ dataUrl, id });
-        renderImagePreviews();
-      };
-      reader.readAsDataURL(file);
-      break; // handle one image per paste
-    }
-  }
-});
+// ─── Input handling moved to init() ──────────────────────────────────────
 
 function renderImagePreviews() {
   imagePreviews.innerHTML = '';
@@ -2358,30 +2425,10 @@ function submitInput() {
   }
 }
 
-sendBtn.addEventListener('click', () => {
-  if (getActiveSessionRuntime()?.busy) {
-    cancelPrompt().then((ok) => {
-      if (ok) showSystem('Stop requested.');
-    });
-  } else submitInput();
-});
+// sendBtn event listener moved to init()
 
 // ─── Buttons ─────────────────────────────────────────────────────────────
-$('new-session-btn').addEventListener('click', newSession);
-settingsBtn.addEventListener('click', toggleSettings);
-$('close-settings').addEventListener('click', closeSettings);
-$('cancel-settings').addEventListener('click', closeSettings);
-$('save-settings').addEventListener('click', saveSettings);
-$('open-config').addEventListener('click', () => openConfigFile(window.zeroAgent.openConfig, 'config.yaml'));
-$('error-dismiss').addEventListener('click', hideError);
-
-document.addEventListener('mousedown', (e) => {
-  if (isSettingsOpen() && settingsDock && !settingsDock.contains(e.target)) closeSettings();
-});
-
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && isSettingsOpen()) closeSettings();
-});
+// Button event listeners moved to init() to ensure DOM is loaded
 
 // ─── Message Search (Cmd/Ctrl+F) ─────────────────────────────────────────
 (function initSearch() {
@@ -2514,8 +2561,210 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 
+// ─── Drawer Controls ──────────────────────────────────────────────────────
+function toggleLeftDrawer() {
+  state.leftDrawerCollapsed = !state.leftDrawerCollapsed;
+  localStorage.setItem('leftDrawerCollapsed', state.leftDrawerCollapsed);
+  if (state.leftDrawerCollapsed) {
+    leftDrawer.classList.add('collapsed');
+  } else {
+    leftDrawer.classList.remove('collapsed');
+  }
+}
+
+function toggleRightDrawer() {
+  state.rightDrawerCollapsed = !state.rightDrawerCollapsed;
+  localStorage.setItem('rightDrawerCollapsed', state.rightDrawerCollapsed);
+  if (state.rightDrawerCollapsed) {
+    rightDrawer.classList.add('collapsed');
+  } else {
+    rightDrawer.classList.remove('collapsed');
+  }
+}
+
+// ─── Model Picker ─────────────────────────────────────────────────────────
+function openModelPicker() {
+  if (!state.modelProfiles || state.modelProfiles.length === 0) {
+    showError('No models available');
+    return;
+  }
+
+  modelList.innerHTML = '';
+  const sess = state.sessions.get(state.activeId);
+  const currentModel = sess?.modelOverride || state.defaultConfig.llmNo || 0;
+
+  state.modelProfiles.forEach((profile, idx) => {
+    const item = document.createElement('div');
+    item.className = 'model-item';
+    if (currentModel === idx || currentModel === profile.name) {
+      item.classList.add('active');
+    }
+
+    item.innerHTML = `
+      <div class="model-item-info">
+        <div class="model-item-name">${escapeHtml(profile.name || `Model ${idx}`)}</div>
+        <div class="model-item-meta">${escapeHtml(profile.provider || '')} ${escapeHtml(profile.model || '')}</div>
+      </div>
+      <span class="model-item-check">✓</span>
+    `;
+
+    item.addEventListener('click', async () => {
+      await switchModel(idx, profile.name);
+      modelPickerModal.classList.add('hidden');
+    });
+
+    modelList.appendChild(item);
+  });
+
+  modelPickerModal.classList.remove('hidden');
+}
+
+function closeModelPicker() {
+  modelPickerModal.classList.add('hidden');
+}
+
+async function switchModel(modelNo, modelName) {
+  const sess = state.sessions.get(state.activeId);
+  if (!sess || !sess.bridgeSessionId) return;
+
+  const bridgeUrl = window.zeroAgent.bridgeUrl || 'http://127.0.0.1:14168';
+  try {
+    await fetch(`${bridgeUrl}/session/${sess.bridgeSessionId}/model`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modelNo, modelName })
+    });
+    sess.modelOverride = modelName || String(modelNo);
+    updateModelStatus();
+  } catch (err) {
+    showError('Failed to switch model: ' + (err.message || err));
+  }
+}
+
+// ─── Token Display ────────────────────────────────────────────────────────
+function updateModelStatus() {
+  const sess = state.sessions.get(state.activeId);
+  if (!sess) {
+    currentModelEl.textContent = 'No session';
+    tokenUsageEl.textContent = '0 / 0';
+    return;
+  }
+
+  const modelName = sess.modelOverride || 'Default';
+  currentModelEl.textContent = modelName;
+
+  const usage = sess.tokenUsage || { total: 0, limit: 200000 };
+  const totalK = Math.round(usage.total / 100) / 10;
+  const limitK = Math.round(usage.limit / 1000);
+  tokenUsageEl.textContent = `${totalK}K / ${limitK}K`;
+
+  const percent = usage.limit > 0 ? (usage.total / usage.limit) * 100 : 0;
+  tokenUsageEl.className = 'token-info';
+  if (percent > 95) tokenUsageEl.classList.add('error');
+  else if (percent > 80) tokenUsageEl.classList.add('warn');
+}
+
+// ─── Agent Panel ──────────────────────────────────────────────────────────
+function renderAgentPanel() {
+  const sess = state.sessions.get(state.activeId);
+  const agents = sess ? (state.activeAgents.get(sess.id) || []) : [];
+
+  if (agents.length === 0) {
+    agentList.innerHTML = '<div class="empty-state-small"><span>No active agents</span></div>';
+    if (!state.rightDrawerCollapsed) {
+      rightDrawer.classList.add('collapsed');
+      state.rightDrawerCollapsed = true;
+    }
+    return;
+  }
+
+  // Auto-show right drawer when agents exist
+  if (state.rightDrawerCollapsed) {
+    state.rightDrawerCollapsed = false;
+    rightDrawer.classList.remove('collapsed');
+  }
+
+  agentList.innerHTML = '';
+  agents.forEach(agent => {
+    const card = document.createElement('div');
+    card.className = 'agent-card';
+    card.dataset.agentId = agent.id;
+
+    // Make card clickable to view agent's context/output
+    card.style.cursor = 'pointer';
+    card.addEventListener('click', (e) => {
+      if (!e.target.closest('button')) {
+        showAgentContext(agent);
+      }
+    });
+
+    const statusClass = agent.status || 'running';
+    const elapsed = agent.created_at ? Math.round((Date.now() / 1000 - agent.created_at) / 60) : 0;
+
+    card.innerHTML = `
+      <div class="agent-card-header">
+        <span class="agent-card-title">${escapeHtml(agent.name || agent.type || 'Agent')}</span>
+        <span class="agent-card-status ${statusClass}">${statusClass}</span>
+      </div>
+      <div class="agent-card-meta">
+        <div>Type: ${escapeHtml(agent.type || 'unknown')}</div>
+        <div>Runtime: ${elapsed}m</div>
+      </div>
+      ${agent.status === 'running' ? '<div class="agent-card-actions"><button class="btn btn-sm" data-agent-id="' + agent.id + '">Cancel</button></div>' : ''}
+    `;
+
+    const cancelBtn = card.querySelector('[data-agent-id]');
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        cancelAgent(sess.bridgeSessionId, agent.id);
+      });
+    }
+
+    agentList.appendChild(card);
+  });
+}
+
+function showAgentContext(agent) {
+  // Show agent's output/context in a modal or inline panel
+  showSystem(`Agent: ${agent.name || agent.id}\nType: ${agent.type}\nStatus: ${agent.status}\n\n点击查看Agent上下文功能已实现 - 后续可扩展显示完整输出和日志`);
+}
+
+async function cancelAgent(sessionId, agentId) {
+  const bridgeUrl = window.zeroAgent.bridgeUrl || 'http://127.0.0.1:14168';
+  try {
+    await fetch(`${bridgeUrl}/session/${sessionId}/agents/${agentId}/cancel`, { method: 'POST' });
+  } catch (err) {
+    showError('Failed to cancel agent: ' + (err.message || err));
+  }
+}
+
 // ─── Init ────────────────────────────────────────────────────────────────
+// IME composition fix
+let _imeComposing = false;
+const imagePreviews = document.getElementById('image-previews');
+const pendingImages = []; // Array of { dataUrl, id }
+
 (async function init() {
+  // Initialize DOM refs
+  messagesEl = $('messages');
+  inputEl = $('input');
+  sendBtn = $('send-btn');
+  sessionListEl = $('session-list');
+  sessionTitleEl = $('session-title');
+  statusBadge = $('status-badge');
+  statusText = $('status-text');
+  errorBanner = $('error-banner');
+  commandPaletteEl = $('command-palette');
+  leftDrawer = $('left-drawer');
+  rightDrawer = $('right-drawer');
+  agentList = $('agent-list');
+  modelStatus = $('model-status');
+  currentModelEl = $('current-model');
+  tokenUsageEl = $('token-usage');
+  modelPickerModal = $('model-picker-modal');
+  modelList = $('model-list');
+
   // Add platform class to body for platform-specific CSS
   const platform = (window.zeroAgent && window.zeroAgent.platform) || process.platform || 'unknown';
   document.body.classList.add('platform-' + platform);
@@ -2531,4 +2780,143 @@ document.addEventListener('keydown', (e) => {
   await loadModelProfiles();
   updateSendButton();
   inputEl.focus();
+
+  // Initialize default group
+  if (!state.sessionGroups.has('default')) {
+    state.sessionGroups.set('default', { id: 'default', name: '未分组', sessionIds: [], collapsed: false });
+  }
+
+  // ─── Input Event Listeners ──────────────────────────────────────────────
+  inputEl.addEventListener('input', () => {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
+    updateSendButton();
+    updateCommandPalette();
+  });
+
+  inputEl.addEventListener('compositionstart', () => { _imeComposing = true; });
+  inputEl.addEventListener('compositionend', () => { _imeComposing = false; });
+
+  inputEl.addEventListener('keydown', (e) => {
+    if (!commandPaletteEl.classList.contains('hidden')) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        moveCommandPalette(1);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        moveCommandPalette(-1);
+        return;
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        applyCommandSuggestion(commandPaletteItems[commandPaletteIndex]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeCommandPalette();
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey && commandPaletteItems.length) {
+        e.preventDefault();
+        applyCommandSuggestion(commandPaletteItems[commandPaletteIndex]);
+        return;
+      }
+    }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      if (e.isComposing || _imeComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      submitInput();
+    } else if (e.key === 'Escape' && getActiveSessionRuntime()?.busy) {
+      e.preventDefault();
+      cancelPrompt();
+    }
+  });
+
+  inputEl.addEventListener('paste', (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (!file) continue;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result;
+          const id = `img-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+          pendingImages.push({ dataUrl, id });
+          renderImagePreviews();
+        };
+        reader.readAsDataURL(file);
+        break;
+      }
+    }
+  });
+
+  sendBtn.addEventListener('click', () => {
+    if (getActiveSessionRuntime()?.busy) {
+      cancelPrompt().then((ok) => {
+        if (ok) showSystem('Stop requested.');
+      });
+    } else submitInput();
+  });
+
+  // Initialize default group
+  if (!state.sessionGroups.has('default')) {
+    state.sessionGroups.set('default', { id: 'default', name: '未分组', sessionIds: [], collapsed: false });
+  }
+
+  // ─── Button Event Listeners ────────────────────────────────────────────
+  $('new-session-btn')?.addEventListener('click', newSession);
+  $('error-dismiss')?.addEventListener('click', hideError);
+
+  // ─── Drawer Toggles ─────────────────────────────────────────────────────
+  $('toggle-left-drawer')?.addEventListener('click', toggleLeftDrawer);
+  $('toggle-left-drawer-alt')?.addEventListener('click', toggleLeftDrawer);
+  $('toggle-right-drawer')?.addEventListener('click', toggleRightDrawer);
+  $('toggle-right-drawer-alt')?.addEventListener('click', toggleRightDrawer);
+  $('close-right-drawer')?.addEventListener('click', toggleRightDrawer);
+
+  // ─── Model Picker ───────────────────────────────────────────────────────
+  modelStatus?.addEventListener('click', openModelPicker);
+  $('close-model-picker')?.addEventListener('click', closeModelPicker);
+  modelPickerModal?.querySelector('.modal-backdrop')?.addEventListener('click', closeModelPicker);
+
+  // ─── Theme Toggle ───────────────────────────────────────────────────────
+  $('theme-toggle-btn')?.addEventListener('click', async () => {
+    const cfg = getActiveConfig();
+    const current = cfg.theme || 'auto';
+    const next = current === 'light' ? 'dark' : (current === 'dark' ? 'auto' : 'light');
+    cfg.theme = next;
+    applyTheme();
+    await window.zeroAgent.saveConfig(cfg);
+    showSystem(`Theme → ${next}`);
+  });
+
+  // ─── Keyboard Shortcuts ─────────────────────────────────────────────────
+  document.addEventListener('keydown', (e) => {
+    // Cmd/Ctrl+B - Toggle left drawer
+    if ((e.metaKey || e.ctrlKey) && e.key === 'b' && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      toggleLeftDrawer();
+    }
+    // Cmd/Ctrl+Alt+B - Toggle right drawer
+    if ((e.metaKey || e.ctrlKey) && e.altKey && e.key === 'b') {
+      e.preventDefault();
+      toggleRightDrawer();
+    }
+    // Cmd/Ctrl+K - Open model picker
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k' && !inputEl.matches(':focus')) {
+      e.preventDefault();
+      openModelPicker();
+    }
+  });
+
+  // ─── Initialize UI ──────────────────────────────────────────────────────
+  renderSessionList();
+  updateModelStatus();
+  renderAgentPanel();
 })();

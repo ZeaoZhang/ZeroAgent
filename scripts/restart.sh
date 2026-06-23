@@ -270,6 +270,9 @@ build_desktop_app() {
     (cd "${DESKTOP_DIR}" && run npm ci)
   fi
 
+  log "cleaning Tauri build cache"
+  run rm -rf "${DESKTOP_DIR}/src-tauri/target/release/bundle"
+
   (cd "${DESKTOP_DIR}" && run npm run tauri -- build)
 }
 

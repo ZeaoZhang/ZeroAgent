@@ -7,24 +7,62 @@
 </head>
 <body>
   <div id="app">
+    <!-- Left Drawer: Session Management -->
+    <aside id="left-drawer" class="drawer left-drawer">
+      <div class="drawer-header">
+        <h2>Sessions</h2>
+        <button id="new-session-btn" class="icon-btn" title="New chat" aria-label="New chat">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 5v14M5 12h14"/>
+          </svg>
+        </button>
+      </div>
+      <div class="drawer-content">
+        <div id="session-list" class="session-list"></div>
+      </div>
+      <div class="drawer-footer" id="model-status" role="button" tabindex="0" title="Click to change model">
+        <div class="model-info">
+          <span id="current-model">Loading...</span>
+        </div>
+        <div class="token-info">
+          <span id="token-usage">0 / 0</span>
+        </div>
+      </div>
+      <button id="toggle-left-drawer" class="drawer-toggle left" title="Toggle sidebar (⌘B)" aria-label="Toggle left sidebar">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M15 18l-6-6 6-6"/>
+        </svg>
+      </button>
+    </aside>
+
     <!-- Main area -->
     <main id="main">
       <header id="topbar">
         <div class="topbar-left">
-          <div id="session-list" class="tab-strip" role="tablist" aria-label="Chats">
-            <button id="new-session-btn" class="tab-new-btn" title="New chat" aria-label="New chat">
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 5v14M5 12h14"/>
-              </svg>
-            </button>
-          </div>
+          <button id="toggle-left-drawer-alt" class="icon-btn" title="Toggle sessions" aria-label="Toggle sessions sidebar">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 12h18M3 6h18M3 18h18"/>
+            </svg>
+          </button>
+          <h1 id="session-title">ZeroAgent</h1>
         </div>
         <div class="topbar-right">
-          <h1 id="session-title" class="sr-only">ZeroAgent</h1>
           <span id="status-badge" class="badge">
             <span class="status-dot"></span>
             <span id="status-text">Starting…</span>
           </span>
+          <button id="theme-toggle-btn" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="4"/>
+              <path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32l1.41-1.41"/>
+            </svg>
+          </button>
+          <button id="toggle-right-drawer-alt" class="icon-btn" title="Toggle agents" aria-label="Toggle agents sidebar">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M12 1v6m0 6v6M5.6 5.6l4.2 4.2m4.4 4.4l4.2 4.2M1 12h6m6 0h6M5.6 18.4l4.2-4.2m4.4-4.4l4.2-4.2"/>
+            </svg>
+          </button>
         </div>
       </header>
 
@@ -59,42 +97,43 @@
       </div>
     </main>
 
-    <div id="settings-dock" class="settings-dock">
-      <button id="settings-btn" class="settings-trigger" title="Settings" aria-label="Settings" aria-expanded="false" aria-controls="settings-panel">
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="3"/>
-          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    <!-- Right Drawer: Agent Control Panel -->
+    <aside id="right-drawer" class="drawer right-drawer collapsed">
+      <div class="drawer-header">
+        <h2>Active Agents</h2>
+        <button id="close-right-drawer" class="icon-btn" title="Close" aria-label="Close agents panel">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 6L6 18M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+      <div class="drawer-content">
+        <div id="agent-list" class="agent-list">
+          <div class="empty-state-small">
+            <span>No active agents</span>
+          </div>
+        </div>
+      </div>
+      <button id="toggle-right-drawer" class="drawer-toggle right" title="Toggle agents (⌘⌥B)" aria-label="Toggle right sidebar">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M9 18l6-6-6-6"/>
         </svg>
       </button>
-      <section id="settings-panel" class="settings-panel hidden" aria-label="Settings">
-        <div class="settings-panel-header">
-          <h2>Settings</h2>
-          <button class="icon-btn ghost" id="close-settings">✕</button>
+    </aside>
+
+    <!-- Model Picker Modal -->
+    <div id="model-picker-modal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Select Model</h3>
+          <button class="icon-btn" id="close-model-picker">✕</button>
         </div>
-        <div class="settings-panel-content">
-          <div class="form-row">
-            <label for="cfg-llm">Model</label>
-            <select id="cfg-llm">
-              <option value="0">Default / Auto</option>
-            </select>
-            <small>Select the LLM profile from ZeroAgent config.</small>
-          </div>
-          <div class="form-row">
-            <label>Runtime config</label>
-            <div class="btn-row">
-              <button class="btn" id="open-config">Open config.yaml</button>
-            </div>
-            <small>Configure providers, API keys, workspace, and runtime defaults in <code>config.yaml</code>.</small>
-          </div>
+        <div class="modal-body">
+          <div id="model-list" class="model-list"></div>
         </div>
-        <div class="settings-panel-footer">
-          <button class="btn ghost" id="cancel-settings">Close</button>
-          <button class="btn primary" id="save-settings">Save</button>
-        </div>
-      </section>
+      </div>
     </div>
-
-
 
     <!-- Error banner -->
     <div id="error-banner" class="error-banner hidden">
