@@ -79,6 +79,16 @@ class BaseHandler:
         """清除上一任务遗留的 code_run 停止信号."""
         self.code_stop_signal.clear()
 
+    def reset_session_state(self) -> None:
+        """新任务开始时重置跨任务的循环内部状态.
+
+        归零 ``_empty_ct``（连续空响应计数）并清空 CompletionGate 的
+        retry 预算。避免前序任务遗留的计数在本任务内累积触发硬退出，
+        也避免被误判的 retry 把可用余量用尽.
+        """
+        self._empty_ct = 0
+        self.completion_gate.reset()
+
     # ---- Plan Mode ----
 
     def _in_plan_mode(self) -> bool:

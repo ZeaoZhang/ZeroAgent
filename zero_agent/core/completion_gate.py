@@ -98,7 +98,7 @@ class CompletionGate:
         check_plan_completion: Callable[[], Optional[int]],
         exit_plan_mode: Callable[[], None],
         protocol_retry_limit: int = 2,
-        action_retry_limit: int = 1,
+        action_retry_limit: int = 2,
     ) -> None:
         self._retry_prompt_factory = retry_prompt_factory
         self._large_code_prompt_factory = large_code_prompt_factory
@@ -268,7 +268,12 @@ class CompletionGate:
 
     @staticmethod
     def _looks_like_unexecuted_action(text: str) -> bool:
-        """Detect explicit future action intent, not ordinary result prose."""
+        """Detect explicit future action intent, not ordinary result prose.
+
+        Only triggers when the reply is *almost entirely* the action-intent
+        statement — not when the model weaves an intent phrase into a longer
+        narrative summary or final answer.
+        """
 
         clean = re.sub(
             r"<\s*(?:thinking|summary)[^>]*>[\s\S]*?<\s*/\s*(?:thinking|summary)\s*>",
@@ -278,7 +283,9 @@ class CompletionGate:
         ).strip()
         if not clean:
             return False
-        clean = clean.lstrip(" \t\r\n-*>#")
+
+        # Strip leading punctuation / markdown so we can anchor at ^.
+        stripped = clean.lstrip(" \t\r\n-*>#")
 
         zh_patterns = [
             r"^(?:好的[，,。\s]*)?"
@@ -296,10 +303,23 @@ class CompletionGate:
             r"next i(?:'ll| will)|i(?:'ll| will) now)\s+"
             r"(?:check|inspect|read|run|execute|search|open|write|modify|analy[sz]e)\b",
         ]
-        return any(
-            re.search(pattern, clean, flags=re.IGNORECASE)
-            for pattern in [*zh_patterns, *en_patterns]
-        )
+        all_patterns = [*zh_patterns, *en_patterns]
+
+        for pattern in all_patterns:
+            m = re.search(pattern, stripped, flags=re.IGNORECASE)
+            if not m:
+                continue
+            # The intent pattern matched.  Now verify this is a *bare* intent
+            # statement — not a throwaway phrase inside a full narrative reply.
+            after_match = stripped[m.end():].strip(" \t\r\n")
+            # If there is substantial natural-language content *after* the
+            # intent phrase, the model is narrating / summarizing, not just
+            # promising future work.  Allow up to one short trailing sentence.
+            if len(after_match) > 50:
+                return False
+            return True
+
+        return False
 
     @staticmethod
     def _has_unverified_plan_completion_claim(content: str) -> bool:

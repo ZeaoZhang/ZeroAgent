@@ -103,6 +103,11 @@ class AgentLoop:
 
         turn = 0
         self.handler.max_turns = self.max_turns
+        # 每次新任务重置跨任务计数（空响应计数 / completion gate retry 预算）.
+        # 避免前序/中途的误判 retry 在后续任务内累积成硬退出.
+        reset_session = getattr(self.handler, "reset_session_state", None)
+        if callable(reset_session):
+            reset_session()
         self._record_user_history(initial_content)
 
         self._trigger_hook("agent_before", {

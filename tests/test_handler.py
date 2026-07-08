@@ -519,7 +519,7 @@ class TestBaseHandlerDoNoTool:
         self,
         mock_handler: BaseHandler,
     ) -> None:
-        """动作承诺纠正只重试一次，避免无工具纠正循环."""
+        """动作承诺纠正最多重试两次，第三次硬停止（action_retry_limit=2）."""
         first = _exhaust(mock_handler.do_no_tool(
             {},
             MockResponse(content="让我检查项目配置情况。"),
@@ -528,11 +528,40 @@ class TestBaseHandlerDoNoTool:
             {},
             MockResponse(content="我来查看配置文件。"),
         ))
+        third = _exhaust(mock_handler.do_no_tool(
+            {},
+            MockResponse(content="需要读取配置文件。"),
+        ))
 
         assert first.should_exit is False
         assert first.next_prompt is not None
-        assert second.should_exit is True
-        assert second.next_prompt is None
+        assert second.should_exit is False
+        assert second.next_prompt is not None
+        assert third.should_exit is True
+        assert third.next_prompt is None
+
+
+    def test_narrative_with_action_phrase_completes(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """叙述性回复含动作短语但后续有大段正文 → 不应被误判为未执行动作."""
+        gen = mock_handler.do_no_tool(
+            {},
+            MockResponse(
+                content=(
+                    "好的，让我检查一下最终结果...\n\n"
+                    "经过验证，所有文件已正确写入，测试全部通过。"
+                    "这是本次任务的完整总结：1) 修复了 config 解析问题；"
+                    "2) 新增了单元测试覆盖边界情况。任务已完成。"
+                ),
+            ),
+        )
+        result = _exhaust(gen)
+
+        assert result.next_prompt is None, (
+            "叙述性回复含大段正文不应被当作未执行动作意图"
+        )
 
     def test_text_tool_protocol_retry_budget_exits(
         self,
@@ -613,6 +642,29 @@ class TestBaseHandlerDoNoTool:
         result = mock_handler._retry_or_exit("retry")
         assert result.should_exit is False
         assert mock_handler._empty_ct == 1
+
+    def test_reset_session_state_clears_empty_ct_and_budget(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """新任务开始时 _empty_ct 和 completion_gate retry 预算被归零."""
+        mock_handler._empty_ct = 2
+        # 消耗 promissory_action 预算
+        _exhaust(mock_handler.do_no_tool(
+            {},
+            MockResponse(content="让我检查项目配置情况。"),
+        ))
+
+        mock_handler.reset_session_state()
+
+        # _empty_ct 归零
+        assert mock_handler._empty_ct == 0
+        # completion_gate retry 计数清空，下一轮不应趁势退出
+        result = _exhaust(mock_handler.do_no_tool(
+            {},
+            MockResponse(content="让我检查项目配置情况。"),
+        ))
+        assert result.should_exit is False
 
 
 class TestBaseHandlerWorking:
