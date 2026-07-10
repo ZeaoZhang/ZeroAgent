@@ -134,21 +134,31 @@ class SubAgentManager:
     def _launch(self, task: SubAgentTask) -> None:
         """创建 I/O 目录并启动子进程.
 
+        写入 input.txt (GA 兼容), 使用 --task IODIR --nobg -q 命令.
+        如果 zero-agent 可执行文件不存在, 用 python -m zero_agent.runners.cli 回退.
+
         Args:
             task: 待启动的任务.
         """
+        import shutil
+
         os.makedirs(task.io_dir, exist_ok=True)
 
-        # 写入输入文件
-        input_path = os.path.join(task.io_dir, "input.md")
+        # 写入输入文件 (input.txt, GA 兼容)
+        input_path = os.path.join(task.io_dir, "input.txt")
         with open(input_path, "w", encoding="utf-8") as f:
             f.write(task.prompt)
 
-        # 查找 zero-agent 可执行文件
-        agent_bin = self._find_agent_bin()
+        # 构建命令
+        agent_bin = shutil.which("zero-agent")
+        if agent_bin:
+            cmd = [agent_bin, "--task", task.io_dir, "--nobg", "-q"]
+        else:
+            cmd = [sys.executable, "-m", "zero_agent.runners.cli",
+                   "--task", task.io_dir, "--nobg", "-q"]
 
         task.process = subprocess.Popen(
-            [agent_bin, "--task", task.io_dir, "-q"],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -176,15 +186,21 @@ class SubAgentManager:
     def _collect_result(task: SubAgentTask) -> str:
         """读取子 agent 的输出文件.
 
+        优先读 output.txt (GA 兼容), 回退 output.md (旧格式).
+
         Args:
             task: 已完成的任务.
 
         Returns:
             输出内容字符串.
         """
-        output_path = os.path.join(task.io_dir, "output.md")
-        if os.path.isfile(output_path):
-            with open(output_path, "r", encoding="utf-8") as f:
+        output_txt = os.path.join(task.io_dir, "output.txt")
+        if os.path.isfile(output_txt):
+            with open(output_txt, "r", encoding="utf-8") as f:
+                return f.read()
+        output_md = os.path.join(task.io_dir, "output.md")
+        if os.path.isfile(output_md):
+            with open(output_md, "r", encoding="utf-8") as f:
                 return f.read()
         return ""
 

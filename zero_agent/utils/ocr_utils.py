@@ -67,20 +67,21 @@ def ocr_image(
     result = engine(img)
 
     lines: list[str] = []
-    details: list[dict] = []
+    details: list[dict[str, Any]] = []
     full_text_parts: list[str] = []
 
     if result is not None:
         for item in result:
-            text = str(item[1]) if item[1] else ""
+            raw_text = str(item[1]) if item[1] else ""
             conf = float(item[2]) if len(item) > 2 and item[2] else 0.0
             bbox = item[0] if item[0] else []
-            full_text_parts.append(_strip_cjk_spaces(text))
-            lines.append(text)
-            details.append({"bbox": bbox, "text": text, "conf": conf})
+            cleaned = _strip_cjk_spaces(raw_text)
+            full_text_parts.append(cleaned)
+            lines.append(cleaned)
+            details.append({"bbox": bbox, "text": raw_text, "conf": conf})
 
     return {
-        "text": "".join(full_text_parts),
+        "text": "\n".join(full_text_parts),
         "lines": lines,
         "details": details,
     }
@@ -156,7 +157,10 @@ def ocr_window(hwnd: int, enhance: bool = False) -> Dict[str, Any]:
 
 
 def _preprocess(img: Any) -> Any:
-    """图像预处理：3x 缩放 + 3.0 对比度增强.
+    """图像预处理：对比度增强 + 3x 缩放.
+
+    先增强对比度再放大，避免在放大的图像上进行昂贵的像素操作。
+    坑: enhance 对清晰文字有害，默认关闭。
 
     Args:
         img: PIL Image 对象.
@@ -164,10 +168,10 @@ def _preprocess(img: Any) -> Any:
     Returns:
         处理后的 PIL Image.
     """
-    w, h = img.size
-    img = img.resize((w * 3, h * 3), Image.LANCZOS)
     enhancer = ImageEnhance.Contrast(img)
-    return enhancer.enhance(3.0)
+    img = enhancer.enhance(3.0)
+    w, h = img.size
+    return img.resize((w * 3, h * 3), Image.LANCZOS)
 
 
 def _strip_cjk_spaces(text: str) -> str:

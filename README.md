@@ -11,8 +11,10 @@ ZeroAgent 是一个基于 `litellm` 的可复用自主 Agent 框架，采用 gen
 - **文本工具调用回退**: 对不支持原生 tool calling 的模型，可从 XML/JSON 文本中解析工具调用。
 - **记忆与压缩**: 分层记忆管理、历史标签压缩、消息裁剪和 OCR/视觉记忆扩展。
 - **Hook 与插件**: 8 个标准事件钩子，包含 Langfuse tracing 插件示例。
-- **Reflect 模式**: 支持反射式唤醒、目标模式、定时任务和 agent team worker。
-- **多入口**: 提供 REPL、一次性任务、文件 I/O 批处理、统一 Web2/Tauri 前端和桌面 launcher。
+- **UltraPlan 编排**: Python 脚本多 agent 编排，支持 Explore/Sweep/Hunt/Improve 模式。
+- **持续子 Agent**: 基于文件 I/O 的持续子 agent 协作，支持 reply.txt 轮询和 conductor UI。
+- **ACP 协议桥**: JSON-RPC over stdio 协议桥，支持外部编辑器/IDE 集成。
+- **世界线回退**: 基于 checkpoint 树的文件编辑回退与对话恢复。
 - **工程化测试**: pytest 测试覆盖 core、LLM、tools、memory、plugins 和 reflect 模块。
 
 ## 安装

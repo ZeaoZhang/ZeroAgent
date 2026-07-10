@@ -396,3 +396,36 @@ def test_openai_completion_kwargs_fill_missing_tool_result_after_conversion() ->
     assert following["role"] == "tool"
     assert following["tool_call_id"] == "toolu_1"
     assert "missing" in following["content"]
+
+
+def test_build_completion_kwargs_forwards_api_mode_responses() -> None:
+    """_build_completion_kwargs forwards api_mode=responses."""
+    session = LiteLLMSession(
+        LLMBackendConfig(
+            name="default",
+            provider="openai",
+            api_key="sk-test",
+            api_base="https://api.openai.com/v1",
+            model="gpt-test",
+            api_mode="responses",
+        )
+    )
+    session.system = "hi"
+    kwargs = session._build_completion_kwargs(
+        messages=session._build_messages(),
+        tools=[],
+        stream=True,
+    )
+    assert kwargs.get("api_mode") == "responses"
+
+
+def test_build_completion_kwargs_default_chat_completions_omits_api_mode() -> None:
+    """Default api_mode (chat_completions) omits api_mode from kwargs."""
+    session = _make_session()
+    session.system = "hi"
+    kwargs = session._build_completion_kwargs(
+        messages=session._build_messages(),
+        tools=[],
+        stream=True,
+    )
+    assert "api_mode" not in kwargs

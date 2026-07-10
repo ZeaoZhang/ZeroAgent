@@ -16,10 +16,10 @@ from typing import Any, Dict, Generator, List, Optional
 
 from zero_agent.core.config import LLMBackendConfig
 from zero_agent.core.exceptions import LLMError
+from zero_agent.core.interfaces import LLMClient
 from zero_agent.core.interruption import classify_interruption
 from zero_agent.llm.base import MockResponse
 from zero_agent.llm.sessions import LiteLLMSession
-
 _logger = logging.getLogger("zero_agent.failover")
 
 
@@ -43,20 +43,20 @@ class AutoFailoverSession:
 
     def __init__(
         self,
-        primary: LiteLLMSession,
+        primary: LLMClient,
         backups: List[LiteLLMSession],
         health_check_interval: int = 60,
     ) -> None:
         """初始化 AutoFailoverSession.
 
         Args:
-            primary: 主 LiteLLMSession.
+            primary: 主 LLM 会话 (LiteLLMSession 或 TextToolSession).
             backups: 备用 LiteLLMSession 列表（按优先级排序）.
             health_check_interval: 健康检查间隔秒数，默认 60s.
         """
         self.primary = primary
         self.backups = backups
-        self._active: LiteLLMSession = primary
+        self._active: LLMClient = primary
         self._active_name: str = primary.name
         self._health_check_interval = health_check_interval
         self._last_health_check: float = 0.0

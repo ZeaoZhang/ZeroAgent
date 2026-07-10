@@ -54,6 +54,36 @@ zero-agent
 
 ```bash
 zero-agent -i "列出当前目录下的文件"
+
+### 函数模式 (单次子 agent 任务)
+
+```bash
+zero-agent --func prompt.txt --nobg
+```
+
+### 文件 I/O 持续子 agent 模式
+
+```bash
+zero-agent --task /path/to/task_dir --nobg
+```
+
+### Conductor 多子 agent 编排 UI
+
+```bash
+zero-agent-conductor
+```
+
+### ACP 协议桥 (JSON-RPC over stdio)
+
+```bash
+zero-agent-acp
+```
+
+### TUI 终端界面
+
+```bash
+pip install -e ".[ui]"
+zero-agent-tui
 ```
 
 ### 使用 YAML 配置

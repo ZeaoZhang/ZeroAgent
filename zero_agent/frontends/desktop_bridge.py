@@ -854,7 +854,67 @@ async def cancel_agent_handler(request):
             agent["updated_at"] = time.time()
             break
 
-    return json_ok({"ok": True, "sessionId": sid, "agentId": aid})
+
+async def worldline_handler(request):
+    """GET /worldline/{sid} — return checkpoint tree when worldline is enabled."""
+    sid = request.match_info["sid"]
+    sess = manager.get_session(sid)
+    if sess is None:
+        return json_ok({"enabled": False, "items": []})
+
+    config = getattr(sess, "config", None) or getattr(manager, "config", None)
+    enabled = getattr(config, "enable_worldline", False) if config else False
+    if not enabled:
+        return json_ok({"enabled": False, "items": []})
+
+    try:
+        from zero_agent.frontends.worldline import tree_from_store
+        import time
+
+        handler = getattr(sess, "handler", None)
+        store = getattr(handler, "_worldline_store", None) if handler else None
+        if store is None:
+            return json_ok({"enabled": True, "items": []})
+
+        tree = tree_from_store(store, time.time())
+        nodes = [
+            {"id": n.id, "title": n.title, "kind": n.kind, "children": n.children}
+            for n in [tree.nodes[nid] for nid in tree.root_id] if nid in tree.nodes
+        ] if tree.root_id else []
+        return json_ok({"enabled": True, "items": nodes})
+    except ImportError:
+        return json_ok({"enabled": True, "items": []})
+
+
+async def worldline_restore_handler(request):
+    """POST /worldline/{sid}/restore — restore to a checkpoint node."""
+    sid = request.match_info["sid"]
+    sess = manager.get_session(sid)
+    if sess is None:
+        return json_ok({"ok": False, "error": "session not found"}, status=404)
+
+    # Reject restore while session is running
+    if getattr(sess, "running", False):
+        return json_ok({"ok": False, "error": "session is running"}, status=409)
+
+    data = await read_json(request)
+    node_id = data.get("nodeId")
+    if not node_id:
+        return json_ok({"ok": False, "error": "nodeId required"}, status=400)
+
+    try:
+        from zero_agent.frontends.worldline import restore_plan
+        handler = getattr(sess, "handler", None)
+        store = getattr(handler, "_worldline_store", None) if handler else None
+        if store is None:
+            return json_ok({"ok": False, "error": "worldline not initialized"}, status=400)
+
+        result = restore_plan(store, node_id)
+        return json_ok({"ok": True, "result": result or {}})
+    except ImportError:
+        return json_ok({"ok": False, "error": "worldline module unavailable"}, status=500)
+
+
 
 
 
@@ -883,6 +943,8 @@ def create_app():
     app.router.add_post("/session/{sid}/group", set_session_group_handler)
     app.router.add_get("/session/{sid}/agents", get_agents_handler)
     app.router.add_post("/session/{sid}/agents/{aid}/cancel", cancel_agent_handler)
+    app.router.add_get("/worldline/{sid}", worldline_handler)
+    app.router.add_post("/worldline/{sid}/restore", worldline_restore_handler)
     app.router.add_get("/groups", list_groups_handler)
     app.router.add_post("/path/open", path_open_handler)
 

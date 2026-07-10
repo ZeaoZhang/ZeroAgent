@@ -40,7 +40,9 @@ all-extras = ["zero-agent[ui,browser,memory,plot,bots]"]
 [project.scripts]
 zero-agent = "zero_agent.runners.cli:main"
 zero-agent-configure = "zero_agent.utils.configure:main"
-zero-agent-launcher = "zero_agent.frontends.launcher:main"
+zero-agent-conductor = "zero_agent.frontends.conductor:main"
+zero-agent-acp = "zero_agent.frontends.acp_bridge:main"
+zero-agent-tui = "zero_agent.frontends.tui:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]
@@ -69,9 +71,11 @@ packages = [
 "zero_agent.frontends" = [
     "desktop/static/*",
     "desktop/static/vendor/*",
+    "conductor.html",
 ]
 "zero_agent.assets" = [
     "code_run_header.py",
+    "ga_ultraplan.py",
     "sys_prompt*.txt",
     "insight_fixed_structure*.txt",
     "global_mem_insight_template*.txt",

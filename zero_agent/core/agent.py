@@ -307,6 +307,16 @@ class ZeroAgent:
             register(self.hooks)
         except Exception:
             pass
+        try:
+            from zero_agent.plugins.project_mode import register
+            register(self.hooks)
+        except Exception:
+            pass
+        try:
+            from zero_agent.plugins.worldline_tracking import register
+            register(self.hooks)
+        except Exception:
+            pass
 
     def list_backends(self) -> list[tuple[str, str, bool]]:
         """列出所有可用的 LLM 后端.

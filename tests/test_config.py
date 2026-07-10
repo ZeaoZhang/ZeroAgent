@@ -204,3 +204,35 @@ llm_backends:
     assert config.default_backend == "local"
     assert config.llm_backends["local"].model == "local-test"
     assert getattr(config, "_source_path") == str(config_path)
+
+
+
+def test_from_yaml_loads_api_mode_responses(tmp_path) -> None:
+    """YAML with api_mode: responses should set the field correctly."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+default_backend: primary
+llm_backends:
+  primary:
+    provider: openai
+    api_key: sk-test
+    api_base: https://api.openai.com/v1
+    model: gpt-4o
+    api_mode: responses
+""".lstrip(),
+        encoding="utf-8",
+    )
+    config = AgentConfig.from_yaml(str(config_path))
+    assert config.llm_backends["primary"].api_mode == "responses"
+
+
+def test_from_env_api_mode_invalid_raises(monkeypatch) -> None:
+    """ZA_LLM_API_MODE with invalid value raises ConfigError."""
+    import pytest
+    monkeypatch.setenv("ZA_LLM_API_MODE", "bogus_mode")
+    monkeypatch.setenv("ZA_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("ZA_LLM_MODEL", "test-model")
+    from zero_agent.core.exceptions import ConfigError
+    with pytest.raises(ConfigError, match="ZA_LLM_API_MODE"):
+        AgentConfig.from_env()

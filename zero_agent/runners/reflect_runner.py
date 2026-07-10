@@ -147,7 +147,6 @@ class ReflectRunner:
         )
         if on_done_fn is not None:
             on_done_fn(result)
-
     def _run_task(self, task: str) -> Any:
         """执行单个 reflect 任务.
 
@@ -178,6 +177,33 @@ class ReflectRunner:
             logger.info("Reflect 任务被中断: %s", task[:80])
         return result
 
+    def _write_reflect_log(self, result: Any) -> None:
+        """Append a reflect log entry to <workspace_dir>/reflect_logs/<name>_<date>.log.
+
+        Args:
+            result: The result returned from agent.run(), stringified for logging.
+        """
+        import datetime
+        from pathlib import Path
+
+        try:
+            ws_dir = getattr(self.agent.config, "workspace_dir", None)
+        except Exception:
+            ws_dir = None
+        log_root = Path(ws_dir) if ws_dir else Path.cwd()
+        log_dir = log_root / "reflect_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        today = datetime.date.today().strftime("%Y-%m-%d")
+        log_file = log_dir / f"{self.name}_{today}.log"
+
+        now = datetime.datetime.now().strftime("%m-%d %H:%M")
+        entry = f"[{now}]\n{result}\n\n"
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(entry)
+        except OSError:
+            pass
     def run_loop(self, init_args: Optional[dict] = None) -> None:
         """启动 reflect 主循环.
 
@@ -231,6 +257,7 @@ class ReflectRunner:
                 self._call_on_done(result)
             except Exception:
                 logger.exception("on_done() 调用失败")
+            self._write_reflect_log(result)
 
             if self._should_exit_after_run():
                 logger.info("ONCE 模式，任务完成后退出")

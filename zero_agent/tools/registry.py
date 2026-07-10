@@ -75,6 +75,19 @@ class ToolRegistry:
             ToolDefinition 或 None.
         """
         return self._tools.get(name)
+    def remove(self, name: str) -> bool:
+        """移除一个已注册工具.
+
+        Args:
+            name: 工具名称.
+
+        Returns:
+            True 表示成功移除，False 表示工具不存在.
+        """
+        if name in self._tools:
+            del self._tools[name]
+            return True
+        return False
 
     def list_all(self) -> List[ToolDefinition]:
         """列出所有已注册工具.

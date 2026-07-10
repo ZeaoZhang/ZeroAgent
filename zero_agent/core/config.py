@@ -97,6 +97,7 @@ class LLMBackendConfig:
     health_check_interval: int = 60
     spring_back_multiplier: float = 1.0  # spring-back 定时器乘数
     api_mode: str = "chat_completions"  # "chat_completions" | "responses"
+    tool_protocol: str = "native"  # "native" | "text"
 
 
 @dataclass
@@ -129,6 +130,7 @@ class AgentConfig:
     failover_backends: list[str] = field(default_factory=list)
     log_dir: Optional[str] = None
     peer_hint: bool = False
+    enable_worldline: bool = False
     litellm_model_cost_map: Optional[str] = None
 
     @property
@@ -252,6 +254,18 @@ class AgentConfig:
         api_key = os.environ.get("ZA_LLM_API_KEY", "")
         api_base = os.environ.get("ZA_LLM_API_BASE", "https://api.anthropic.com")
         model = os.environ.get("ZA_LLM_MODEL", "")
+        api_mode = os.environ.get("ZA_LLM_API_MODE", "chat_completions")
+        if api_mode not in ("chat_completions", "responses"):
+            from zero_agent.core.exceptions import ConfigError
+            raise ConfigError(
+                f"ZA_LLM_API_MODE 不支持: {api_mode!r} (允许: chat_completions | responses)"
+            )
+        tool_protocol = os.environ.get("ZA_LLM_TOOL_PROTOCOL", "native")
+        if tool_protocol not in ("native", "text"):
+            from zero_agent.core.exceptions import ConfigError
+            raise ConfigError(
+                f"ZA_LLM_TOOL_PROTOCOL 不支持: {tool_protocol!r} (允许: native | text)"
+            )
         max_turns = int(os.environ.get("ZA_MAX_TURNS", "80"))
         workspace_dir = os.environ.get("ZA_WORKSPACE_DIR", "./workspace")
         memory_dir = os.environ.get("ZA_MEMORY_DIR", "./memory")
@@ -268,6 +282,8 @@ class AgentConfig:
                     api_key=api_key,
                     api_base=api_base,
                     model=model,
+                    api_mode=api_mode,
+                    tool_protocol=tool_protocol,
                 )
             },
             default_backend="default",
@@ -310,6 +326,7 @@ class AgentConfig:
             failover_backends=data.get("failover_backends", []),
             log_dir=data.get("log_dir"),
             peer_hint=data.get("peer_hint", False),
+            enable_worldline=data.get("enable_worldline", False),
             litellm_model_cost_map=data.get("litellm_model_cost_map"),
         )
 
