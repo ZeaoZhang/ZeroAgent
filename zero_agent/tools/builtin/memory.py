@@ -10,7 +10,7 @@ import os
 from typing import Any, Dict, Generator
 
 from zero_agent.core.config import AgentConfig
-from zero_agent.core.types import StepOutcome
+from zero_agent.core.types import StepAction, StepOutcome
 from zero_agent.memory.manager import MemoryManager
 from zero_agent.tools.registry import ToolRegistry
 from zero_agent.tools.builtin.file import file_read
@@ -165,5 +165,5 @@ def _make_start_long_term_update_handler(config: AgentConfig):
             ).get_global_memory_context()
         prompt += memory_ctx
 
-        return StepOutcome(result, next_prompt=prompt)
+        return StepOutcome(result, next_prompt=prompt, action=StepAction.CONTINUE)
     return _handler

@@ -3,8 +3,10 @@
 from zero_agent.core.config import (
     AgentConfig,
     LLMBackendConfig,
+    _config_mtime,
     default_config_path,
     load_default_config,
+    reload_config_if_changed,
 )
 from zero_agent.llm.failover import AutoFailoverSession
 from zero_agent.llm.factory import LLMFactory
@@ -50,6 +52,29 @@ llm_backends:
     assert config.litellm_model_cost_map == str(cost_map)
     assert config.llm_backends["primary"].thinking_type == "enabled"
     assert config.llm_backends["primary"].thinking_budget_tokens == 4096
+
+
+def test_configure_auto_yaml_loads_without_duplicate_backend_name(tmp_path) -> None:
+    """自动配置生成的 YAML 应能被 AgentConfig 直接加载。"""
+    from zero_agent.utils.configure import _build_config_yaml
+
+    config_path = tmp_path / "wizard.yaml"
+    config_path.write_text(
+        _build_config_yaml(
+            provider="openai",
+            api_key="sk-test",
+            api_base="https://api.openai.com/v1",
+            model="gpt-test",
+            workspace=str(tmp_path / "workspace"),
+        ),
+        encoding="utf-8",
+    )
+
+    config = AgentConfig.from_yaml(config_path)
+
+    assert config.default_backend == "default"
+    assert config.llm_backends["default"].name == "default"
+    assert config.llm_backends["default"].provider == "openai"
 
 
 def test_from_yaml_defaults_sessions_dir_under_workspace(tmp_path) -> None:
@@ -204,6 +229,54 @@ llm_backends:
     assert config.default_backend == "local"
     assert config.llm_backends["local"].model == "local-test"
     assert getattr(config, "_source_path") == str(config_path)
+
+
+def test_explicit_yaml_load_seeds_reload_mtime_baseline(tmp_path) -> None:
+    """首次显式 YAML 加载后，未修改文件不能触发一次伪热重载。"""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+default_backend: local
+llm_backends:
+  local:
+    provider: openai
+    api_key: sk-local
+    api_base: https://example.invalid/v1
+    model: local-test
+""".lstrip(),
+        encoding="utf-8",
+    )
+    _config_mtime.pop(str(config_path), None)
+
+    AgentConfig.from_yaml(config_path)
+
+    assert _config_mtime[str(config_path)] == config_path.stat().st_mtime_ns
+    assert reload_config_if_changed(str(config_path)) is None
+
+
+def test_default_yaml_load_seeds_reload_mtime_baseline(monkeypatch, tmp_path) -> None:
+    """默认 YAML 加载也应建立相同的热重载基线。"""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+default_backend: local
+llm_backends:
+  local:
+    provider: openai
+    api_key: sk-local
+    api_base: https://example.invalid/v1
+    model: local-test
+""".lstrip(),
+        encoding="utf-8",
+    )
+    _config_mtime.pop(str(config_path), None)
+    monkeypatch.delenv("ZA_CONFIG_PATH", raising=False)
+    monkeypatch.setattr("zero_agent.core.config.PROJECT_ROOT", tmp_path)
+
+    load_default_config()
+
+    assert _config_mtime[str(config_path)] == config_path.stat().st_mtime_ns
+    assert reload_config_if_changed(str(config_path)) is None
 
 
 

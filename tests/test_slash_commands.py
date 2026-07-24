@@ -313,6 +313,7 @@ class TestHandleCommandBuiltins:
         assert mock_agent.client.history == []
         assert mock_agent.client.system == ""
         assert mock_agent.handler.working == {}
+        mock_agent.clear_pending_task.assert_called_once_with()
         assert "新会话" in result
 
     def test_stop_calls_abort(self, mock_agent):

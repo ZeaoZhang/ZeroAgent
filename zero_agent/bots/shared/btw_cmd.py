@@ -8,6 +8,7 @@ import time
 
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.core.agent import ZeroAgent
+from zero_agent.bots.common import terminal_notice
 
 
 _WRAPPER_ZH = """<system-reminder>
@@ -82,17 +83,22 @@ def _run(runner, question: str, deadline: float, side_runner_factory=None) -> st
         side_runner_factory = side_runner_factory or _make_side_runner
         side_runner = side_runner_factory(runner)
         dq = side_runner.put_task(prompt, source="btw-sidequest")
-        text_parts: list[str] = []
+        latest_text = ""
         while time.time() < deadline:
             try:
                 item = dq.get(timeout=3)
             except queue.Empty:
                 continue
-            if "next" in item:
-                text_parts.append(str(item["next"]))
-            if "done" in item:
-                return str(item.get("done", ""))
-        return "\n".join(text_parts) + "\n\n⚠️ /btw 超时, 仅返回部分回复。"
+            if item.get("type") == "chunk":
+                current = str(item.get("text", ""))
+                latest_text = latest_text + current if getattr(side_runner, "inc_out", False) else current
+                continue
+            if item.get("type") != "terminal":
+                continue
+            if item.get("status") == "completed":
+                return str(item.get("text", ""))
+            return terminal_notice(item)
+        return latest_text + "\n\n⚠️ /btw 超时, 仅返回部分回复。"
     except Exception as e:
         return f"❌ /btw 失败: {type(e).__name__}: {e}"
 

@@ -7,7 +7,17 @@
   let ws = null;
   let cachedBridgeReady = null;
   const bridgeBase = `${location.protocol}//${location.hostname}:14168`;
-  const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:14168/ws`;
+  const wsBase = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:14168/ws`;
+  const bridgeToken = consumeBootstrapToken();
+
+  function consumeBootstrapToken() {
+    const hash = window.location.hash || '';
+    if (!hash) return '';
+    const params = new URLSearchParams(hash.slice(1));
+    const token = params.get('token') || '';
+    window.history.replaceState(null, document.title, `${window.location.pathname}${window.location.search}`);
+    return token;
+  }
 
   function on(channel, cb) {
     if (typeof cb !== 'function') return () => {};
@@ -30,6 +40,9 @@
 
   async function http(path, options = {}) {
     const headers = Object.assign({}, options.headers || {});
+    if (bridgeToken && !headers.Authorization && !headers.authorization) {
+      headers.Authorization = `Bearer ${bridgeToken}`;
+    }
     const init = Object.assign({}, options, { headers });
     if (init.body && typeof init.body !== 'string') {
       headers['Content-Type'] = headers['Content-Type'] || 'application/json';
@@ -51,7 +64,8 @@
   function connectWs() {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
     try {
-      ws = new WebSocket(wsUrl);
+      const stateUrl = bridgeToken ? `${wsBase}?token=${encodeURIComponent(bridgeToken)}` : wsBase;
+      ws = new WebSocket(stateUrl);
       ws.addEventListener('open', () => emit('bridge-log', 'WS state channel connected'));
       ws.addEventListener('message', (ev) => {
         let msg;
@@ -97,6 +111,13 @@
         return http('/history/resume', { method: 'POST', body: params || {} });
       case 'session/new':
         return http('/session/new', { method: 'POST', body: params || {} });
+      case 'session/list':
+        return http('/sessions');
+      case 'session/delete': {
+        const sid = params.sessionId || params.id || params.bridgeSessionId;
+        if (!sid) throw new Error('session/delete missing sessionId');
+        return http(`/session/${encodeURIComponent(sid)}`, { method: 'DELETE' });
+      }
       case 'session/prompt': {
         const sid = params.sessionId || params.id || params.bridgeSessionId;
         if (!sid) throw new Error('session/prompt missing sessionId');
@@ -114,6 +135,23 @@
         if (!sid) throw new Error('session/cancel missing sessionId');
         return http(`/session/${encodeURIComponent(sid)}/cancel`, { method: 'POST', body: params || {} });
       }
+      case 'session/group': {
+        const sid = params.sessionId || params.id || params.bridgeSessionId;
+        if (!sid) throw new Error('session/group missing sessionId');
+        return http(`/session/${encodeURIComponent(sid)}/group`, { method: 'POST', body: params || {} });
+      }
+      case 'session/model': {
+        const sid = params.sessionId || params.id || params.bridgeSessionId;
+        if (!sid) throw new Error('session/model missing sessionId');
+        return http(`/session/${encodeURIComponent(sid)}/model`, { method: 'POST', body: params || {} });
+      }
+      case 'session/agent/cancel': {
+        const sid = params.sessionId || params.id || params.bridgeSessionId;
+        const aid = params.agentId || params.aid;
+        if (!sid) throw new Error('session/agent/cancel missing sessionId');
+        if (!aid) throw new Error('session/agent/cancel missing agentId');
+        return http(`/session/${encodeURIComponent(sid)}/agents/${encodeURIComponent(aid)}/cancel`, { method: 'POST', body: params || {} });
+      }
       case 'app/path/open':
         return http('/path/open', { method: 'POST', body: params || {} });
       case 'app/path/selectProjectRoot':
@@ -128,6 +166,7 @@
   }
 
   window.zeroAgent = {
+    bridgeUrl: bridgeBase,
     platform: navigator.platform.toLowerCase().includes('mac') ? 'darwin' : 'win32',
     startBridge: async () => { connectWs(); return http('/status'); },
     stopBridge: async () => ({ ok: true }),

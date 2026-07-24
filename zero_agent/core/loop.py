@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Dict, Generator, List, Optional
 
 from zero_agent.core.hooks import HookSystem
 from zero_agent.core.interfaces import LLMClient, ToolDispatcher
-from zero_agent.core.types import StepOutcome
+from zero_agent.core.types import StepAction, StepOutcome, TerminalEvent, TerminalStatus
 from zero_agent.utils.text import smart_format
 
 if TYPE_CHECKING:
@@ -69,42 +69,25 @@ class AgentLoop:
         system_prompt: str,
         user_input: str,
         initial_user_content: Optional[str] = None,
-    ) -> Generator[Any, None, dict]:
-        """执行 agent 循环.
+    ) -> Generator[Any, None, TerminalEvent]:
+        """Execute the agent loop and return one typed terminal event."""
 
-        Generator 协议:
-            - yield str → 状态信息，供 UI 实时展示.
-            - yield dict → 结构化信息（如 {"turn": 3}）.
-            - return dict → exit_reason，如 {"result": "CURRENT_TASK_DONE", "data": ...}.
-
-        Args:
-            system_prompt: 系统提示词.
-            user_input: 用户输入（任务描述）.
-            initial_user_content: 可选的初始用户消息内容，不为 None 时覆盖 user_input.
-
-        Yields:
-            状态信息字符串或结构化 dict.
-
-        Returns:
-            exit_reason 字典，可能的值:
-                {"result": "CURRENT_TASK_DONE", "data": ...}  — 任务正常完成.
-                {"result": "EXITED", "data": ...}             — 硬退出（如 ask_user）.
-                {"result": "MAX_TURNS_EXCEEDED"}              — 超出轮次上限.
-        """
         initial_content = (
             initial_user_content if initial_user_content is not None else user_input
         )
         messages: List[Dict[str, Any]] = [
             {"role": "user", "content": initial_content},
         ]
-        # System prompt belongs to the session, not the message history. Keeping
-        # it out of messages prevents duplicate system prompts in LiteLLMSession.
         self.client.system = system_prompt
 
         turn = 0
+        terminal: Optional[TerminalEvent] = None
+        response: Any = None
         self.handler.max_turns = self.max_turns
-        # 每次新任务重置跨任务计数（空响应计数 / completion gate retry 预算）.
-        # 避免前序/中途的误判 retry 在后续任务内累积成硬退出.
+        try:
+            self.handler.last_user_request = initial_content
+        except Exception:
+            pass
         reset_session = getattr(self.handler, "reset_session_state", None)
         if callable(reset_session):
             reset_session()
@@ -119,204 +102,323 @@ class AgentLoop:
             "max_turns": self.handler.max_turns,
         })
 
-        while turn < self.handler.max_turns:
-            turn += 1
-            yield {"turn": turn}
+        try:
+            while turn < self.handler.max_turns:
+                turn += 1
+                yield {"turn": turn}
 
-            # 配置热重载：定期检测 config.yaml 的 mtime。
-            if self._agent is not None and turn % 5 == 0:
-                if self._agent.reload_config():
-                    self.client = self._agent.client
-                    self.handler = self._agent.handler
-                    self.handler.loop = self
-                    self.tools_schema = self._agent.registry.generate_openai_schema()
+                if self._agent is not None and turn % 5 == 0:
+                    if self._agent.reload_config():
+                        self.client = self._agent.client
+                        self.handler.client = self.client
 
-            if self.verbose:
-                yield f"\n\n**LLM Running (Turn {turn}) ...**\n\n"
-            else:
-                yield f"\nTurn {turn} ...\n"
+                if self.verbose:
+                    yield f"\n\n**LLM Running (Turn {turn}) ...**\n\n"
+                else:
+                    yield f"\nTurn {turn} ...\n"
 
-            # 每 10 轮重置工具描述缓存
-            if turn % 10 == 0:
-                self._clear_tool_cache()
-
-            self._trigger_hook("turn_before", {
-                "turn": turn,
-                "messages": messages,
-                "tools": self.tools_schema,
-                "model": self._model_name(),
-            })
-
-            # ——— LLM 调用 ———
-            self._trigger_hook("llm_before", {
-                "turn": turn,
-                "messages": messages,
-                "tools": self.tools_schema,
-                "model": self._model_name(),
-            })
-            response_gen = self.client.chat(
-                messages=messages, tools=self.tools_schema,
-            )
-
-            if self.verbose:
-                response = yield from response_gen
-                yield "\n\n"
-            else:
-                response = self._exhaust(response_gen)
-                cleaned = self._clean_content(response.content)
-                if cleaned:
-                    yield cleaned + "\n"
-
-            # ——— 解析工具调用 ———
-            if not response.tool_calls:
-                tool_calls = [{"tool_name": "no_tool", "args": {}}]
-            else:
-                tool_calls = []
-                for i, tc in enumerate(response.tool_calls):
-                    raw_args = tc.function.arguments
-                    try:
-                        args = json.loads(raw_args)
-                    except json.JSONDecodeError as exc:
-                        args = {
-                            "msg": (
-                                "Failed to parse tool call JSON arguments: "
-                                f"{exc}. Raw: {raw_args[:200]}"
-                            )
-                        }
-                        tool_calls.append({
-                            "tool_name": "bad_json",
-                            "args": args,
-                            "id": tc.id or f"call_{i}",
-                        })
-                        continue
-                    tool_calls.append({
-                        "tool_name": tc.function.name,
-                        "args": args,
-                        "id": tc.id or f"call_{i}",
-                    })
-
-            self._trigger_hook("llm_after", {
-                "turn": turn,
-                "response": response,
-                "tool_calls": tool_calls,
-                "usage": self._usage_from_response(response),
-                "stop_reason": getattr(response, "stop_reason", ""),
-                "model": self._model_name(),
-            })
-
-            # ——— 分发工具 ———
-            tool_results: List[Dict[str, Any]] = []
-            next_prompts: set[str] = set()
-            exit_reason: dict = {}
-
-            for ii, tc in enumerate(tool_calls):
-                tool_name: str = tc["tool_name"]
-                args: Dict[str, Any] = tc["args"]
-                tid: str = tc.get("id", "")
-
-                if tool_name != "no_tool":
-                    if self.verbose:
-                        yield (
-                            f"Tool: `{tool_name}`  "
-                            f"args:\n```text\n{self._pretty_json(args)}\n```\n"
-                        )
-                    else:
-                        yield f"{tool_name}({self._compact_args(tool_name, args)})\n\n"
-
-                self.handler.current_turn = turn
-                gen = self.handler.dispatch(
-                    tool_name, args, response,
-                    index=ii, tool_num=len(tool_calls),
-                )
-
-                outcome = yield from self._consume_dispatch(gen)
-
-                if outcome.should_exit:
-                    exit_reason = {"result": "EXITED", "data": outcome.data}
-                    break
-
-                if not outcome.next_prompt:
-                    exit_reason = {
-                        "result": "CURRENT_TASK_DONE",
-                        "data": outcome.data,
-                    }
-                    break
-
-                if self._is_unknown_tool_prompt(outcome.next_prompt):
+                if turn % 10 == 0:
                     self._clear_tool_cache()
 
-                if outcome.data is not None and tool_name != "no_tool":
-                    datastr = (
-                        json.dumps(
-                            outcome.data,
-                            ensure_ascii=False,
-                            default=self._json_default,
-                        )
-                        if isinstance(outcome.data, (dict, list))
-                        else str(outcome.data)
-                    )
-                    tool_results.append({
-                        "tool_use_id": tid,
-                        "content": datastr,
-                    })
+                self._trigger_hook("turn_before", {
+                    "turn": turn,
+                    "messages": messages,
+                    "tools": self.tools_schema,
+                    "model": self._model_name(),
+                })
+                self._trigger_hook("llm_before", {
+                    "turn": turn,
+                    "messages": messages,
+                    "tools": self.tools_schema,
+                    "model": self._model_name(),
+                })
+                response_gen = self.client.chat(
+                    messages=messages, tools=self.tools_schema,
+                )
 
-                next_prompts.add(outcome.next_prompt)
-
-            # ——— 退出判断 ———
-            if not next_prompts or exit_reason:
-                if (
-                    self.handler._done_hooks
-                    and exit_reason.get("result") != "EXITED"
-                ):
-                    next_prompts.add(self.handler._done_hooks.pop(0))
+                if self.verbose:
+                    response = yield from response_gen
+                    yield "\n\n"
                 else:
-                    if exit_reason:
-                        self.handler.turn_end_callback(
-                            response, tool_calls, tool_results, turn,
-                            "", exit_reason,
+                    response = self._exhaust(response_gen)
+                    cleaned = self._clean_content(response.content)
+                    if cleaned:
+                        yield cleaned + "\n"
+
+                if not response.tool_calls:
+                    tool_calls = [{"tool_name": "no_tool", "args": {}}]
+                else:
+                    tool_calls = []
+                    for i, tc in enumerate(response.tool_calls):
+                        raw_args = tc.function.arguments
+                        raw_args_text = (
+                            raw_args if isinstance(raw_args, str)
+                            else json.dumps(raw_args, ensure_ascii=False, default=self._json_default)
                         )
+                        tool_call_id = tc.id or f"call_{i}"
+                        try:
+                            args = json.loads(raw_args_text)
+                        except json.JSONDecodeError as exc:
+                            args = {
+                                "msg": (
+                                    "Failed to parse tool call JSON arguments: "
+                                    f"{exc}. Raw: {raw_args_text[:200]}"
+                                )
+                            }
+                            tool_calls.append({
+                                "tool_name": "bad_json",
+                                "args": args,
+                                "id": tool_call_id,
+                            })
+                            continue
+                        if not isinstance(args, dict):
+                            args = {
+                                "msg": (
+                                    "function.arguments must decode to a JSON object, "
+                                    f"got {self._json_type_name(args)}"
+                                )
+                            }
+                            tool_calls.append({
+                                "tool_name": "bad_json",
+                                "args": args,
+                                "id": tool_call_id,
+                            })
+                            continue
+                        if args.get("_malformed") is True:
+                            args = {
+                                "msg": str(
+                                    args.get("_error")
+                                    or "function.arguments contained malformed tool arguments"
+                                )
+                            }
+                            tool_calls.append({
+                                "tool_name": "bad_json",
+                                "args": args,
+                                "id": tool_call_id,
+                            })
+                            continue
+                        tool_calls.append({
+                            "tool_name": tc.function.name,
+                            "args": args,
+                            "id": tool_call_id,
+                        })
+
+                self._trigger_hook("llm_after", {
+                    "turn": turn,
+                    "response": response,
+                    "tool_calls": tool_calls,
+                    "usage": self._usage_from_response(response),
+                    "stop_reason": getattr(response, "stop_reason", ""),
+                    "model": self._model_name(),
+                })
+
+                tool_results: List[Dict[str, Any]] = []
+                next_prompts: set[str] = set()
+                turn_terminal: Optional[TerminalEvent] = None
+
+                for ii, tc in enumerate(tool_calls):
+                    tool_name: str = tc["tool_name"]
+                    args: Dict[str, Any] = tc["args"]
+                    tid: str = tc.get("id", "")
+
+                    if tool_name != "no_tool":
+                        if self.verbose:
+                            yield (
+                                f"Tool: `{tool_name}`  "
+                                f"args:\n```text\n{self._pretty_json(args)}\n```\n"
+                            )
+                        else:
+                            yield f"{tool_name}({self._compact_args(tool_name, args)})\n\n"
+
+                    self.handler.current_turn = turn
+                    if tool_name == "no_tool":
+                        self.handler.completion_certificate = None
+                    gen = self.handler.dispatch(
+                        tool_name, args, response,
+                        index=ii, tool_num=len(tool_calls),
+                    )
+                    outcome = yield from self._consume_dispatch(gen)
+
+                    if not self._valid_step_outcome(outcome):
+                        turn_terminal = TerminalEvent(
+                            status=TerminalStatus.PROTOCOL_ERROR,
+                            reason="invalid_step_outcome",
+                            data=outcome,
+                            turn=turn,
+                        )
+                        break
+
+                    if outcome.action == StepAction.WAIT_FOR_USER:
+                        turn_terminal = TerminalEvent(
+                            status=TerminalStatus.WAITING,
+                            reason="human_intervention",
+                            text=str(getattr(response, "content", "") or ""),
+                            data=outcome.data,
+                            turn=turn,
+                        )
+                        break
+
+                    if outcome.action == StepAction.FAIL:
+                        turn_terminal = TerminalEvent(
+                            status=outcome.terminal_status or TerminalStatus.FAILED,
+                            reason=outcome.reason,
+                            text=str(getattr(response, "content", "") or ""),
+                            data=outcome.data,
+                            turn=turn,
+                        )
+                        break
+
+                    if outcome.action == StepAction.REQUEST_COMPLETION:
+                        certificate = getattr(self.handler, "completion_certificate", None)
+                        if certificate is None:
+                            turn_terminal = TerminalEvent(
+                                status=TerminalStatus.PROTOCOL_ERROR,
+                                reason="invalid_step_outcome",
+                                data=outcome.data,
+                                turn=turn,
+                            )
+                        else:
+                            turn_terminal = TerminalEvent(
+                                status=TerminalStatus.COMPLETED,
+                                reason="completion_certificate",
+                                text=str(getattr(response, "content", "") or ""),
+                                data=outcome.data,
+                                turn=turn,
+                                certificate=certificate,
+                            )
+                        break
+
+                    if self._is_unknown_tool_prompt(outcome.next_prompt or ""):
+                        self._clear_tool_cache()
+
+                    if outcome.data is not None and tool_name != "no_tool":
+                        datastr = (
+                            json.dumps(
+                                outcome.data,
+                                ensure_ascii=False,
+                                default=self._json_default,
+                            )
+                            if isinstance(outcome.data, (dict, list))
+                            else str(outcome.data)
+                        )
+                        tool_results.append({
+                            "tool_use_id": tid,
+                            "content": datastr,
+                        })
+
+                    next_prompts.add(outcome.next_prompt or "")
+
+                if (
+                    turn_terminal is not None
+                    and turn_terminal.status == TerminalStatus.COMPLETED
+                    and self.handler._done_hooks
+                ):
+                    self.handler.completion_certificate = None
+                    next_prompts.add(self.handler._done_hooks.pop(0))
+                    turn_terminal = None
+
+                if turn_terminal is not None:
+                    self.handler.turn_end_callback(
+                        response, tool_calls, tool_results, turn,
+                        "", turn_terminal,
+                    )
                     self._trigger_hook("turn_after", {
                         "turn": turn,
                         "response": response,
                         "tool_calls": tool_calls,
                         "tool_results": tool_results,
                         "next_prompt": "",
-                        "exit_reason": exit_reason,
+                        "terminal": turn_terminal,
+                        "model": self._model_name(),
+                    })
+                    terminal = turn_terminal
+                    break
+
+                if not next_prompts:
+                    terminal = TerminalEvent(
+                        status=TerminalStatus.PROTOCOL_ERROR,
+                        reason="invalid_step_outcome",
+                        turn=turn,
+                    )
+                    self.handler.turn_end_callback(
+                        response, tool_calls, tool_results, turn, "", terminal,
+                    )
+                    self._trigger_hook("turn_after", {
+                        "turn": turn,
+                        "response": response,
+                        "tool_calls": tool_calls,
+                        "tool_results": tool_results,
+                        "next_prompt": "",
+                        "terminal": terminal,
                         "model": self._model_name(),
                     })
                     break
 
-            # ——— 构建下一轮 prompt ———
-            next_prompt = "\n".join(next_prompts)
-            next_prompt = self.handler.turn_end_callback(
-                response, tool_calls, tool_results, turn,
-                next_prompt, exit_reason,
+                next_prompt = "\n".join(next_prompts)
+                next_prompt = self.handler.turn_end_callback(
+                    response, tool_calls, tool_results, turn,
+                    next_prompt, None,
+                )
+                messages = self._build_next_messages(next_prompt, tool_results)
+
+                self._trigger_hook("turn_after", {
+                    "turn": turn,
+                    "response": response,
+                    "tool_calls": tool_calls,
+                    "tool_results": tool_results,
+                    "next_prompt": next_prompt,
+                    "terminal": None,
+                    "model": self._model_name(),
+                })
+        except Exception as exc:
+            terminal = TerminalEvent(
+                status=TerminalStatus.FAILED,
+                reason=exc.__class__.__name__,
+                text=str(getattr(response, "content", "") or ""),
+                data={"error": str(exc)},
+                turn=turn,
             )
 
-            # 下一轮只发工具结果和新的 user message（session 内部维护完整历史）
-            messages = self._build_next_messages(next_prompt, tool_results)
+        if terminal is None:
+            terminal = TerminalEvent(
+                status=TerminalStatus.BUDGET_EXHAUSTED,
+                reason="max_turns",
+                text=str(getattr(response, "content", "") or ""),
+                turn=turn,
+            )
 
-            self._trigger_hook("turn_after", {
-                "turn": turn,
-                "response": response,
-                "tool_calls": tool_calls,
-                "tool_results": tool_results,
-                "next_prompt": next_prompt,
-                "exit_reason": exit_reason,
-                "model": self._model_name(),
-            })
-
-        # agent_after 钩子
-        final_reason = exit_reason or {"result": "MAX_TURNS_EXCEEDED"}
         self._trigger_hook("agent_after", {
             "turns": turn,
-            "exit_reason": final_reason,
+            "terminal": terminal,
             "model": self._model_name(),
         })
-
-        return final_reason
+        return terminal
 
     # ---- dispatch 消费 ----
+
+    @staticmethod
+    def _valid_step_outcome(outcome: Any) -> bool:
+        """Return whether a handler outcome satisfies the control invariants."""
+
+        if not isinstance(outcome, StepOutcome):
+            return False
+        if outcome.action == StepAction.CONTINUE:
+            return bool(outcome.next_prompt)
+        if outcome.action == StepAction.REQUEST_COMPLETION:
+            return outcome.next_prompt is None and outcome.terminal_status is None
+        if outcome.action == StepAction.WAIT_FOR_USER:
+            return outcome.next_prompt is None and outcome.terminal_status is None
+        if outcome.action == StepAction.FAIL:
+            return (
+                outcome.next_prompt is None
+                and bool(outcome.reason)
+                and outcome.terminal_status in {
+                    TerminalStatus.FAILED,
+                    TerminalStatus.BUDGET_EXHAUSTED,
+                    TerminalStatus.PROTOCOL_ERROR,
+                }
+            )
+        return False
 
     def _record_user_history(self, content: Any) -> None:
         """Record a compact [USER] entry in handler.history_info."""
@@ -346,8 +448,13 @@ class AgentLoop:
 
     @staticmethod
     def _is_unknown_tool_prompt(prompt: str) -> bool:
-        stripped = (prompt or "").lstrip()
-        return stripped.startswith("未知工具") or stripped.startswith("Unknown tool")
+        stripped = (prompt or "").lstrip().lower()
+        return (
+            stripped.startswith("未知工具")
+            or stripped.startswith("unknown tool")
+            or "不存在的工具" in stripped
+            or "unknown tool" in stripped
+        )
 
     def _clear_tool_cache(self) -> None:
         """Force full tool protocol resend after tool routing failures."""
@@ -489,6 +596,22 @@ class AgentLoop:
         if isinstance(o, set):
             return list(o)
         return str(o)
+
+    @staticmethod
+    def _json_type_name(value: Any) -> str:
+        """Return the JSON type name used in native tool argument errors."""
+
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, list):
+            return "list"
+        if isinstance(value, str):
+            return "string"
+        if isinstance(value, (int, float)):
+            return "number"
+        return type(value).__name__
 
     @staticmethod
     def _pretty_json(data: Any) -> str:

@@ -1,5 +1,7 @@
 """Tests for LiteLLMSession message normalization."""
 
+from types import SimpleNamespace
+
 from zero_agent.core.config import LLMBackendConfig
 from zero_agent.llm.sessions import LiteLLMSession
 
@@ -276,7 +278,7 @@ def test_text_tool_syntax_is_not_parsed_as_native_tool_call(monkeypatch) -> None
         raise AssertionError("chat generator should finish")
 
     assert response.tool_calls == []
-    assert response.stop_reason == "stop"
+    assert response.stop_reason == "end_turn"
 
 
 def test_compress_history_tags_replaces_old_tags() -> None:
@@ -429,3 +431,105 @@ def test_build_completion_kwargs_default_chat_completions_omits_api_mode() -> No
         stream=True,
     )
     assert "api_mode" not in kwargs
+
+
+def _drain_chat(gen):
+    chunks = []
+    try:
+        while True:
+            chunks.append(next(gen))
+    except StopIteration as exc:
+        return chunks, exc.value
+
+
+def test_sync_chat_preserves_native_usage_protocol_and_normalizes_stop(monkeypatch) -> None:
+    usage = SimpleNamespace(prompt_tokens=3, completion_tokens=4)
+
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="hello", reasoning_content="", tool_calls=None),
+                finish_reason="stop",
+            )
+        ],
+        usage=usage,
+    )
+    monkeypatch.setattr(
+        "zero_agent.llm.sessions.litellm.completion",
+        lambda **kwargs: response,
+    )
+
+    session = _make_session()
+    session.config.stream = False
+    chunks, mock = _drain_chat(session.chat([{"role": "user", "content": "hi"}], tools=[]))
+
+    assert chunks == ["hello"]
+    assert mock.usage is usage
+    assert mock.tool_protocol == "native"
+    assert mock.stop_reason == "end_turn"
+
+
+def test_stream_chat_preserves_accumulated_fields_when_final_chunk_has_no_message(monkeypatch) -> None:
+    usage = SimpleNamespace(prompt_tokens=5, completion_tokens=6)
+
+    def make_chunk(delta=None, finish_reason=None, chunk_usage=None):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(delta=delta, message=None, finish_reason=finish_reason)],
+            usage=chunk_usage,
+        )
+
+    chunks = [
+        make_chunk(SimpleNamespace(content="hi ", reasoning_content="think ", tool_calls=None)),
+        make_chunk(SimpleNamespace(content="there", reasoning_content="more", tool_calls=None)),
+        make_chunk(None, finish_reason="stop", chunk_usage=usage),
+    ]
+    monkeypatch.setattr(
+        "zero_agent.llm.sessions.litellm.completion",
+        lambda **kwargs: iter(chunks),
+    )
+
+    session = _make_session()
+    session.config.stream = True
+    streamed, mock = _drain_chat(session.chat([{"role": "user", "content": "hi"}], tools=[]))
+
+    assert streamed == ["hi ", "there"]
+    assert mock.content == "hi there"
+    assert mock.thinking == "think more"
+    assert mock.usage is usage
+    assert mock.tool_protocol == "native"
+    assert mock.stop_reason == "end_turn"
+
+
+def test_stream_chat_picks_last_non_empty_usage_and_normalizes_tool_stop(monkeypatch) -> None:
+    usage = SimpleNamespace(prompt_tokens=7, completion_tokens=8)
+    tool_delta = SimpleNamespace(
+        index=0,
+        id="call_1",
+        function=SimpleNamespace(name="file_read", arguments='{"path":"a"}'),
+    )
+
+    def make_chunk(delta=None, finish_reason=None, chunk_usage=None):
+        return SimpleNamespace(
+            choices=[SimpleNamespace(delta=delta, message=None, finish_reason=finish_reason)],
+            usage=chunk_usage,
+        )
+
+    chunks = [
+        make_chunk(SimpleNamespace(content=None, reasoning_content="", tool_calls=[tool_delta]), chunk_usage=usage),
+        make_chunk(None, finish_reason="stop", chunk_usage=None),
+    ]
+    monkeypatch.setattr(
+        "zero_agent.llm.sessions.litellm.completion",
+        lambda **kwargs: iter(chunks),
+    )
+
+    session = _make_session()
+    session.config.stream = True
+    streamed, mock = _drain_chat(session.chat([{"role": "user", "content": "read"}], tools=[]))
+
+    assert streamed == []
+    assert len(mock.tool_calls) == 1
+    assert mock.tool_calls[0].function.name == "file_read"
+    assert mock.usage is usage
+    assert mock.tool_protocol == "native"
+    assert mock.stop_reason == "tool_use"

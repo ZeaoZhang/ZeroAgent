@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from zero_agent.bots.common import (
+    AgentBotMixin,
     clean_reply,
     extract_files,
     split_text,
@@ -22,6 +23,8 @@ from zero_agent.bots.common import (
     load_keys,
     public_access,
     to_allowed_set,
+    extract_waiting_event,
+    terminal_notice,
 )
 from zero_agent.bots.shared.continue_cmd import (
     _pairs,
@@ -82,6 +85,118 @@ class TestCommonHelpers:
                 f.write("data")
             result = build_done_text(f"Done. [FILE:{fpath}]")
             assert "out.txt" in result
+
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            ("cancelled", "已停止"),
+            ("failed", "任务失败"),
+            ("protocol_error", "协议错误"),
+            ("budget_exhausted", "任务未完成"),
+        ],
+    )
+    def test_terminal_notice_preserves_non_success_status(self, status, expected):
+        text = terminal_notice({
+            "type": "terminal",
+            "status": status,
+            "reason": "test_reason",
+        })
+        assert expected in text
+        assert "任务完成" not in text
+
+    def test_waiting_terminal_uses_human_intervention_payload(self):
+        terminal = {
+            "type": "terminal",
+            "status": "waiting",
+            "reason": "human_intervention",
+            "text": "",
+            "data": {
+                "status": "INTERRUPT",
+                "intent": "HUMAN_INTERVENTION",
+                "data": {
+                    "question": "继续吗？",
+                    "candidates": ["继续", "停止"],
+                },
+            },
+        }
+
+        assert extract_waiting_event(terminal) == {
+            "question": "继续吗？",
+            "candidates": ["继续", "停止"],
+        }
+        notice = terminal_notice(terminal)
+        assert "继续吗" in notice
+        assert "继续" in notice
+        assert "完成" not in notice
+
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "expected"),
+        [
+            ("waiting", "请提供"),
+            ("cancelled", "已停止"),
+            ("failed", "任务失败"),
+            ("protocol_error", "协议错误"),
+            ("budget_exhausted", "任务未完成"),
+        ],
+    )
+    async def test_agent_mixin_consumes_terminal_statuses(self, status, expected):
+        class FakeRunner:
+            is_running = False
+
+            def put_task(self, *_args, **_kwargs):
+                dq = queue.Queue()
+                dq.put({
+                    "type": "terminal",
+                    "status": status,
+                    "reason": "test_reason",
+                    "text": "",
+                    "data": {"question": "请提供下一步输入。", "candidates": []},
+                })
+                return dq
+
+        class Bot(AgentBotMixin):
+            def __init__(self):
+                super().__init__(FakeRunner(), {})
+                self.sent = []
+
+            async def send_text(self, _chat_id, content, **_ctx):
+                self.sent.append(content)
+
+        bot = Bot()
+        await bot.run_agent("chat", "task")
+
+        assert expected in bot.sent[-1]
+        assert "任务完成" not in bot.sent[-1]
+
+    @pytest.mark.asyncio
+    async def test_agent_mixin_completed_uses_final_text(self):
+        class FakeRunner:
+            is_running = False
+
+            def put_task(self, *_args, **_kwargs):
+                dq = queue.Queue()
+                dq.put({
+                    "type": "terminal",
+                    "status": "completed",
+                    "reason": "completion_certificate",
+                    "text": "final answer",
+                })
+                return dq
+
+        class Bot(AgentBotMixin):
+            def __init__(self):
+                super().__init__(FakeRunner(), {})
+                self.sent = []
+
+            async def send_text(self, _chat_id, content, **_ctx):
+                self.sent.append(content)
+
+        bot = Bot()
+        await bot.run_agent("chat", "task")
+
+        assert bot.sent[-1] == "final answer"
 
     def test_build_help_text(self):
         text = build_help_text()
@@ -236,6 +351,7 @@ class TestContinueCmd:
         msg = reset_conversation(mock_runner)
         assert "新对话" in msg
         mock_runner.abort.assert_called_once()
+        mock_runner.clear_pending_task.assert_called_once_with()
 
     def test_handle_frontend_continue_list(self):
         mock_runner = MagicMock()
@@ -289,7 +405,14 @@ class TestBtwCmd:
             def put_task(self, prompt, source="user"):
                 self.received.append((prompt, source))
                 dq = queue.Queue()
-                dq.put({"done": "side answer", "source": source})
+                dq.put({
+                    "type": "terminal",
+                    "status": "completed",
+                    "reason": "completion_certificate",
+                    "text": "side answer",
+                    "source": source,
+                    "turn": 1,
+                })
                 return dq
 
         side_runner = SideRunner()
@@ -317,7 +440,9 @@ class TestReviewCmd:
         assert result is None
         dq.put.assert_called_once()
         args = dq.put.call_args[0][0]
-        assert "用法" in args.get("done", "")
+        assert args.get("type") == "terminal"
+        assert args.get("status") == "completed"
+        assert "用法" in args.get("text", "")
 
     def test_handle_default(self):
         dq = MagicMock()

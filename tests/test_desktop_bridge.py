@@ -8,6 +8,10 @@ import json
 import queue
 from pathlib import Path
 
+import pytest
+from aiohttp import WSServerHandshakeError
+from aiohttp.test_utils import TestClient, TestServer
+
 from zero_agent.core.config import AgentConfig, LLMBackendConfig
 from zero_agent.frontends import desktop_bridge
 
@@ -106,8 +110,186 @@ def test_create_app_exposes_desktop_http_contract() -> None:
     assert ("POST", "/session/{sid}/prompt") in routes
     assert ("GET", "/session/{sid}/messages") in routes
     assert ("POST", "/session/{sid}/cancel") in routes
+    assert ("POST", "/session/{sid}/model") in routes
+    assert ("POST", "/session/{sid}/group") in routes
+    assert ("POST", "/session/{sid}/agents/{aid}/cancel") in routes
     assert ("GET", "/ws") in routes
 
+
+
+def _bridge_security(token: str = "secret", origin: str = "http://127.0.0.1:14168") -> desktop_bridge.BridgeSecurity:
+    return desktop_bridge.BridgeSecurity(
+        host="127.0.0.1",
+        port=14168,
+        token=token,
+        token_explicit=True,
+        allowed_origins=frozenset({origin}),
+        allow_remote=False,
+    )
+
+
+async def _open_test_client(security: desktop_bridge.BridgeSecurity | None = None) -> TestClient:
+    client = TestClient(TestServer(desktop_bridge.create_app(security=security or _bridge_security())))
+    await client.start_server()
+    return client
+
+
+def test_load_bridge_security_generates_token_when_absent(monkeypatch) -> None:
+    monkeypatch.delenv("ZA_DESKTOP_BRIDGE_TOKEN", raising=False)
+    monkeypatch.setenv("ZA_DESKTOP_BRIDGE_ALLOWED_ORIGINS", "https://desktop.example/")
+    monkeypatch.delenv("ZA_DESKTOP_BRIDGE_ALLOW_REMOTE", raising=False)
+    monkeypatch.setattr(desktop_bridge.secrets, "token_urlsafe", lambda size: f"generated-{size}")
+
+    security = desktop_bridge.load_bridge_security("127.0.0.1", 14168)
+
+    assert security.token == "generated-32"
+    assert security.token_explicit is False
+    assert "http://127.0.0.1:14168" in security.allowed_origins
+    assert "http://localhost:14168" in security.allowed_origins
+    assert "https://desktop.example" in security.allowed_origins
+
+
+def test_load_bridge_security_remote_host_requires_allow_flag_and_explicit_token(monkeypatch) -> None:
+    monkeypatch.delenv("ZA_DESKTOP_BRIDGE_TOKEN", raising=False)
+    monkeypatch.delenv("ZA_DESKTOP_BRIDGE_ALLOW_REMOTE", raising=False)
+
+    with pytest.raises(ValueError):
+        desktop_bridge.load_bridge_security("0.0.0.0", 14168)
+
+    monkeypatch.setenv("ZA_DESKTOP_BRIDGE_ALLOW_REMOTE", "1")
+    with pytest.raises(ValueError):
+        desktop_bridge.load_bridge_security("0.0.0.0", 14168)
+
+    monkeypatch.setenv("ZA_DESKTOP_BRIDGE_TOKEN", "explicit-token")
+    security = desktop_bridge.load_bridge_security("0.0.0.0", 14168)
+
+    assert security.allow_remote is True
+    assert security.token == "explicit-token"
+    assert security.token_explicit is True
+
+
+def test_desktop_bridge_public_status_is_constrained_and_anonymous() -> None:
+    async def run() -> None:
+        client = await _open_test_client()
+        try:
+            async with client.get("/status") as resp:
+                payload = await resp.json()
+                assert resp.status == 200
+                assert set(payload) == {"ok", "running", "ready", "authRequired"}
+                assert payload == {"ok": True, "running": True, "ready": True, "authRequired": True}
+            async with client.get("/") as resp:
+                assert resp.status == 200
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_desktop_bridge_api_requires_token() -> None:
+    async def run() -> None:
+        client = await _open_test_client()
+        try:
+            async with client.get("/config") as resp:
+                assert resp.status == 401
+            async with client.get("/config", headers={"Authorization": "Bearer wrong"}) as resp:
+                assert resp.status == 401
+            async with client.get(
+                "/config",
+                headers={"Authorization": "Bearer wrong", "X-ZA-Desktop-Token": "secret"},
+            ) as resp:
+                assert resp.status == 200
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_desktop_bridge_origin_is_checked_before_token() -> None:
+    async def run() -> None:
+        client = await _open_test_client()
+        try:
+            async with client.get(
+                "/config",
+                headers={"Origin": "http://evil.invalid", "Authorization": "Bearer secret"},
+            ) as resp:
+                assert resp.status == 403
+                assert "Access-Control-Allow-Origin" not in resp.headers
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_desktop_bridge_allows_token_and_exact_origin_cors() -> None:
+    origin = "http://127.0.0.1:14168"
+
+    async def run() -> None:
+        client = await _open_test_client(_bridge_security(origin=origin))
+        try:
+            async with client.get(
+                "/config",
+                headers={"Origin": origin, "Authorization": "Bearer secret"},
+            ) as resp:
+                payload = await resp.json()
+                assert resp.status == 200
+                assert payload["workspaceDir"]
+                assert resp.headers["Access-Control-Allow-Origin"] == origin
+                assert resp.headers["Access-Control-Allow-Origin"] != "*"
+            async with client.get(
+                "/sessions",
+                headers={"Origin": origin, "X-ZA-Desktop-Token": "secret"},
+            ) as resp:
+                payload = await resp.json()
+                assert resp.status == 200
+                assert "sessions" in payload
+                assert resp.headers["Access-Control-Allow-Origin"] == origin
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_desktop_bridge_options_returns_allowed_cors() -> None:
+    origin = "http://127.0.0.1:14168"
+
+    async def run() -> None:
+        client = await _open_test_client(_bridge_security(origin=origin))
+        try:
+            async with client.options(
+                "/config",
+                headers={"Origin": origin, "Access-Control-Request-Method": "GET"},
+            ) as resp:
+                assert resp.status == 204
+                assert resp.headers["Access-Control-Allow-Origin"] == origin
+                assert resp.headers["Access-Control-Allow-Origin"] != "*"
+                assert "Authorization" in resp.headers["Access-Control-Allow-Headers"]
+                assert "X-ZA-Desktop-Token" in resp.headers["Access-Control-Allow-Headers"]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_desktop_bridge_ws_requires_query_token_and_sends_bridge_ready() -> None:
+    async def run() -> None:
+        client = await _open_test_client()
+        try:
+            with pytest.raises(WSServerHandshakeError) as exc:
+                await client.ws_connect("/ws")
+            assert exc.value.status == 401
+
+            ws = await client.ws_connect("/ws?token=secret")
+            try:
+                payload = await ws.receive_json()
+                assert payload["type"] == "bridge-ready"
+                assert payload["http"] is True
+                assert payload["wsEventsOnly"] is True
+            finally:
+                await ws.close()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
 
 def test_web_bridge_and_tauri_share_desktop_static_frontend() -> None:
     root = Path(__file__).resolve().parents[1]
@@ -128,7 +310,10 @@ def test_desktop_bridge_cli_opens_browser_but_tauri_disables_it() -> None:
         root / "zero_agent" / "frontends" / "desktop" / "src-tauri" / "src" / "lib.rs"
     ).read_text(encoding="utf-8")
 
-    assert "webbrowser.open(url)" in bridge_source
+    assert "webbrowser.open(browser_url)" in bridge_source
+    assert "fn stop_owned_bridge()" in tauri_source
+    assert "stop_owned_bridge();" in tauri_source
+    assert "#token=" in bridge_source
     assert "ZA_DESKTOP_BRIDGE_NO_BROWSER" in bridge_source
     assert '.env("ZA_DESKTOP_BRIDGE_NO_BROWSER", "1")' in tauri_source
 
@@ -205,6 +390,41 @@ def test_resume_session_listing_defaults_to_ten(monkeypatch, tmp_path) -> None:
     assert sessions[-1]["index"] == 10
 
 
+def _terminal(status: str, reason: str, text: str = "", data=None) -> dict:
+    return {
+        "type": "terminal",
+        "status": status,
+        "reason": reason,
+        "text": text,
+        "data": data,
+        "turn": 1,
+        "source": "agent",
+        "certificate": None,
+    }
+
+
+def _run_terminal(status: str, reason: str, text: str = "", data=None):
+    class TerminalRunner:
+        def put_task(self, prompt, images=None):
+            out = queue.Queue()
+            out.put(_terminal(status, reason, text, data))
+            return out
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session(cwd=manager.workspace_dir)
+    sess.agent = TerminalRunner()
+    manager.add_message(sess, "user", "hello")
+    sess.status = "running"
+    sess.partial = {
+        "id": sess.msg_seq + 1,
+        "role": "assistant",
+        "content": "partial",
+        "partial": True,
+    }
+    manager.run_agent_turn(sess, "hello")
+    return sess
+
+
 def test_run_agent_turn_keeps_cumulative_partial_once() -> None:
     class DummyRunner:
         def __init__(self):
@@ -213,9 +433,9 @@ def test_run_agent_turn_keeps_cumulative_partial_once() -> None:
         def put_task(self, prompt, images=None):
             self.prompts.append((prompt, images))
             out = queue.Queue()
-            out.put({"next": "Hel"})
-            out.put({"next": "Hello"})
-            out.put({"done": "Hello"})
+            out.put({"type": "chunk", "text": "Hel", "source": "agent", "turn": 1})
+            out.put({"type": "chunk", "text": "Hello", "source": "agent", "turn": 1})
+            out.put(_terminal("completed", "completion_certificate", "Hello"))
             return out
 
     manager = desktop_bridge.AgentManager()
@@ -241,15 +461,60 @@ def test_run_agent_turn_keeps_cumulative_partial_once() -> None:
     assert "HelHello" not in sess.messages[-1]["content"]
 
 
+def test_run_agent_turn_refreshes_token_usage() -> None:
+    class FakeConfig:
+        context_window = 12345
+
+    class FakeClient:
+        config = FakeConfig()
+        _context_window = 12345
+        system = "system prompt"
+        history = [{"role": "user", "content": "hello"}]
+        usage_stats = {
+            "total_input_tokens": 111,
+            "total_output_tokens": 22,
+        }
+
+    class FakeAgent:
+        client = FakeClient()
+
+    class TokenRunner:
+        _agent = FakeAgent()
+
+        def put_task(self, prompt, images=None):
+            out = queue.Queue()
+            out.put({"type": "chunk", "text": "Hello", "source": "agent", "turn": 1})
+            out.put(_terminal("completed", "completion_certificate", "Hello"))
+            return out
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session(cwd=manager.workspace_dir)
+    sess.agent = TokenRunner()
+    manager.add_message(sess, "user", "hello")
+    sess.status = "running"
+    sess.partial = {
+        "id": sess.msg_seq + 1,
+        "role": "assistant",
+        "content": "",
+        "partial": True,
+    }
+
+    manager.run_agent_turn(sess, "hello")
+
+    assert sess.token_usage["input"] == 111
+    assert sess.token_usage["output"] == 22
+    assert sess.token_usage["total"] > 0
+    assert sess.token_usage["limit"] == 12345
+
 def test_run_agent_turn_preserves_incremental_runner_chunks() -> None:
     class IncrementalRunner:
         inc_out = True
 
         def put_task(self, prompt, images=None):
             out = queue.Queue()
-            out.put({"next": "Hel"})
-            out.put({"next": "lo"})
-            out.put({"done": "Hello"})
+            out.put({"type": "chunk", "text": "Hel", "source": "agent", "turn": 1})
+            out.put({"type": "chunk", "text": "lo", "source": "agent", "turn": 1})
+            out.put(_terminal("completed", "completion_certificate", "Hello"))
             return out
 
     manager = desktop_bridge.AgentManager()
@@ -269,6 +534,79 @@ def test_run_agent_turn_preserves_incremental_runner_chunks() -> None:
     assert sess.status == "idle"
     assert sess.partial is None
     assert sess.messages[-1]["content"] == "Hello"
+
+
+def test_run_agent_turn_waiting_adds_input_required_message() -> None:
+    data = {
+        "status": "INTERRUPT",
+        "intent": "HUMAN_INTERVENTION",
+        "data": {"question": "Continue?", "candidates": ["yes", "no"]},
+    }
+
+    sess = _run_terminal("waiting", "human_intervention", data=data)
+
+    assert sess.status == "waiting"
+    assert sess.terminal_status == "waiting"
+    assert sess.terminal_reason == "human_intervention"
+    assert sess.partial is None
+    message = sess.messages[-1]
+    assert message["role"] == "system"
+    assert message["content"] == "Continue?"
+    assert message["kind"] == "input_required"
+    assert message["candidates"] == ["yes", "no"]
+
+
+def test_run_agent_turn_budget_exhausted_is_error_with_reason() -> None:
+    sess = _run_terminal("budget_exhausted", "max_turns", "Task did not complete")
+
+    assert sess.status == "error"
+    assert sess.last_error == "max_turns"
+    assert sess.terminal_status == "budget_exhausted"
+    assert sess.terminal_reason == "max_turns"
+    assert sess.messages[-1]["role"] == "error"
+
+
+def test_run_agent_turn_failed_is_error_with_reason() -> None:
+    sess = _run_terminal("failed", "RuntimeError", "Operation failed")
+
+    assert sess.status == "error"
+    assert sess.last_error == "RuntimeError"
+    assert sess.terminal_status == "failed"
+    assert sess.terminal_reason == "RuntimeError"
+
+
+def test_run_agent_turn_protocol_error_is_error_with_reason() -> None:
+    sess = _run_terminal("protocol_error", "invalid_step_outcome", "Protocol error")
+
+    assert sess.status == "error"
+    assert sess.last_error == "invalid_step_outcome"
+    assert sess.terminal_status == "protocol_error"
+
+
+def test_run_agent_turn_cancelled_clears_partial_without_assistant_completion() -> None:
+    sess = _run_terminal("cancelled", "user_cancelled", "partial")
+
+    assert sess.status == "cancelled"
+    assert sess.partial is None
+    assert sess.terminal_status == "cancelled"
+    assert sess.terminal_reason == "user_cancelled"
+    assert all(message["role"] != "assistant" for message in sess.messages)
+
+
+def test_emit_session_state_includes_terminal_details(monkeypatch) -> None:
+    emitted = []
+    monkeypatch.setattr(desktop_bridge.hub, "emit", emitted.append)
+    sess = desktop_bridge.Session(
+        id="session-1",
+        status="error",
+        terminal_status="budget_exhausted",
+        terminal_reason="max_turns",
+    )
+
+    desktop_bridge.emit_session_state(sess, "error")
+
+    assert emitted[-1]["terminalStatus"] == "budget_exhausted"
+    assert emitted[-1]["reason"] == "max_turns"
 
 
 def test_cancel_marks_session_cancelled_and_aborts_runner() -> None:
@@ -292,3 +630,5 @@ def test_cancel_marks_session_cancelled_and_aborts_runner() -> None:
     assert runner.aborted is True
     assert sess.status == "cancelled"
     assert sess.partial is None
+    assert sess.terminal_status == "cancelled"
+    assert sess.terminal_reason == "user_cancelled"

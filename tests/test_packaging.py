@@ -33,6 +33,12 @@ def test_console_entrypoints_are_importable() -> None:
         module = importlib.import_module(module_name)
         assert callable(getattr(module, attr_name))
 
+def test_launcher_entrypoint_is_declared() -> None:
+    """pywebview 桌面启动器应作为 console script 发布。"""
+    scripts = _pyproject()["project"]["scripts"]
+
+    assert scripts["zero-agent-launcher"] == "zero_agent.frontends.launcher:main"
+
 
 def test_frontend_package_data_tracks_desktop_assets() -> None:
     package_data = _pyproject()["tool"]["setuptools"]["package-data"]["zero_agent.frontends"]
@@ -83,9 +89,11 @@ def test_removed_frontend_and_alias_files_are_absent() -> None:
         "at_complete.py",
         "conductor.html",
         "conductor.py",
+        "commands",
         "desktop",
         "desktop_bridge.py",
         "desktop_commands.py",
+        "hub.pyw",
         "launcher.py",
         "plan_state.py",
         "stapp.py",
@@ -104,6 +112,7 @@ def test_packaged_modules_do_not_include_removed_layers() -> None:
         for package in packages
     )
     assert "zero_agent.frontends" in packages
+    assert "zero_agent.frontends.commands" in packages
 
     frontend_files = {
         path.relative_to(ROOT / "zero_agent" / "frontends").as_posix()
@@ -207,7 +216,9 @@ def test_repository_has_no_removed_name_fragments() -> None:
         "build",
         "dist",
         "node_modules",
+        "memory",
         "sessions",
+        "temp",
         "target",
         "zero_agent.egg-info",
     }

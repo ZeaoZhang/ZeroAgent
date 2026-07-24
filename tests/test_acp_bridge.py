@@ -1,7 +1,6 @@
 """Tests for Phase 7 — frontend entry points and imports."""
 
-import importlib
-import os
+import queue
 
 import pytest
 
@@ -9,6 +8,7 @@ import pytest
 def test_packaging_acp_bridge_import():
     """ACP bridge module imports (when available)."""
     import importlib.util
+
     spec = importlib.util.find_spec("zero_agent.frontends.acp_bridge")
     if spec is None:
         pytest.skip("acp_bridge module not yet created")
@@ -31,23 +31,15 @@ def test_packaging_conductor_import():
 
 
 def test_tui_main_without_textual_prints_hint(monkeypatch, capfd):
-    """When Textual is not installed, tui.main() prints install hint and exits 1."""
-    import sys
+    """Textual 不可用时，tui.main() 应打印安装提示并以 1 退出。"""
+    import zero_agent.frontends.tui as tui
 
-    # Simulate missing textual
-    try:
-        import textual  # noqa: F401
-    except ImportError:
-        # Already missing — just test the import path
-        monkeypatch.delitem(sys.modules, "textual", raising=False)
+    monkeypatch.setattr(tui, "_TEXTUAL_AVAILABLE", False)
 
-    from zero_agent.frontends.tui import main
+    with pytest.raises(SystemExit) as exc:
+        tui.main()
 
-    try:
-        main()
-    except SystemExit as e:
-        assert e.code == 1
-
+    assert exc.value.code == 1
     captured = capfd.readouterr()
     assert "Install zero-agent[ui]" in captured.out
 
@@ -65,14 +57,70 @@ def test_conductor_main_help_does_not_crash():
         assert e.code == 0
 
 
-def test_desktop_bridge_worldline_disabled_returns_empty(tmp_path):
-    """When enable_worldline is false, GET /worldline returns disabled payload."""
-    import json
 
-    from zero_agent.frontends.desktop_bridge import worldline_handler, manager as _mgr
 
-    # This test just verifies the handler returns the right shape
-    # without needing a real aiohttp request
-    # We test the logic via import check
-    from zero_agent.frontends.desktop_bridge import worldline_handler
-    assert callable(worldline_handler)
+def _terminal(status: str, reason: str, text: str = "", data=None) -> dict:
+    return {
+        "type": "terminal",
+        "status": status,
+        "reason": reason,
+        "text": text,
+        "data": data,
+        "turn": 1,
+        "source": "agent",
+        "certificate": None,
+    }
+
+
+def _drain_messages(*items: dict) -> tuple[str, list[dict]]:
+    from zero_agent.frontends import acp_bridge
+    bridge = object.__new__(acp_bridge.ZeroAgentAcpBridge)
+    messages: list[dict] = []
+    bridge.write_message = messages.append
+    session = acp_bridge.SessionState("session-1", "/tmp", agent=None)
+    output = queue.Queue()
+    for item in items:
+        output.put(item)
+    return bridge._drain_agent_queue(session, output), messages
+
+
+def test_acp_completed_stream_closes_with_end_turn() -> None:
+    stop_reason, messages = _drain_messages(
+        {"type": "chunk", "text": "Hello", "source": "agent", "turn": 1},
+        _terminal("completed", "completion_certificate", "Hello"),
+    )
+
+    assert stop_reason == "end_turn"
+    assert messages[0]["params"]["update"]["content"] == {"type": "text", "text": "Hello"}
+    assert all("terminalStatus" not in message["params"]["update"] for message in messages)
+
+
+def test_acp_cancelled_uses_cancelled_stop_reason() -> None:
+    stop_reason, messages = _drain_messages(
+        _terminal("cancelled", "user_cancelled", "partial"),
+    )
+
+    assert stop_reason == "cancelled"
+    assert messages == []
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        ("waiting", "human_intervention"),
+        ("failed", "RuntimeError"),
+        ("budget_exhausted", "max_turns"),
+        ("protocol_error", "invalid_step_outcome"),
+    ],
+)
+def test_acp_unsupported_terminal_status_emits_structured_fallback(
+    status: str,
+    reason: str,
+) -> None:
+    stop_reason, messages = _drain_messages(_terminal(status, reason, "terminal text"))
+
+    assert stop_reason == "end_turn"
+    update = messages[-1]["params"]["update"]
+    assert update["terminalStatus"] == status
+    assert update["reason"] == reason
+    assert update["content"] == {"type": "text", "text": "terminal text"}

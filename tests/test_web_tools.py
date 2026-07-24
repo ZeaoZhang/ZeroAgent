@@ -1,6 +1,5 @@
 """Tests for ZeroAgent browser tools."""
 
-import json
 from importlib import resources
 
 from zero_agent.core.handler import BaseHandler
@@ -77,7 +76,7 @@ def test_web_execute_js_handler_reads_script_file_and_saves_result(
         "no_monitor": True,
     }
     assert (workspace / "result.txt").read_text(encoding="utf-8") == "long browser result"
-    data = json.loads(outcome.data)
+    data = outcome.data
     assert data["status"] == "success"
     assert "[已保存完整内容到" in data["js_return"]
 
@@ -100,7 +99,7 @@ def test_web_execute_js_handler_uses_javascript_code_block(
     outcome = _exhaust(handler.dispatch("web_execute_js", {}, response))
 
     assert captured["script"] == "return location.href"
-    data = json.loads(outcome.data)
+    data = outcome.data
     assert data["status"] == "success"
 
 
@@ -141,9 +140,8 @@ def test_web_scan_handler_returns_html_string(
 
     outcome = _exhaust(handler.dispatch("web_scan", {}, MockResponse(content="")))
 
-    assert isinstance(outcome.data, str)
-    assert '"status": "success"' in outcome.data
-    assert "```html\n<main>Hello</main>\n```" in outcome.data
+    assert outcome.data["status"] == "success"
+    assert outcome.data["content"] == "<main>Hello</main>"
     assert outcome.next_prompt == "\n"
 
 

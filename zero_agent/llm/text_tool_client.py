@@ -22,12 +22,12 @@ import os
 import re
 from typing import Any, Dict, Generator, List, Optional
 
-from zero_agent.llm.base import MockFunction, MockResponse, MockToolCall
+from zero_agent.llm.base import MockFunction, MockResponse, MockToolCall, merge_mock_responses
 
 
 _THINK_RE = re.compile(r"<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL)
 _TOOL_USE_TAG_RE = re.compile(
-    r"<(?:tool_use|tool_call)>((?:(?!<(?:tool_use|tool_call)>).){15,}?)</(?:tool_use|tool_call)>",
+    r"<(tool_use|tool_call)>(.*?)</\1>",
     re.DOTALL,
 )
 _BAD_JSON_PREFIX = "Failed to parse tool_use JSON: "
@@ -137,17 +137,25 @@ class TextToolSession:
 
         # Delegate to the wrapped session with no native tools
         raw_text = ""
+        backend_response: Optional[MockResponse] = None
         gen = self.backend.chat(full_prompt, tools=None)
+        finished = False
         try:
-            for chunk in gen:
+            while True:
+                try:
+                    chunk = next(gen)
+                except StopIteration as exc:
+                    backend_response = exc.value
+                    finished = True
+                    break
                 raw_text += chunk
                 yield chunk
         finally:
-            if hasattr(gen, "close"):
+            if not finished and hasattr(gen, "close"):
                 gen.close()
 
-        # Parse the response back into MockResponse
-        return self._parse_mixed_response(raw_text)
+        parsed = self._parse_mixed_response(raw_text)
+        return merge_mock_responses(parsed, backend_response, raw_text=raw_text, protocol="text")
 
     # ---- protocol prompt construction ----
     def _build_protocol_prompt(
@@ -270,7 +278,7 @@ class TextToolSession:
                 )
             else:
                 tool_instruction = (
-                    "\n### 工具库状态：持续有效（code_run/file_read等），"
+                    "\n### 工具库状态：持续有效，"
                     "**可正常调用**。调用协议沿用。\n"
                 )
         else:
@@ -313,6 +321,8 @@ class TextToolSession:
                     json_str = weaktoolstr.split("```")[0].strip()
                 if json_str:
                     json_strs.append(json_str)
+                else:
+                    errors.append(f"{_BAD_JSON_PREFIX}{weaktoolstr_orig[:200]}")
                 remaining_text = remaining_text.replace("<tool_use>" + weaktoolstr_orig, "")
             elif '"name":' in remaining_text and '"arguments":' in remaining_text:
                 json_match = re.search(r'\{.*"name":.*\}', remaining_text, re.DOTALL)
@@ -323,36 +333,35 @@ class TextToolSession:
             for json_str in json_strs:
                 try:
                     data = json.loads(json_str)
+                    if not isinstance(data, dict):
+                        tool_calls.append(self._make_bad_json_tool_call(
+                            f"tool_use JSON must be an object, got {_json_type_name(data)}"
+                        ))
+                        continue
                     func_name = data.get("name") or data.get("function") or data.get("tool")
-                    args = (
-                        data.get("arguments")
-                        or data.get("args")
-                        or data.get("params")
-                        or data.get("parameters")
-                        or data.get("input")
-                    )
-                    if args is None:
-                        args = data
+                    args = self._extract_tool_arguments(data)
                     if func_name:
                         tool_calls.append(self._make_tool_call(str(func_name), args))
+                    else:
+                        tool_calls.append(self._make_bad_json_tool_call("tool_use JSON object missing name"))
                 except json.JSONDecodeError:
                     err_msg = f"{_BAD_JSON_PREFIX}{json_str[:200]}"
                     errors.append(err_msg)
-                    # On parse failure, clear the protocol cache
-                    self.last_tools = ""
-                    self._last_tools_json = ""
-                except Exception:
-                    pass
+                    self.reset_tool_protocol_cache()
+                except Exception as exc:
+                    tool_calls.append(self._make_bad_json_tool_call(str(exc)))
 
             if not tool_calls:
                 for e in errors:
-                    tool_calls.append(self._make_tool_call("bad_json", {"msg": e}))
+                    tool_calls.append(self._make_bad_json_tool_call(e))
 
         return MockResponse(
             thinking=thinking,
             content=remaining_text.strip(),
             tool_calls=tool_calls,
             raw=text,
+            stop_reason="tool_use" if tool_calls else "end_turn",
+            tool_protocol="text",
         )
 
     def _parse_text_tool_calls(self, content: str) -> "tuple[List[MockToolCall], str]":
@@ -369,53 +378,80 @@ class TextToolSession:
             None,
         )
         if array_prefix and content.endswith("}]"):
+            idx = content.index(array_prefix)
             try:
-                idx = content.index(array_prefix)
                 raw = json.loads(content[idx:])
-                for b in raw:
-                    if b.get("type") == "tool_use":
-                        name = b.get("name", "")
-                        args = b.get("input", {})
-                        if name:
-                            tcs.append(self._make_tool_call(str(name), args))
-                if tcs:
-                    return tcs, content[:idx].strip()
             except Exception:
-                pass
+                return [self._make_bad_json_tool_call(f"{_BAD_JSON_PREFIX}{content[idx:idx + 200]}")], content[:idx].strip()
+            return [self._make_bad_json_tool_call(
+                f"tool_use JSON must be an object, got {_json_type_name(raw)}"
+            )], content[:idx].strip()
 
         # XML-style <tool_use>{...}</tool_use>
-        for s in _TOOL_USE_TAG_RE.findall(content):
+        for _, raw_body in _TOOL_USE_TAG_RE.findall(content):
             try:
-                d = _tryparse_json(s.strip())
+                d = _tryparse_json(raw_body.strip())
                 if d is None:
+                    tcs.append(self._make_bad_json_tool_call(f"{_BAD_JSON_PREFIX}{raw_body.strip()[:200]}"))
+                    continue
+                if not isinstance(d, dict):
+                    tcs.append(self._make_bad_json_tool_call(
+                        f"tool_use JSON must be an object, got {_json_type_name(d)}"
+                    ))
                     continue
                 name = d.get("name")
                 if not name:
+                    tcs.append(self._make_bad_json_tool_call("tool_use JSON object missing name"))
                     continue
-                args = (
-                    d.get("arguments")
-                    or d.get("args")
-                    or d.get("input")
-                    or {}
-                )
+                args = self._extract_tool_arguments(d)
                 tcs.append(self._make_tool_call(str(name), args))
-            except Exception:
-                pass
+            except Exception as exc:
+                tcs.append(self._make_bad_json_tool_call(str(exc)))
 
         if tcs:
             content = _TOOL_USE_TAG_RE.sub("", content, count=0).strip()
         return tcs, content
 
-    @staticmethod
-    def _make_tool_call(name: str, args: Any) -> MockToolCall:
-        """Build a MockToolCall with arguments serialized to JSON string."""
-        if isinstance(args, (dict, list)):
-            arg_str = json.dumps(args, ensure_ascii=False)
-        elif args is None:
-            arg_str = "{}"
-        else:
-            arg_str = str(args)
+    def _make_tool_call(self, name: str, args: Any) -> MockToolCall:
+        """Build a MockToolCall with JSON-object arguments only."""
+        if not isinstance(args, dict):
+            return self._make_bad_json_tool_call(
+                f"tool arguments must be a JSON object, got {_json_type_name(args)}"
+            )
+        arg_str = json.dumps(args, ensure_ascii=False)
         return MockToolCall(function=MockFunction(name=name, arguments=arg_str))
+
+    def _make_bad_json_tool_call(self, msg: str) -> MockToolCall:
+        self.reset_tool_protocol_cache()
+        return MockToolCall(
+            function=MockFunction(
+                name="bad_json",
+                arguments=json.dumps({"msg": msg}, ensure_ascii=False),
+            )
+        )
+
+    @staticmethod
+    def _extract_tool_arguments(data: Dict[str, Any]) -> Any:
+        for key in ("arguments", "args", "params", "parameters", "input"):
+            if key in data:
+                return data[key]
+        return {}
+
+
+def _json_type_name(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (int, float)):
+        return "number"
+    return type(value).__name__
 
 
 def _tryparse_json(json_str: str) -> Optional[dict]:

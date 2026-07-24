@@ -219,7 +219,6 @@ def _build_config_yaml(
         "",
         "llm_backends:",
         "  default:",
-        f"    name: default",
         f"    provider: {provider}",
         f"    api_key: {api_key}",
         f"    api_base: {api_base}",

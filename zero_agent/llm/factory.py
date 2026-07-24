@@ -135,7 +135,7 @@ class LLMFactory:
                     for name in config.failover_backends
                     if name in sessions
                     and name != primary_name
-                    and isinstance(sessions[name], LiteLLMSession)
+                    and isinstance(sessions[name], (LiteLLMSession, TextToolSession))
                 ]
                 if backups:
                     sessions[primary_name] = AutoFailoverSession(
@@ -183,7 +183,7 @@ class LLMFactory:
         Returns:
             AutoFailoverSession 实例.
         """
-        backups: list[LiteLLMSession] = []
+        backups: list[LiteLLMSession | TextToolSession] = []
         for name in config.failover_backends:
             if name == primary.name:
                 continue

@@ -37,6 +37,8 @@ from zero_agent.bots.common import (
     redirect_log,
     require_runtime,
     split_text,
+    extract_waiting_event,
+    terminal_notice,
 )
 from zero_agent.bots.shared.continue_cmd import handle_frontend_command, reset_conversation
 from zero_agent.bots.shared.btw_cmd import handle_frontend_command as handle_btw_frontend_command
@@ -76,7 +78,6 @@ _STREAM_UPDATE_INTERVAL_SECONDS = 2.0
 _STREAM_MIN_UPDATE_CHARS = 400
 _RETRY_AFTER_MARGIN_SECONDS = 1.0
 _QUEUE_WAIT_SECONDS = 1
-_ASK_USER_HOOK_KEY = "telegram_ask_user_menu"
 _ASK_CALLBACK_PREFIX = "ask:"
 _LLM_CALLBACK_PREFIX = "llm:"
 _ASK_CANCEL_ACTION = "none"
@@ -87,7 +88,6 @@ _ASK_CANCEL_PROMPT = "已取消选择, 请直接发送下一步操作。"
 _ASK_MULTI_HINT = "可多选: 点选项目后点击 Done 提交。"
 _ASK_MULTI_EMPTY_HINT = "请至少选择一项, 或选择 none of these above。"
 _LLM_MENU_PROMPT = "请选择要切换的 LLM:"
-_ask_menu_events = Q.Queue()
 _ask_menu_store = {}
 _llm_menu_store = {}
 _MULTI_SELECT_RE = re.compile(r"\[?(?:多选|multi(?:[-_ ]?select)?|select all)\]?", re.IGNORECASE)
@@ -311,56 +311,15 @@ def _is_not_modified_error(exc):
 
 # —— ask_user 菜单 ——
 
-def _extract_ask_user_event(ctx):
-    exit_reason = (ctx or {}).get("exit_reason") or {}
-    if exit_reason.get("result") != "EXITED":
+def _extract_ask_user_event(item):
+    event = extract_waiting_event(item)
+    if not event or not event["candidates"]:
         return None
-    payload = exit_reason.get("data")
-    if not isinstance(payload, dict):
-        return None
-    if payload.get("status") != "INTERRUPT" or payload.get("intent") != "HUMAN_INTERVENTION":
-        return None
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        return None
-    raw_candidates = data.get("candidates") or []
-    if not isinstance(raw_candidates, (list, tuple)):
-        return None
-    candidates = []
-    for candidate in raw_candidates:
-        if candidate is None:
-            continue
-        text = str(candidate).strip()
-        if text:
-            candidates.append(text)
-    if not candidates:
-        return None
-    question = str(data.get("question") or "请选择下一步操作：").strip() or "请选择下一步操作："
     return {
-        "question": question,
-        "candidates": candidates,
-        "multi": bool(_MULTI_SELECT_RE.search(question)),
+        "question": event["question"],
+        "candidates": event["candidates"],
+        "multi": bool(_MULTI_SELECT_RE.search(event["question"])),
     }
-
-
-def _register_ask_user_hook():
-    if not hasattr(za, "_turn_end_hooks"):
-        za._turn_end_hooks = {}
-    def _hook(ctx):
-        event = _extract_ask_user_event(ctx)
-        if event:
-            _ask_menu_events.put(event)
-    za._turn_end_hooks[_ASK_USER_HOOK_KEY] = _hook
-
-
-def _drain_latest_ask_user_event():
-    latest = None
-    while True:
-        try:
-            latest = _ask_menu_events.get_nowait()
-        except Q.Empty:
-            break
-    return latest
 
 
 def _build_ask_user_markup(menu_id, candidates, multi=False, selected_indexes=None):
@@ -890,6 +849,7 @@ class _TelegramTurnStreamCoordinator:
 async def _stream(dq, msg):
     stream = _TelegramTurnStreamCoordinator(msg)
     await stream.prime()
+    previous_chunk_text = ""
     try:
         while True:
             try:
@@ -902,20 +862,36 @@ async def _stream(dq, msg):
                     items.append(dq.get_nowait())
             except Q.Empty:
                 pass
-            done_item = None
+            terminal = None
             for item in items:
-                chunk = item.get("next", "")
-                if chunk:
-                    await stream.add_chunk(chunk)
-                if "done" in item:
-                    done_item = item
+                if item.get("type") == "chunk":
+                    current = str(item.get("text", ""))
+                    if getattr(runner, "inc_out", False):
+                        chunk = current
+                    else:
+                        chunk = current[len(previous_chunk_text):] if current.startswith(previous_chunk_text) else current
+                        previous_chunk_text = current
+                    if chunk:
+                        await stream.add_chunk(chunk)
+                    continue
+                if item.get("type") == "terminal":
+                    terminal = item
                     break
-            if done_item is not None:
-                await stream.finalize(done_item.get("done", ""))
-                event = _drain_latest_ask_user_event()
+            if terminal is None:
+                continue
+            status = terminal.get("status")
+            if status == "completed":
+                await stream.finalize(terminal.get("text", ""))
+            elif status == "waiting":
+                event = _extract_ask_user_event(terminal)
                 if event:
+                    await stream.finalize(send_files=False)
                     await _send_ask_user_menu(msg, event)
-                break
+                else:
+                    await stream.finish_with_notice(terminal_notice(terminal))
+            else:
+                await stream.finish_with_notice(terminal_notice(terminal))
+            break
     except asyncio.CancelledError:
         await stream.finish_with_notice("⏹️ 已停止")
     except RetryAfter as exc:
@@ -980,7 +956,11 @@ async def _handle_review_command(update, ctx, cmd):
     if not prompt:
         try:
             item = dq.get_nowait()
-            return await _reply_command_text(update.message, item.get("done", ""))
+            if item.get("type") == "terminal" and item.get("status") == "completed":
+                return await _reply_command_text(update.message, item.get("text", ""))
+            if item.get("type") == "terminal":
+                return await _reply_command_text(update.message, terminal_notice(item))
+            return await _reply_command_text(update.message, "(review 无输出)")
         except Q.Empty:
             return await _reply_command_text(update.message, "(review 无输出)")
     _cancel_stream_task(ctx)
@@ -1225,7 +1205,6 @@ if __name__ == "__main__":
         sys.exit(1)
     require_runtime(runner, "Telegram", tg_bot_token=_KEYS.get("tg_bot_token"))
     redirect_log(__file__, "tgapp.log", "Telegram", ALLOWED)
-    _register_ask_user_hook()
     # AgentRunner 在首次 put_task() 时自动启动后台 worker
 
     proxy = _KEYS.get("proxy")

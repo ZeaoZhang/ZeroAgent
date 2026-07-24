@@ -6,8 +6,8 @@ checklist mode (workers=0):
 mapreduce mode (workers>0):
     Launches BBS + N workers for parallel execution.
 
-Dependencies for mapreduce mode:
-    - agent_bbs.py (GenericAgent BBS server, not in ZeroAgent — port from GenericAgent/assets/)
+mapreduce mode 依赖:
+    - agent_bbs.py（外部 BBS 服务资产，ZeroAgent 不默认打包）
     - zero_agent.reflect.agent_team_worker (exists in ZeroAgent)
     - zero_agent.reflect.checklist_master (exists in ZeroAgent)
     - zero_agent.runners.cli
@@ -29,8 +29,8 @@ _R = Path(__file__).resolve().parent.parent
 _W_RE = _R / "reflect" / "agent_team_worker.py"
 _M_RE = _R / "reflect" / "checklist_master.py"
 
-# BBS binary path — requires agent_bbs.py from GenericAgent/assets/.
-# Copy it to zero_agent/assets/ or adjust this path if mapreduce mode is needed.
+# BBS 二进制路径：需要外部兼容的 agent_bbs.py。
+# 若要启用 mapreduce 模式，请放到 zero_agent/assets/ 或调整此路径。
 _BBS_PATH = _R / "assets" / "agent_bbs.py"
 
 _CLI = [sys.executable, "-m", "zero_agent.runners.cli"]
@@ -104,16 +104,16 @@ class CL:
         )
 
     def _ensure_bbs(self) -> None:
-        """Launch a BBS server on a free port.
+        """在空闲端口启动 BBS 服务。
 
-        Requires agent_bbs.py (GenericAgent component) at _BBS_PATH.
+        需要在 _BBS_PATH 提供与 ZeroAgent 兼容的外部 agent_bbs.py。
         """
         if self._d["bbs"]:
             return
         if not _BBS_PATH.exists():
             raise FileNotFoundError(
                 f"BBS server not found at {_BBS_PATH}. "
-                "Copy agent_bbs.py from GenericAgent/assets/ to enable mapreduce mode."
+                "请将兼容的 agent_bbs.py 放到 zero_agent/assets/ 后再启用 mapreduce 模式。"
             )
         with socket.socket() as s:
             s.bind(("", 0))

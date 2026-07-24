@@ -18,7 +18,10 @@ import os
 import queue
 import threading
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
+
+from zero_agent.core.types import TerminalEvent, TerminalStatus
+from zero_agent.runners.agent_runner import _consume_agent_run
 
 # ── Optional-dependency guards ──────────────────────────────────────
 
@@ -67,6 +70,36 @@ if _TEXTUAL_AVAILABLE:
         from textual.widgets import DirectoryTree
     except ImportError:
         _DIR_TREE_AVAILABLE = False
+def _waiting_text(data: Any, fallback: str) -> str:
+    payload = data if isinstance(data, dict) else {}
+    nested = payload.get("data")
+    if isinstance(nested, dict):
+        payload = nested
+    question = str(payload.get("question") or fallback)
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return question
+    options = "\n".join(f"- {candidate}" for candidate in candidates)
+    return f"{question}\n\n{options}"
+
+
+def _terminal_view(event: dict[str, Any]) -> tuple[str, str, bool]:
+    """Return (ui status, message, is_error) for a terminal queue item."""
+    status = event.get("status")
+    reason = event.get("reason") or status or "unknown"
+    text = event.get("text") or ""
+    if status == TerminalStatus.COMPLETED.value:
+        return "Ready", text, False
+    if status == TerminalStatus.WAITING.value:
+        return "Waiting for input", _waiting_text(event.get("data"), text or reason), False
+    if status == TerminalStatus.CANCELLED.value:
+        return "Cancelled", text or reason, False
+    if status == TerminalStatus.BUDGET_EXHAUSTED.value:
+        message = text or f"Reached the turn/retry budget; task not completed ({reason})"
+        return "Error", message, True
+    return "Error", text or reason, True
+
+
 
 
 
@@ -505,21 +538,22 @@ if _TEXTUAL_AVAILABLE:
             ).start()
 
         def _worker_run(self, prompt: str) -> None:
-            """Background thread: run agent.run() generator, push chunks to queue."""
+            """Background thread: run agent.run() and retain its terminal return."""
             try:
-                gen: Generator[Any, None, dict] = self.agent.run(prompt)
-                for chunk in gen:
-                    if self._abort_flag.is_set():
-                        self._chunk_queue.put({"type": "aborted"})
-                        try:
-                            gen.close()
-                        except Exception:
-                            pass
-                        return
-                    self._chunk_queue.put(chunk)
-                self._chunk_queue.put({"type": "done"})
+                gen = self.agent.run(prompt)
             except Exception as exc:
-                self._chunk_queue.put({"type": "error", "text": str(exc)})
+                terminal = TerminalEvent(
+                    status=TerminalStatus.FAILED,
+                    reason=type(exc).__name__,
+                    text=str(exc),
+                )
+            else:
+                terminal = _consume_agent_run(
+                    gen,
+                    self._chunk_queue.put,
+                    cancel_event=self._abort_flag,
+                )
+            self._chunk_queue.put(terminal.to_dict())
 
         # ── Chunk polling ──────────────────────────────────────
 
@@ -530,16 +564,28 @@ if _TEXTUAL_AVAILABLE:
 
                 if isinstance(chunk, dict):
                     kind = chunk.get("type")
-                    if kind == "done":
-                        self._finalize_streaming()
-                    elif kind == "error":
-                        self._append_message("system", chunk.get("text", "Unknown error"), error=True)
-                        self._finalize_streaming()
-                    elif kind == "aborted":
-                        self._append_message("system", "[Interrupted by user]")
-                        if self._streaming_markdown:
-                            self._streaming_markdown.remove()
-                            self._streaming_markdown = None
+                    if kind == "terminal":
+                        status = chunk.get("status")
+                        ui_status, message, is_error = _terminal_view(chunk)
+                        if status == TerminalStatus.COMPLETED.value:
+                            if message and not self._streaming_text:
+                                self._handle_text_chunk(message)
+                            self._finalize_streaming()
+                        elif status == TerminalStatus.WAITING.value:
+                            self._finalize_streaming()
+                            self._append_message("system", message)
+                            self._update_status(ui_status)
+                        elif status == TerminalStatus.CANCELLED.value:
+                            self._append_message("system", "[Interrupted by user]")
+                            if self._streaming_markdown:
+                                self._streaming_markdown.remove()
+                                self._streaming_markdown = None
+                            self._streaming_text = ""
+                            self._update_status(ui_status)
+                        else:
+                            self._append_message("system", message, error=is_error)
+                            self._finalize_streaming()
+                            self._update_status(ui_status)
                     elif kind == "turn":
                         self._update_status(f"Turn {chunk.get('turn', '?')}")
                     # silently skip unknown dicts

@@ -932,16 +932,15 @@ async function assignSessionToGroup(sessionId, groupName) {
 
   sess.groupId = groupName;
 
-  // Update backend
-  const bridgeUrl = window.zeroAgent.bridgeUrl || 'http://127.0.0.1:14168';
-  try {
-    await fetch(`${bridgeUrl}/session/${sess.bridgeSessionId}/group`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ groupId: groupName })
-    });
-  } catch (err) {
-    console.error('Failed to update group:', err);
+  if (sess.bridgeSessionId) {
+    try {
+      await window.zeroAgent.rpc('session/group', {
+        sessionId: sess.bridgeSessionId,
+        groupId: groupName
+      });
+    } catch (err) {
+      console.error('Failed to update group:', err);
+    }
   }
 
   renderSessionList();
@@ -967,8 +966,7 @@ function closeSession(id) {
   // Notify bridge to delete this session
   const sess = state.sessions.get(id);
   if (sess && sess.bridgeSessionId) {
-    const bridgeUrl = window.zeroAgent.bridgeUrl || 'http://127.0.0.1:14168';
-    fetch(`${bridgeUrl}/session/${sess.bridgeSessionId}`, { method: 'DELETE' }).catch(() => {});
+    window.zeroAgent.rpc('session/delete', { sessionId: sess.bridgeSessionId }).catch(() => {});
   }
   const keys = [...state.sessions.keys()];
   const idx = keys.indexOf(id);
@@ -1014,9 +1012,9 @@ async function newSession() {
 }
 
 async function getCwd() {
-  // Use ZeroAgent workspace as default cwd
-  const status = await window.zeroAgent.checkStatus();
-  return status.workspaceDir || '';
+  // Use authenticated bridge config as the workspace source; /status is intentionally anonymous and minimal.
+  const cfg = await window.zeroAgent.getConfig();
+  return cfg.workspaceDir || cfg.config?.workspaceDir || cfg.config?.workspace_dir || '';
 }
 
 // ─── Messages rendering ──────────────────────────────────────────────────
@@ -1984,8 +1982,8 @@ async function handleSlash(cmd) {
       break;
     case 'cwd':
       if (!arg) {
-        const status = await window.zeroAgent.checkStatus();
-        showSystem(`cwd: ${sess?.cwd || status.workspaceDir || ''}`);
+        const cwd = sess?.cwd || await getCwd();
+        showSystem(`cwd: ${cwd}`);
       } else {
         showSystem(`Creating new session in ${arg}…`);
         // Need a new session for different cwd
@@ -2286,8 +2284,7 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
     _bootstrappingSession = true;
     try {
       // Try to restore existing sessions from bridge
-      const bridgeUrl = window.zeroAgent.bridgeUrl || 'http://127.0.0.1:14168';
-      const listRes = await fetch(`${bridgeUrl}/sessions`).then(r => r.json()).catch(() => null);
+      const listRes = await window.zeroAgent.rpc('session/list', {}).catch(() => null);
       const existingSessions = listRes?.sessions || [];
       if (existingSessions.length > 0) {
         // Restore each session from bridge
@@ -2296,7 +2293,7 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
           const sess = createLocalSession(localId, bSess.title || 'Restored', bSess.id || bSess.sessionId);
           // Fetch full messages for this session
           const sid = bSess.id || bSess.sessionId;
-          const msgRes = await fetch(`${bridgeUrl}/session/${sid}/messages?after=0&limit=9999`).then(r => r.json()).catch(() => null);
+          const msgRes = await window.zeroAgent.rpc('session/poll', { sessionId: sid, afterId: 0, limit: 9999 }).catch(() => null);
           if (msgRes?.messages) {
             sess.messages = msgRes.messages;
             // Initialize polling state so we don't re-fetch these messages
@@ -2627,12 +2624,11 @@ async function switchModel(modelNo, modelName) {
   const sess = state.sessions.get(state.activeId);
   if (!sess || !sess.bridgeSessionId) return;
 
-  const bridgeUrl = window.zeroAgent.bridgeUrl || 'http://127.0.0.1:14168';
   try {
-    await fetch(`${bridgeUrl}/session/${sess.bridgeSessionId}/model`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ modelNo, modelName })
+    await window.zeroAgent.rpc('session/model', {
+      sessionId: sess.bridgeSessionId,
+      modelNo,
+      modelName
     });
     sess.modelOverride = modelName || String(modelNo);
     updateModelStatus();
@@ -2731,9 +2727,8 @@ function showAgentContext(agent) {
 }
 
 async function cancelAgent(sessionId, agentId) {
-  const bridgeUrl = window.zeroAgent.bridgeUrl || 'http://127.0.0.1:14168';
   try {
-    await fetch(`${bridgeUrl}/session/${sessionId}/agents/${agentId}/cancel`, { method: 'POST' });
+    await window.zeroAgent.rpc('session/agent/cancel', { sessionId, agentId });
   } catch (err) {
     showError('Failed to cancel agent: ' + (err.message || err));
   }

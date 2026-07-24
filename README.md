@@ -154,11 +154,11 @@ zero-agent \
   -i "帮我分析这个项目的结构"
 ```
 
-文件 I/O 批处理模式会读取 `IODIR/input.md`，并写入 `IODIR/output.md` 和 `IODIR/log.jsonl`:
+文件 I/O 批处理模式优先读取 `IODIR/input.txt`（兼容回退到 `input.md`），将首轮结果写入 `output.txt`，并保留兼容副本 `output.md`；后续轮次写入 `output1.txt`、`output2.txt` 等，每轮末尾包含 `[ROUND END]`。若存在 `reply.txt`，会继续处理下一轮；不会生成 `log.jsonl`:
 
 ```bash
 mkdir -p tasks/demo
-printf "总结 README.md 的内容" > tasks/demo/input.md
+printf "总结 README.md 的内容" > tasks/demo/input.txt
 zero-agent --task tasks/demo
 ```
 

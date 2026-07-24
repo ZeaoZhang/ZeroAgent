@@ -44,14 +44,14 @@ class AutoFailoverSession:
     def __init__(
         self,
         primary: LLMClient,
-        backups: List[LiteLLMSession],
+        backups: List[LLMClient],
         health_check_interval: int = 60,
     ) -> None:
         """初始化 AutoFailoverSession.
 
         Args:
             primary: 主 LLM 会话 (LiteLLMSession 或 TextToolSession).
-            backups: 备用 LiteLLMSession 列表（按优先级排序）.
+            backups: 备用 LLM 会话列表（按优先级排序）.
             health_check_interval: 健康检查间隔秒数，默认 60s.
         """
         self.primary = primary
@@ -307,7 +307,7 @@ class AutoFailoverSession:
             )
 
     @staticmethod
-    def _probe_session(session: LiteLLMSession, timeout: int = 5) -> bool:
+    def _probe_session(session: LLMClient, timeout: int = 5) -> bool:
         """通过轻量 API 调用探测 session 健康状态.
 
         使用模型列表 API (GET /v1/models) 检查后端可达性.
@@ -331,8 +331,8 @@ class AutoFailoverSession:
 
     @staticmethod
     def _migrate_history(
-        source: LiteLLMSession,
-        target: LiteLLMSession,
+        source: LLMClient,
+        target: LLMClient,
         upto: Optional[int] = None,
     ) -> None:
         """将对话历史从源 session 迁移到目标 session.

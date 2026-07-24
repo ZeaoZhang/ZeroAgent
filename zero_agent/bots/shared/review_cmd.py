@@ -10,6 +10,7 @@ import os
 from importlib import resources
 from pathlib import Path
 from typing import Optional
+from zero_agent.core.types import TerminalEvent, TerminalStatus
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _PROMPT_DIR = "review_sop"
@@ -63,10 +64,15 @@ _HEADER_EN = "> 🔍 /review (in-session) → main agent reviews here, echoes th
 def handle(agent, body: str, display_queue) -> Optional[str]:
     """body 是已剥离 `/review` 前缀的纯参数文本.
 
-    help → 推 done; 否则注入 user_request 到 inline prompt return 给主 agent.
+    help → 推 completed terminal; 否则注入 user_request 到 inline prompt return 给主 agent.
     """
     if body in ("help", "?", "-h", "--help"):
-        display_queue.put({"done": _help_text(), "source": "system"})
+        display_queue.put(TerminalEvent(
+            status=TerminalStatus.COMPLETED,
+            reason="slash_command",
+            text=_help_text(),
+            source="system",
+        ).to_dict())
         return None
     en = os.environ.get("ZA_LANG", "").strip().lower() == "en"
     user_request = body or (_DEFAULT_REQUEST_EN if en else _DEFAULT_REQUEST_ZH)

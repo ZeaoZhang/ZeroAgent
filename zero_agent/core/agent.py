@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import time
@@ -17,6 +18,14 @@ from zero_agent.core.exceptions import ConfigError
 from zero_agent.core.handler import BaseHandler
 from zero_agent.core.hooks import HookSystem
 from zero_agent.core.loop import AgentLoop
+from zero_agent.core.types import (
+    EvidenceLedger,
+    PendingTaskState,
+    TaskContract,
+    TaskMode,
+    TerminalEvent,
+    TerminalStatus,
+)
 from zero_agent.memory.manager import MemoryManager
 from zero_agent.tools.registry import ToolRegistry
 
@@ -31,6 +40,171 @@ class _LLMFactoryProxy:
 
 
 LLMFactory = _LLMFactoryProxy()
+
+_USAGE_COUNTER_ATTRS = (
+    "_total_input_tokens",
+    "_total_output_tokens",
+    "_total_cached_tokens",
+    "_total_requests",
+)
+
+_RUNTIME_CONFIG_FIELDS = (
+    "max_turns",
+    "workspace_dir",
+    "memory_dir",
+    "sessions_dir",
+    "verbose",
+    "language",
+    "incremental_output",
+    "peer_hint",
+    "enable_worldline",
+)
+
+
+def _client_signature(client: Any) -> tuple[Any, Any, Any, Any]:
+    """Return the fields that decide whether session-local caches are reusable."""
+
+    config = getattr(client, "config", None)
+    return (
+        getattr(config, "provider", None),
+        getattr(config, "model", None),
+        getattr(config, "tool_protocol", "native"),
+        getattr(config, "api_mode", "chat_completions") or "chat_completions",
+    )
+
+
+def _iter_session_layers(client: Any):
+    """Yield wrappers and concrete sessions for cache reset without allocations."""
+
+    seen: set[int] = set()
+    stack = [client]
+    while stack:
+        current = stack.pop()
+        ident = id(current)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        yield current
+        backend = getattr(current, "backend", None)
+        if backend is not None:
+            stack.append(backend)
+        primary = getattr(current, "primary", None)
+        if primary is not None:
+            stack.append(primary)
+        backups = getattr(current, "backups", None) or []
+        stack.extend(backups)
+
+
+def _active_usage_owner(client: Any) -> Any:
+    """Return the concrete active session that owns usage counters."""
+
+    current = client
+    seen: set[int] = set()
+    while id(current) not in seen:
+        seen.add(id(current))
+        active = getattr(current, "_active", None)
+        if active is not None:
+            current = active
+            continue
+        backend = getattr(current, "backend", None)
+        if backend is not None:
+            current = backend
+            continue
+        break
+    return current
+
+
+def _copy_tool_protocol_cache(old_client: Any, new_client: Any) -> None:
+    """Copy protocol cache markers from old to new compatible sessions."""
+
+    for attr in ("last_tools", "_last_tools_json", "total_cd_tokens"):
+        if not hasattr(old_client, attr):
+            continue
+        try:
+            setattr(new_client, attr, copy.deepcopy(getattr(old_client, attr)))
+        except Exception:
+            pass
+
+    old_owner = _active_usage_owner(old_client)
+    new_owner = _active_usage_owner(new_client)
+    if old_owner is old_client and new_owner is new_client:
+        return
+    for attr in ("last_tools", "_last_tools_json", "total_cd_tokens"):
+        if not hasattr(old_owner, attr):
+            continue
+        try:
+            setattr(new_owner, attr, copy.deepcopy(getattr(old_owner, attr)))
+        except Exception:
+            pass
+
+
+def _reset_tool_protocol_cache(client: Any) -> None:
+    """Clear protocol cache markers for a session or wrapper stack."""
+
+    for layer in _iter_session_layers(client):
+        reset = getattr(layer, "reset_tool_protocol_cache", None)
+        if callable(reset):
+            try:
+                reset()
+            except Exception:
+                pass
+        for attr in ("last_tools", "_last_tools_json", "total_cd_tokens"):
+            if hasattr(layer, attr):
+                try:
+                    setattr(layer, attr, "" if attr != "total_cd_tokens" else 0)
+                except Exception:
+                    pass
+
+
+def _copy_usage_counters(old_client: Any, new_client: Any) -> None:
+    """Copy token usage counters between concrete active sessions."""
+
+    old_owner = _active_usage_owner(old_client)
+    new_owner = _active_usage_owner(new_client)
+    for attr in _USAGE_COUNTER_ATTRS:
+        if hasattr(new_owner, attr):
+            setattr(new_owner, attr, getattr(old_owner, attr, 0))
+
+
+def _zero_usage_counters(client: Any) -> None:
+    """Reset token usage counters on every concrete session in a wrapper stack."""
+
+    for layer in _iter_session_layers(client):
+        for attr in _USAGE_COUNTER_ATTRS:
+            if hasattr(layer, attr):
+                setattr(layer, attr, 0)
+
+
+def _migrate_client_state(old_client: Any, new_client: Any, *, preserve_usage: bool) -> None:
+    """Move reusable conversation state from one LLM client to another.
+
+    History and system prompt always move. Protocol cache and usage counters are
+    reusable only when the provider/model/tool protocol/API mode are identical.
+    """
+
+    try:
+        history = copy.deepcopy(getattr(old_client, "history"))
+    except Exception:
+        history = []
+    try:
+        new_client.history = history
+    except Exception:
+        pass
+    try:
+        new_client.system = getattr(old_client, "system", "")
+    except Exception:
+        pass
+
+    compatible = _client_signature(old_client) == _client_signature(new_client)
+    if compatible:
+        _copy_tool_protocol_cache(old_client, new_client)
+    else:
+        _reset_tool_protocol_cache(new_client)
+
+    if preserve_usage and compatible:
+        _copy_usage_counters(old_client, new_client)
+    else:
+        _zero_usage_counters(new_client)
 
 
 class ZeroAgent:
@@ -97,55 +271,102 @@ class ZeroAgent:
         self.task_dir: Optional[str] = None
         self._turn_end_hooks: Dict[str, Any] = {}
         self.loop: Optional[AgentLoop] = None
+        self._is_running_task = False
+        self.pending_runtime_config: Optional[AgentConfig] = None
         self._config_path: Optional[str] = getattr(self.config, "_source_path", None)
+        self._pending_task_state: Optional[PendingTaskState] = None
 
     def set_config_path(self, path: Optional[str]) -> None:
         """设置配置文件的路径，用于热重载检测."""
-        self._config_path = path
+        self._config_path = str(path) if path is not None else None
 
     def reload_config(self) -> bool:
-        """若配置文件已变更则热重载配置并重建 LLM session.
+        """若配置文件已变更则原子热重载配置并重建 LLM session.
 
-        检测 YAML 文件 mtime，变更时重新加载并重建 client.
+        检测 YAML 文件 mtime，变更时先在局部变量中解析配置并构建新
+        sessions；任一步失败都会保留旧 config/sessions/client/handler/mtime。
 
         Returns:
-            True 表示配置已重载，False 表示无变更.
+            True 表示配置已重载，False 表示无变更或重载失败.
         """
         if not self._config_path:
             return False
 
-        from zero_agent.core.config import reload_config_if_changed, _config_mtime
+        from zero_agent.core.config import _commit_config_mtime, reload_config_if_changed
 
-        new_config = reload_config_if_changed(self._config_path)
+        try:
+            new_config = reload_config_if_changed(self._config_path)
+        except Exception as exc:
+            import logging
+            logging.getLogger("zero_agent").warning(
+                "reload_config: 解析配置失败，将保留旧配置: %s", exc
+            )
+            return False
         if new_config is None:
             return False
 
-        old_backend = self.config.default_backend
-        self.config = new_config
+        old_config = self.config
+        old_sessions = self._sessions
+        old_client = self.client
+        old_handler = self.handler
+        old_registry = self.registry
+        old_memory = self.memory
+        old_pending_runtime_config = self.pending_runtime_config
+        old_config_path = self._config_path
+        old_handler_client = getattr(old_handler, "client", None)
+        old_handler_registry = getattr(old_handler, "registry", None)
+        old_handler_cwd = getattr(old_handler, "cwd", None)
+        old_active_name = self._get_active_backend_name()
 
         try:
             new_sessions = LLMFactory.create_all_sessions(new_config)
-        except Exception as e:
+            target_name = self._select_reload_backend(old_active_name, new_config, new_sessions)
+            new_client = new_sessions[target_name]
+            _migrate_client_state(old_client, new_client, preserve_usage=True)
+            runtime_changed = self._runtime_config_changed(old_config, new_config)
+        except Exception as exc:
             import logging
             logging.getLogger("zero_agent").warning(
-                "reload_config: 重建 LLM 会话失败，将保留旧会话: %s", e
+                "reload_config: 重建运行时失败，将保留旧会话: %s", exc
             )
             return False
 
-        self._sessions = new_sessions
-        new_default = new_config.default_backend
+        try:
+            self.config = new_config
+            self._sessions = new_sessions
+            self.client = new_client
+            self._config_path = getattr(new_config, "_source_path", self._config_path)
 
-        # 保持当前活跃的后端名称不变（如果该后端还存在）
-        target_name = old_backend
-        if target_name not in self._sessions:
-            target_name = new_default
+            if runtime_changed:
+                self.pending_runtime_config = new_config
 
-        self.client = self._sessions.get(target_name)
-        if self.client is None:
-            self.client = next(iter(self._sessions.values()))
+            self.handler = old_handler
+            self.handler.client = self.client
+        except Exception as exc:
+            self.config = old_config
+            self._sessions = old_sessions
+            self.client = old_client
+            self.handler = old_handler
+            self.registry = old_registry
+            self.memory = old_memory
+            self.pending_runtime_config = old_pending_runtime_config
+            self._config_path = old_config_path
+            try:
+                self.handler.client = old_handler_client
+                self.handler.registry = old_handler_registry
+                self.handler.cwd = old_handler_cwd
+            except Exception:
+                pass
+            import logging
+            logging.getLogger("zero_agent").warning(
+                "reload_config: 提交运行时失败，将保留旧状态: %s", exc
+            )
+            return False
 
-        # 更新 handler 引用
-        self.handler.client = self.client
+        _commit_config_mtime(
+            self._config_path,
+            mtime=getattr(new_config, "_source_mtime_ns", None),
+        )
 
         import logging
         logging.getLogger("zero_agent").info(
@@ -160,7 +381,7 @@ class ZeroAgent:
         user_input: str,
         system_prompt: Optional[str] = None,
         initial_user_content: Optional[str] = None,
-    ) -> Generator[Any, None, dict]:
+    ) -> Generator[Any, None, TerminalEvent]:
         """执行单次 agent 任务.
 
         创建 AgentLoop 并驱动执行，每次 yield 返回状态信息供 UI 消费.
@@ -176,18 +397,40 @@ class ZeroAgent:
             dict → 结构化信息（如 {"turn": 1}）.
 
         Returns:
-            exit_reason 字典.
+            TerminalEvent describing the task terminal state.
 
         Raises:
             RuntimeError: 当前有任务正在运行（不支持并发）.
         """
+        self._apply_pending_runtime_config()
+        pending_state = self._pending_task_state
+        if pending_state is not None:
+            self.clear_pending_task()
+
         # 创建工作目录和记忆目录
         os.makedirs(self.config.workspace_dir, exist_ok=True)
         self.memory.init_memory()
 
-        # 每个任务创建新 handler，但继承短期工作记忆。
+        # 每个任务创建新 handler；等待用户的任务恢复同一契约和证据账本。
         self.handler = self._new_task_handler()
         self.handler.reset_code_stop_signal()
+        effective_initial_content = initial_user_content
+        if pending_state is None:
+            self.handler.task_contract = TaskContract(
+                task_id=f"task-{time.time_ns()}",
+                user_request=user_input,
+                mode=self._classify_task_mode(user_input),
+            )
+            self.handler.evidence_ledger = EvidenceLedger()
+            self.handler.plan_verify_status = "missing"
+        else:
+            self.handler.task_contract = copy.deepcopy(pending_state.contract)
+            self.handler.evidence_ledger = copy.deepcopy(pending_state.ledger)
+            self.handler.plan_verify_status = pending_state.plan_verify_status
+            effective_initial_content = self._pending_continuation_content(
+                pending_state,
+                user_input,
+            )
 
         # 构建系统提示词
         prompt = system_prompt or self._build_system_prompt()
@@ -205,11 +448,105 @@ class ZeroAgent:
         )
         self.loop = loop
 
-        return (yield from loop.run(
-            system_prompt=prompt,
-            user_input=user_input,
-            initial_user_content=initial_user_content,
-        ))
+        self._is_running_task = True
+        try:
+            terminal = yield from loop.run(
+                system_prompt=prompt,
+                user_input=user_input,
+                initial_user_content=effective_initial_content,
+            )
+            self._update_pending_task_state(terminal)
+            return terminal
+        finally:
+            self._is_running_task = False
+
+    @staticmethod
+    def _classify_task_mode(user_input: str) -> TaskMode:
+        """Classify only obvious conversational requests as chat.
+
+        Ambiguous requests default to execution so text alone cannot certify work.
+        """
+
+        text = " ".join(str(user_input or "").strip().lower().split())
+        if not text:
+            return TaskMode.EXECUTION
+        if re.fullmatch(r"(?:hi|hello|hey|你好|您好|嗨|哈喽)[!！,.，。 ]*", text):
+            return TaskMode.CHAT
+        chat_markers = (
+            "what can you do",
+            "who are you",
+            "explain ",
+            "what is ",
+            "what are ",
+            "只回答",
+            "仅回答",
+            "不要执行",
+            "无需执行",
+            "解释一下",
+            "什么是",
+            "你能做什么",
+            "你是谁",
+        )
+        return TaskMode.CHAT if any(marker in text for marker in chat_markers) else TaskMode.EXECUTION
+
+    def clear_pending_task(self) -> None:
+        """Discard a task paused for user input."""
+
+        self._pending_task_state = None
+
+    @staticmethod
+    def _is_partial_acceptance(answer: str) -> bool:
+        normalized = " ".join(str(answer or "").strip().split())
+        return normalized in {
+            "accept_partial",
+            "接受 partial",
+            "接受 PARTIAL 并完成",
+        }
+
+    def _pending_continuation_content(
+        self,
+        pending: PendingTaskState,
+        answer: str,
+    ) -> str:
+        """Build the continuation message without changing the original objective."""
+
+        if pending.waiting_kind == "plan_partial_acceptance":
+            if self._is_partial_acceptance(answer):
+                self.handler.plan_verify_status = "partial_accepted"
+                return (
+                    "[System] The user explicitly accepted the PARTIAL verification. "
+                    "Re-evaluate completion now using verify_status=partial_accepted."
+                )
+            self.handler.plan_verify_status = "missing"
+            return (
+                "[System] The user did not accept PARTIAL completion. Continue fixing "
+                f"the original plan. User reply: {answer}"
+            )
+        return answer
+
+    def _update_pending_task_state(self, terminal: TerminalEvent) -> None:
+        """Persist only waiting tasks; every other terminal closes the task."""
+
+        if terminal.status is not TerminalStatus.WAITING:
+            self.clear_pending_task()
+            return
+        waiting_data = copy.deepcopy(terminal.data) if isinstance(terminal.data, dict) else {}
+        payload = waiting_data.get("data") if isinstance(waiting_data.get("data"), dict) else waiting_data
+        candidates = payload.get("candidates", []) if isinstance(payload, dict) else []
+        partial_candidates = {"接受 PARTIAL 并完成", "继续修复"}
+        waiting_kind = (
+            "plan_partial_acceptance"
+            if self.handler.task_contract.mode is TaskMode.PLAN
+            and set(candidates or []) == partial_candidates
+            else "ask_user"
+        )
+        self._pending_task_state = PendingTaskState(
+            contract=copy.deepcopy(self.handler.task_contract),
+            ledger=copy.deepcopy(self.handler.evidence_ledger),
+            plan_verify_status=self.handler.plan_verify_status,
+            waiting_kind=waiting_kind,
+            waiting_data=waiting_data,
+        )
 
     def _wire_handler(self, handler: BaseHandler) -> BaseHandler:
         """Attach runtime references shared by freshly-created handlers."""
@@ -255,6 +592,50 @@ class ZeroAgent:
             handler.working["related_sop"] = old_working["related_sop"]
         return handler
 
+    def _runtime_config_changed(
+        self,
+        old_config: AgentConfig,
+        new_config: AgentConfig,
+    ) -> bool:
+        """Return True when non-LLM runtime components need rebuilding."""
+
+        return any(
+            getattr(old_config, field) != getattr(new_config, field)
+            for field in _RUNTIME_CONFIG_FIELDS
+        )
+
+    def _apply_pending_runtime_config(self) -> None:
+        """Apply deferred workspace/memory/registry changes at a task boundary."""
+
+        if self.pending_runtime_config is None:
+            return
+        new_registry = ToolRegistry.with_builtins(self.config)
+        new_memory = MemoryManager(
+            memory_dir=self.config.memory_dir,
+            workspace_dir=self.config.workspace_dir,
+            language=self.config.resolved_language,
+        )
+        self.registry = new_registry
+        self.memory = new_memory
+        self.handler.registry = self.registry
+        self.handler.cwd = self.config.workspace_dir
+        self.handler.client = self.client
+        self.pending_runtime_config = None
+
+    def _select_reload_backend(
+        self,
+        old_active_name: str,
+        new_config: AgentConfig,
+        new_sessions: dict[str, Any],
+    ) -> str:
+        """Select active backend after reload: same name, new default, then first."""
+
+        if old_active_name in new_sessions:
+            return old_active_name
+        if new_config.default_backend in new_sessions:
+            return new_config.default_backend
+        return next(iter(new_sessions))
+
     def abort(self) -> None:
         """中止当前任务.
 
@@ -283,22 +664,13 @@ class ZeroAgent:
 
         target = self._sessions[name]
         old_client = self.client
+        if target is old_client:
+            return
 
-        # 迁移历史：从旧 client 复制到新 session
-        try:
-            old_history = old_client.history
-        except AttributeError:
-            old_history = []
-
-        target.history = old_history
-        target.system = getattr(old_client, "system", "")
-        reset = getattr(target, "reset_tool_protocol_cache", None)
-        if callable(reset):
-            reset()
-        else:
-            target.last_tools = ""
-
+        _migrate_client_state(old_client, target, preserve_usage=False)
         self.client = target
+        if self.handler is not None:
+            self.handler.client = self.client
 
     def _register_builtin_plugins(self) -> None:
         """注册内置插件；缺依赖或缺配置时静默跳过."""
@@ -372,12 +744,14 @@ class ZeroAgent:
         return "unknown"
 
     def _get_active_backend_name(self) -> str:
-        """获取当前活跃后端的名称.
+        """获取当前实际活跃后端的名称.
 
         Returns:
             后端名称字符串.
         """
-        # 按 model 匹配 _sessions 中的引用
+        active_name = getattr(self.client, "name", None)
+        if active_name in self._sessions:
+            return active_name
         for name, session in self._sessions.items():
             if session is self.client:
                 return name

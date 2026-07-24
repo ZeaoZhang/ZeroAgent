@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Generator, Optional
 
 from zero_agent.core.config import AgentConfig
-from zero_agent.core.types import StepOutcome
+from zero_agent.core.types import StepAction, StepOutcome
 from zero_agent.tools.registry import ToolRegistry
 from zero_agent.utils.files import expand_file_refs
 from zero_agent.utils.text import smart_format
@@ -411,7 +411,11 @@ def _make_file_read_handler(config: AgentConfig):
             result, max_str_len=maxlen, omit_str="\n\n[omitted long content]\n\n"
         )
         if next_prompt is not None:
-            return StepOutcome(result, next_prompt=next_prompt)
+            return StepOutcome(
+                result,
+                next_prompt=next_prompt,
+                action=StepAction.CONTINUE,
+            )
         return result
     return _handler
 
@@ -455,7 +459,11 @@ def _make_file_write_handler(config: AgentConfig):
             return {"status": "success", "writed_bytes": len(content)}
         except Exception as e:
             yield f"[Status] ERR 写入异常: {str(e)}\n"
-            return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
+            return StepOutcome(
+                {"status": "error", "msg": str(e)},
+                next_prompt="\n",
+                action=StepAction.CONTINUE,
+            )
     return _handler
 
 
@@ -474,7 +482,11 @@ def _make_file_patch_handler(config: AgentConfig):
             new_content = expand_file_refs(new_content, base_dir=config.workspace_dir)
         except ValueError as e:
             yield f"[Status] ERR 引用展开失败: {e}\n"
-            return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
+            return StepOutcome(
+                {"status": "error", "msg": str(e)},
+                next_prompt="\n",
+                action=StepAction.CONTINUE,
+            )
         result = file_patch(path, old_content, new_content)
         yield f"\n{str(result)}\n"
         return result

@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from zero_agent.core.types import TerminalEvent, TerminalStatus
 from zero_agent.runners.reflect_runner import ReflectRunner
 
 
@@ -198,6 +199,60 @@ class TestReflectRunnerOnceMode:
             runner = ReflectRunner(agent, mod_path)
             runner._load_module()
             assert runner._should_exit_after_run() is False
+
+
+class TestReflectRunnerTask:
+    @pytest.mark.parametrize(
+        ("status", "reason"),
+        [
+            (TerminalStatus.COMPLETED, "completion_certificate"),
+            (TerminalStatus.WAITING, "human_intervention"),
+            (TerminalStatus.BUDGET_EXHAUSTED, "max_turns"),
+            (TerminalStatus.PROTOCOL_ERROR, "invalid_step_outcome"),
+        ],
+    )
+    def test_run_task_retains_terminal(self, capsys, status, reason) -> None:
+        agent = MagicMock()
+
+        def run(_task):
+            yield "streamed"
+            return TerminalEvent(status=status, reason=reason)
+
+        agent.run = run
+        runner = ReflectRunner(agent, "/fake/path/reflect.py")
+
+        terminal = runner._run_task("task")
+
+        assert capsys.readouterr().out == "streamed"
+        assert terminal.status == status
+        assert terminal.reason == reason
+
+    def test_run_task_converts_exception(self) -> None:
+        agent = MagicMock()
+
+        def run(_task):
+            yield "before"
+            raise RuntimeError("broken")
+
+        agent.run = run
+        runner = ReflectRunner(agent, "/fake/path/reflect.py")
+
+        terminal = runner._run_task("task")
+
+        assert terminal.status == TerminalStatus.FAILED
+        assert terminal.reason == "RuntimeError"
+        assert terminal.text == "broken"
+
+    def test_run_task_converts_synchronous_exception(self) -> None:
+        agent = MagicMock()
+        agent.run.side_effect = RuntimeError("broken before generator")
+        runner = ReflectRunner(agent, "/fake/path/reflect.py")
+
+        terminal = runner._run_task("task")
+
+        assert terminal.status == TerminalStatus.FAILED
+        assert terminal.reason == "RuntimeError"
+        assert terminal.text == "broken before generator"
 
 
 class TestReflectRunnerLifecycle:

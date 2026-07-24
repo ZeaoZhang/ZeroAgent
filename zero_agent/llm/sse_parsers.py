@@ -173,31 +173,36 @@ def parse_openai_sse(
 
 # ---- internal helpers ----
 
+def _malformed_tool_args(raw: str) -> dict:
+    return {
+        "_malformed": True,
+        "_raw": raw,
+        "_error": "tool arguments must be a JSON object",
+    }
+
+
 def _try_parse_tool_args(raw: str) -> List[dict]:
-    """解析工具参数 JSON，支持粘连 JSON 对象 {..}{..}.
-
-    Args:
-        raw: 原始参数字符串.
-
-    Returns:
-        解析后的 dict 列表.
-    """
+    """解析工具参数 JSON，支持粘连 JSON 对象 {..}{..}."""
     if not raw:
         return [{}]
     try:
-        return [json.loads(raw)]
+        parsed = json.loads(raw)
+        return [parsed] if isinstance(parsed, dict) else [_malformed_tool_args(raw)]
     except Exception:
         pass
     parts = re.split(r"(?<=\})(?=\{)", raw)
     if len(parts) > 1:
-        parsed: List[dict] = []
+        parsed_parts: List[dict] = []
         for p in parts:
             try:
-                parsed.append(json.loads(p))
+                parsed = json.loads(p)
             except Exception:
-                return [{"_raw": raw}]
-        return parsed
-    return [{"_raw": raw}]
+                return [_malformed_tool_args(raw)]
+            if not isinstance(parsed, dict):
+                return [_malformed_tool_args(raw)]
+            parsed_parts.append(parsed)
+        return parsed_parts
+    return [_malformed_tool_args(raw)]
 
 
 def _parse_openai_responses_sse(

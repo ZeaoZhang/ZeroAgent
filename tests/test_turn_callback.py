@@ -18,7 +18,7 @@ class TestTurnEndCallback:
             [],
             turn=3,
             next_prompt="",
-            exit_reason=None,
+            terminal=None,
         )
         assert "Completed the file write" in str(mock_handler.history_info[-1])
 
@@ -31,7 +31,7 @@ class TestTurnEndCallback:
             [],
             turn=3,
             next_prompt="",
-            exit_reason=None,
+            terminal=None,
         )
         assert "file_read" in str(mock_handler.history_info[-1])
         # 应该提醒 LLM 加 <summary>
@@ -46,7 +46,7 @@ class TestTurnEndCallback:
             [],
             turn=3,
             next_prompt="",
-            exit_reason=None,
+            terminal=None,
         )
         assert "直接回答了" in str(mock_handler.history_info[-1])
 
@@ -59,7 +59,7 @@ class TestTurnEndCallback:
             [],
             turn=7,
             next_prompt="",
-            exit_reason=None,
+            terminal=None,
         )
         assert "禁止无效重试" in result
 
@@ -72,7 +72,7 @@ class TestTurnEndCallback:
             [],
             turn=75,
             next_prompt="",
-            exit_reason=None,
+            terminal=None,
         )
         assert "ask_user" in result
 
@@ -85,7 +85,7 @@ class TestTurnEndCallback:
             [],
             turn=75,  # 既是 75 的倍数也是 7 的倍数附近
             next_prompt="",
-            exit_reason=None,
+            terminal=None,
         )
         # 应该有 ask_user（% 75 警告），不应该有 禁止无效重试（% 7 警告）
         assert "ask_user" in result
@@ -100,7 +100,7 @@ class TestTurnEndCallback:
             [],
             turn=5,
             next_prompt="base",
-            exit_reason=None,
+            terminal=None,
         )
         assert "禁止无效重试" not in result
         assert "ask_user" not in result
@@ -115,7 +115,7 @@ class TestTurnEndCallback:
             [],
             turn=3,
             next_prompt="",
-            exit_reason=None,
+            terminal=None,
         )
         assert len(str(mock_handler.history_info[-1])) <= 90  # "[Agent] " + max 80 chars
 
@@ -128,7 +128,7 @@ class TestTurnEndCallback:
             [],
             turn=3,
             next_prompt="existing prompt",
-            exit_reason=None,
+            terminal=None,
         )
         assert "existing prompt" in result
 
@@ -154,7 +154,7 @@ class TestMemoryInjection:
             [],
             turn=10,
             next_prompt="",
-            exit_reason=None,
+            terminal=None,
         )
         # turn 10 % 7 != 0, turn 10 % 75 != 0, turn 10 % 10 == 0
         # 进入记忆注入分支
@@ -170,6 +170,6 @@ class TestMemoryInjection:
             [],
             turn=70,  # 70 % 7 == 0, 70 % 10 == 0
             next_prompt="",
-            exit_reason=None,
+            terminal=None,
         )
         assert "禁止无效重试" in result

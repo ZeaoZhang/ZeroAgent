@@ -217,25 +217,14 @@ class SubAgentManager:
 
 
 def create_subagent_prompt(subtasks: List[Dict[str, str]]) -> str:
-    """生成用于 LLM 的 subagent 调用 prompt.
+    """生成供宿主编排器执行的子任务清单。
 
-    LLM 看到此 prompt 后会调用 subagent 工具来并行执行子任务.
-
-    Args:
-        subtasks: [{"id": "task1", "prompt": "..."}] 列表.
-
-    Returns:
-        格式化的 prompt 字符串.
+    原生工具注册表不暴露 ``subagent_run``。返回文本只用于
+    ``SubAgentManager`` 或其他宿主侧 runner 的编排交接，不能让模型
+    调用不存在的工具。
     """
-    lines = [
-        "[SubAgent] 以下任务可以并行执行，请使用 subagent_run 工具:",
-        "",
-    ]
+    lines = ["[SubAgent] 请由宿主编排器并行执行以下任务:", ""]
     for i, st in enumerate(subtasks, 1):
         lines.append(f"{i}. **{st['id']}**: {st['prompt']}")
-    lines.append("")
-    lines.append(
-        f"共 {len(subtasks)} 个子任务。"
-        "使用 subagent_run 工具并行启动它们，等待全部完成后汇总结果。"
-    )
+    lines.extend(("", f"共 {len(subtasks)} 个子任务。", "宿主完成全部任务后汇总结果。"))
     return "\n".join(lines)

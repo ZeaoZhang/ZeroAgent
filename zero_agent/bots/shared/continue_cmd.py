@@ -268,6 +268,7 @@ def reset_conversation(runner, message: str = "🆕 已开启新对话，当前�
     _snapshot_current_log()
     runner.clear_history()
     runner.clear_last_tools()
+    runner.clear_pending_task()
     return message
 
 

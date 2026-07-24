@@ -6,11 +6,23 @@
 
 from __future__ import annotations
 
+import json
 import re
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Dict, Generator, Optional
 
+from zero_agent.core.completion import evaluate_completion
 from zero_agent.core.completion_gate import CompletionGate, CompletionGateAction
-from zero_agent.core.types import StepOutcome
+from zero_agent.core.types import (
+    EvidenceLedger,
+    EvidenceRecord,
+    StepAction,
+    StepOutcome,
+    TaskContract,
+    TaskMode,
+    TerminalEvent,
+    TerminalStatus,
+)
 from zero_agent.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
@@ -59,6 +71,14 @@ class BaseHandler:
         self._done_hooks: list = []
         self._empty_ct: int = 0
         self.history_info: list = []  # 每轮摘要历史，用于上下文压缩
+        self.completion_certificate = None
+        self.task_contract = TaskContract(
+            task_id="handler-default",
+            user_request="",
+            mode=TaskMode.EXECUTION,
+        )
+        self.evidence_ledger = EvidenceLedger()
+        self.plan_verify_status = "missing"
         self.completion_gate = CompletionGate(
             retry_prompt_factory=self._native_tool_retry_prompt,
             large_code_prompt_factory=self._large_code_block_retry_prompt,
@@ -66,7 +86,75 @@ class BaseHandler:
             in_plan_mode=self._in_plan_mode,
             check_plan_completion=self._check_plan_completion,
             exit_plan_mode=self._exit_plan_mode,
+            completion_judge=self._judge_no_tool_completion,
         )
+
+    def _judge_no_tool_completion(self, packet: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """Classify an ambiguous no-tool turn using a fresh, history-free LLM session."""
+
+        parent = self.parent
+        if parent is None:
+            return None
+        client = getattr(parent, "client", None)
+        config = getattr(client, "config", None)
+        if config is None:
+            return None
+        try:
+            from zero_agent.llm.factory import LLMFactory
+        except Exception:
+            return None
+
+        last_user = getattr(self, "last_user_request", "") or ""
+        recent_summaries = list(getattr(self, "history_info", []) or [])[-4:]
+        assistant_text = str(packet.get("assistant_no_tool_text") or "")
+        reason_hint = str(packet.get("reason_hint") or "")
+        judge_payload = {
+            "last_user_request": last_user,
+            "assistant_no_tool_text": assistant_text,
+            "recent_tool_or_turn_summaries": recent_summaries,
+            "reason_hint": reason_hint,
+            "tool_calls_emitted": False,
+        }
+        system = (
+            "You are ZeroAgent's independent completion-gate judge. "
+            "Use no tools. Do not solve the task. Only classify whether the "
+            "assistant_no_tool_text is a deliverable final response to the user. "
+            "Return strict JSON only: {\"decision\":\"final|needs_tool|ambiguous\","
+            "\"confidence\":0.0," 
+            "\"reason\":\"short reason\"}. "
+            "Choose needs_tool when the text promises or implies inspecting, reading, "
+            "searching, running, opening, writing, or modifying something but no tool "
+            "call was emitted. Choose final only when it directly answers the user's "
+            "request with conclusion/evidence/verification or a clear blocking reason."
+        )
+        user = json.dumps(judge_payload, ensure_ascii=False)
+        try:
+            judge_config = replace(
+                config,
+                name=f"{getattr(config, 'name', 'default')}-completion-judge",
+                max_tokens=128,
+                temperature=0,
+                tool_protocol="native",
+            )
+            judge = LLMFactory.create_session(judge_config)
+            judge.system = system
+            gen = judge.chat([{"role": "user", "content": user}], tools=None)
+            response = None
+            try:
+                while True:
+                    next(gen)
+            except StopIteration as stop:
+                response = stop.value
+            raw = (getattr(response, "content", "") or "").strip()
+            parsed = json.loads(raw)
+        except Exception:
+            return {"decision": "ambiguous", "confidence": 0.0, "reason": "judge_failed"}
+        if not isinstance(parsed, dict):
+            return {"decision": "ambiguous", "confidence": 0.0, "reason": "judge_not_object"}
+        decision = str(parsed.get("decision") or "").strip().lower()
+        if decision not in {"final", "needs_tool", "ambiguous"}:
+            parsed["decision"] = "ambiguous"
+        return parsed
 
     # ---- Stop Signal ----
 
@@ -87,6 +175,7 @@ class BaseHandler:
         也避免被误判的 retry 把可用余量用尽.
         """
         self._empty_ct = 0
+        self.completion_certificate = None
         self.completion_gate.reset()
 
     # ---- Plan Mode ----
@@ -115,6 +204,13 @@ class BaseHandler:
             plan_path.
         """
         self.working["in_plan_mode"] = plan_path
+        self.task_contract = TaskContract(
+            task_id=self.task_contract.task_id,
+            user_request=self.task_contract.user_request,
+            mode=TaskMode.PLAN,
+            plan_path=plan_path,
+        )
+        self.plan_verify_status = "missing"
         self.max_turns = 120
         print(f"[Info] Entered plan mode with plan file: {plan_path}")
         return plan_path
@@ -224,6 +320,7 @@ class BaseHandler:
         if hasattr(self, method_name):
             method = getattr(self, method_name)
             ret = yield from self._try_call_generator(method, args, response)
+            self._record_evidence(tool_name, args, ret)
             self._trigger_hook("tool_after", {
                 "tool_name": tool_name,
                 "args": args,
@@ -246,7 +343,8 @@ class BaseHandler:
                 )
                 if next_prompt is None:
                     next_prompt = self._default_next_prompt(args)
-                ret = StepOutcome(data, next_prompt=next_prompt)
+                ret = StepOutcome(data, next_prompt=next_prompt, action=StepAction.CONTINUE)
+            self._record_evidence(tool_name, args, ret)
             self._trigger_hook("tool_after", {
                 "tool_name": tool_name,
                 "args": args,
@@ -262,10 +360,8 @@ class BaseHandler:
         )
         ret = StepOutcome(
             None,
-            next_prompt=self._tl(
-                f"未知工具 {tool_name}，请检查可用工具列表",
-                f"Unknown tool {tool_name}, please check available tools list",
-            ),
+            next_prompt=self._unknown_tool_retry_prompt(tool_name),
+            action=StepAction.CONTINUE,
         )
         self._trigger_hook("tool_after", {
             "tool_name": tool_name,
@@ -368,22 +464,55 @@ class BaseHandler:
             f"[Warn] 工具调用 JSON 格式错误: {msg}\n",
             f"[Warn] Tool call JSON format error: {msg}\n",
         )
-        return StepOutcome(None, next_prompt=f"[System] {msg}", should_exit=False)
+        return StepOutcome(
+            None,
+            next_prompt=self._bad_json_retry_prompt(msg),
+            action=StepAction.CONTINUE,
+        )
 
     def _native_tool_retry_prompt(self) -> str:
         """Prompt the model to use provider-native tool calls or finish clearly."""
         return self._tl(
-            "[System] 上一轮回复看起来需要工具操作，但没有发出任何原生工具调用。"
-            "ZeroAgent 只执行 provider-native tool_calls；不要在正文中写 "
-            "<tool_use>、<tool_call>、<function_call> 或 <file_content>。"
-            "如果仍需检查、读取、运行或写入，请重新生成并使用原生工具调用；"
-            "如果任务已经完成，请直接给出最终结论和证据。",
-            "[System] The previous reply appeared to require tool work, but no "
-            "provider-native tool_calls were emitted. ZeroAgent only executes "
-            "native tool calls; do not write <tool_use>, <tool_call>, "
-            "<function_call>, or <file_content> in reply text. If tool work is "
-            "still needed, regenerate with native tool calls; if the task is "
-            "complete, provide the final answer and evidence directly.",
+            "[System] 上一轮回复看起来只是下一步动作说明或需要工具操作，"
+            "但没有发出 provider-native tool_calls，因此没有任何工具被执行。"
+            "请重新生成本轮输出：如果需要查看、读取、搜索、运行、执行、打开、写入或修改，"
+            "现在发出 provider-native tool_call；不要在正文中写 <tool_use>、<tool_call>、"
+            "<function_call>、<file_content> 或 JSON 工具协议；不要只重复计划。"
+            "如果任务已经完成，请直接给出最终结论、证据和验证结果。",
+            "[System] The previous reply looked like a next-step action or required "
+            "tool work, but it emitted no provider-native tool_calls, so no tool "
+            "was executed. Regenerate this turn: if you need to inspect, read, "
+            "search, run, execute, open, write, or modify anything, emit a "
+            "provider-native tool_call now; do not write <tool_use>, <tool_call>, "
+            "<function_call>, <file_content>, or JSON tool protocol in text; do "
+            "not repeat a plan. If the task is complete, provide the final "
+            "conclusion, evidence, and verification result directly.",
+        )
+
+    def _bad_json_retry_prompt(self, msg: str) -> str:
+        """Prompt the model to regenerate an invalid native tool call."""
+        return self._tl(
+            "[System] 上一轮 provider-native tool_call 的 arguments 不是合法 JSON，工具未执行。"
+            f"错误：{msg}\n"
+            "请重新发出合法的 provider-native tool_call：function.arguments 必须是合法 JSON object string；"
+            "不要在正文中解释或写工具协议；如果不再需要工具，请给出最终结论和证据。",
+            "[System] The previous provider-native tool_call arguments were not valid JSON, "
+            f"so the tool was not executed. Error: {msg}\n"
+            "Regenerate a valid provider-native tool_call: function.arguments must be a valid "
+            "JSON object string; do not explain or write tool protocol in text; if no tool is "
+            "needed anymore, provide the final conclusion and evidence.",
+        )
+
+    def _unknown_tool_retry_prompt(self, tool_name: str) -> str:
+        """Prompt the model to regenerate a native call with an available tool."""
+        return self._tl(
+            f"[System] 上一轮调用了不存在的工具 `{tool_name}`，工具未执行。"
+            "请根据当前可用 tools schema 重新选择可用工具并发出 provider-native tool_call；"
+            "不要猜工具名，不要在正文写工具调用格式。如果不需要工具，请直接给出最终结论和证据。",
+            f"[System] The previous turn called unknown tool `{tool_name}`, so no tool was executed. "
+            "Select an available tool from the current tools schema and emit a provider-native "
+            "tool_call; do not guess tool names or write tool-call syntax in text. If no tool is "
+            "needed, provide the final conclusion and evidence directly.",
         )
 
     def _plan_verification_retry_prompt(self) -> str:
@@ -419,41 +548,66 @@ class BaseHandler:
     def do_no_tool(
         self, args: Dict[str, Any], response: Any
     ) -> Generator[str, None, StepOutcome]:
-        """LLM 未调用任何工具时的处理.
+        """Handle an LLM turn that emitted no tool call.
 
-        由 AgentLoop 检测到 response.tool_calls 为空时自动触发.
-        处理以下场景:
-            - 空响应 / 流异常中断 → 重试或退出.
-            - 大代码块未调用工具 → 提示 LLM 调用工具.
-            - 正常文本回复 → 任务完成（next_prompt=None）.
-
-        Args:
-            args: 空参数字典（由引擎注入）.
-            response: LLM 响应对象（MockResponse）.
-
-        Yields:
-            状态信息字符串.
-
-        Returns:
-            StepOutcome.
+        CompletionGate remains the Phase-1 recovery policy. A permitted final
+        response requests completion explicitly; the loop alone emits a
+        ``TerminalEvent``.
         """
         decision = self.completion_gate.evaluate(response)
         if decision.action != CompletionGateAction.ALLOW:
             self._annotate_completion_gate(args, decision)
             yield self._tl(decision.message_zh, decision.message_en)
             if decision.action == CompletionGateAction.EXIT:
-                return StepOutcome(decision.data, should_exit=True)
+                reason = decision.reason or "completion_gate_limit"
+                status = (
+                    TerminalStatus.PROTOCOL_ERROR
+                    if reason == "text_tool_protocol_limit"
+                    else TerminalStatus.BUDGET_EXHAUSTED
+                )
+                return StepOutcome(
+                    decision.data,
+                    action=StepAction.FAIL,
+                    reason=reason,
+                    terminal_status=status,
+                )
             if decision.reason in {
                 "blank_response",
                 "interruption:incomplete",
                 "interruption:max_tokens",
             }:
-                return self._retry_or_exit(decision.prompt or "")
+                limit_reason = (
+                    "blank_response_limit"
+                    if decision.reason == "blank_response"
+                    else "interruption_retry_limit"
+                )
+                return self._retry_or_exit(decision.prompt or "", limit_reason)
             return StepOutcome(
                 decision.data,
                 next_prompt=decision.prompt,
-                should_exit=False,
+                action=StepAction.CONTINUE,
             )
+
+        contract = self.task_contract
+        ledger = self.evidence_ledger
+        plan_remaining = self._check_plan_completion() if contract.mode is TaskMode.PLAN else None
+        if contract.mode is TaskMode.PLAN and self.plan_verify_status != "partial_accepted":
+            from zero_agent.core.completion import load_plan_verify_status
+
+            self.plan_verify_status = load_plan_verify_status(contract)
+        certificate, continuation_prompt = evaluate_completion(
+            contract,
+            ledger,
+            response,
+            plan_remaining=plan_remaining,
+            plan_verify_status=self.plan_verify_status,
+        )
+        if certificate is None:
+            self.completion_certificate = None
+            prompt = continuation_prompt or self._native_tool_retry_prompt()
+            return StepOutcome({}, next_prompt=prompt, action=StepAction.CONTINUE)
+
+        self.completion_certificate = certificate
 
         for zh, en in decision.allow_messages:
             yield self._tl(zh, en)
@@ -462,7 +616,7 @@ class BaseHandler:
             "[Info] Final response to user.\n",
             "[Info] Final response to user.\n",
         )
-        return StepOutcome(response, next_prompt=None)
+        return StepOutcome(response, action=StepAction.REQUEST_COMPLETION)
 
     @staticmethod
     def _annotate_completion_gate(
@@ -476,21 +630,107 @@ class BaseHandler:
             **metadata,
         }
 
-    def _retry_or_exit(self, prompt: str) -> StepOutcome:
-        """重试计数，连续 3 次空响应则硬退出.
+    def _retry_or_exit(
+        self,
+        prompt: str,
+        limit_reason: str = "blank_response_limit",
+    ) -> StepOutcome:
+        """Retry transient empty/interrupted responses within a fixed budget."""
 
-        Args:
-            prompt: 重试提示词.
-
-        Returns:
-            StepOutcome. 若 _empty_ct >= 3 则 should_exit=True.
-        """
         self._empty_ct = getattr(self, "_empty_ct", 0) + 1
         if self._empty_ct >= 3:
-            return StepOutcome({}, should_exit=True)
-        return StepOutcome({}, next_prompt=prompt)
+            return StepOutcome(
+                {},
+                action=StepAction.FAIL,
+                reason=limit_reason,
+                terminal_status=TerminalStatus.BUDGET_EXHAUSTED,
+            )
+        return StepOutcome({}, next_prompt=prompt, action=StepAction.CONTINUE)
 
     # ---- 内部辅助方法 ----
+
+    def _record_evidence(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        outcome: Any,
+    ) -> None:
+        """Append one compact evidence record for real tool dispatches."""
+
+        if tool_name in {"no_tool", "bad_json", "unknown", "judge"}:
+            return
+        if tool_name.startswith("judge") or tool_name.endswith("_judge"):
+            return
+        if not isinstance(getattr(self, "evidence_ledger", None), EvidenceLedger):
+            self.evidence_ledger = EvidenceLedger()
+        data = outcome.data if isinstance(outcome, StepOutcome) else outcome
+        kind = self._evidence_kind(tool_name)
+        status = self._evidence_status(tool_name, data)
+        clean_args = {
+            k: v for k, v in args.items()
+            if not str(k).startswith("_")
+        }
+        summary = f"{tool_name}({self._summarize_evidence_args(clean_args)})"
+        self.evidence_ledger.records.append(EvidenceRecord(
+            turn=self.current_turn,
+            tool_name=tool_name,
+            status=status,
+            kind=kind,
+            summary=summary,
+        ))
+
+    @staticmethod
+    def _evidence_kind(tool_name: str) -> str:
+        if tool_name == "file_read":
+            return "read"
+        if tool_name in {"file_write", "file_patch"}:
+            return "write"
+        if tool_name == "code_run":
+            return "execute"
+        if tool_name in {"web_scan", "web_execute_js"}:
+            return "web"
+        if tool_name == "ask_user":
+            return "user"
+        if "verify" in tool_name:
+            return "verify"
+        if "memory" in tool_name or tool_name == "update_working_checkpoint":
+            return "memory"
+        return "system"
+
+    @staticmethod
+    def _evidence_status(tool_name: str, data: Any) -> str:
+        if tool_name == "file_read":
+            return (
+                "success"
+                if isinstance(data, str) and not data.startswith("Error:")
+                else "error"
+            )
+        if tool_name in {"file_write", "file_patch", "web_scan", "web_execute_js"}:
+            return "success" if isinstance(data, dict) and data.get("status") == "success" else "error"
+        if tool_name == "code_run":
+            return (
+                "success"
+                if isinstance(data, dict)
+                and data.get("status") == "success"
+                and int(data.get("exit_code", 1) or 0) == 0
+                else "error"
+            )
+        if tool_name == "ask_user":
+            if isinstance(data, dict) and data.get("status") == "INTERRUPT":
+                return "interrupt"
+            return "success"
+        if "memory" in tool_name or tool_name == "update_working_checkpoint":
+            return "unknown"
+        if isinstance(data, dict):
+            status = str(data.get("status") or "").lower()
+            if status in {"success", "error", "interrupt"}:
+                return status
+        return "unknown" if data is None else "success"
+
+    @staticmethod
+    def _summarize_evidence_args(args: Dict[str, Any]) -> str:
+        text = json.dumps(args, ensure_ascii=False, default=str)
+        return text if len(text) <= 120 else text[:117] + "..."
 
     def _default_next_prompt(self, args: Dict[str, Any]) -> str:
         """为注册工具生成默认的 next_prompt.
@@ -511,6 +751,39 @@ class BaseHandler:
             return "\n"
         return self._build_anchor_prompt()
 
+    def _contract_checkpoint(self) -> str:
+        """Return compact task contract and recent evidence for anchor prompts."""
+
+        contract = getattr(self, "task_contract", None)
+        ledger = getattr(self, "evidence_ledger", None)
+        if contract is None or ledger is None:
+            return ""
+        records = list(getattr(ledger, "records", []) or [])[-8:]
+        lines = [
+            "<task_contract>",
+            f"objective: {getattr(contract, 'user_request', '')}",
+            f"mode: {getattr(contract, 'mode', '')}",
+        ]
+        plan_path = getattr(contract, "plan_path", None)
+        if plan_path:
+            lines.append(f"plan_path: {plan_path}")
+        lines.append(f"plan_verify_status: {getattr(self, 'plan_verify_status', 'missing')}")
+        if records:
+            lines.append("recent_evidence:")
+            for record in records:
+                lines.append(
+                    "- "
+                    f"turn={getattr(record, 'turn', '?')} "
+                    f"tool={getattr(record, 'tool_name', '?')} "
+                    f"status={getattr(record, 'status', '?')} "
+                    f"kind={getattr(record, 'kind', '?')} "
+                    f"summary={getattr(record, 'summary', '')}"
+                )
+        else:
+            lines.append("recent_evidence: none")
+        lines.append("</task_contract>")
+        return "\n".join(lines)
+
     def _build_anchor_prompt(self) -> str:
         """构建锚点 prompt：压缩早期历史 + 最近摘要 + 工作记忆.
 
@@ -529,7 +802,8 @@ class BaseHandler:
                 "\n</earlier_context>\n"
             )
         h_str = "\n".join(h[-WINDOW:])
-        prompt = f"\n### [WORKING MEMORY]\n{earlier}<history>\n{h_str}\n</history>"
+        checkpoint = self._contract_checkpoint()
+        prompt = f"\n### [WORKING MEMORY]\n{checkpoint}\n{earlier}<history>\n{h_str}\n</history>"
         prompt += f"\nCurrent turn: {self.current_turn}\n"
         if self.working.get("key_info"):
             prompt += f"\n<key_info>{self.working.get('key_info')}</key_info>"
@@ -582,7 +856,7 @@ class BaseHandler:
         tool_results: list,
         turn: int,
         next_prompt: str,
-        exit_reason: Optional[dict],
+        terminal: Optional[TerminalEvent],
     ) -> str:
         """轮次结束回调，增强 next_prompt 并记录摘要历史.
 
@@ -598,7 +872,7 @@ class BaseHandler:
             tool_results: 工具结果列表.
             turn: 当前轮次编号.
             next_prompt: 拼接后的下一轮 prompt.
-            exit_reason: 退出原因.
+            terminal: Terminal event for this turn, if one was produced.
 
         Returns:
             增强后的 next_prompt 字符串.

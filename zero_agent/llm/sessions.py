@@ -20,7 +20,7 @@ from zero_agent.core.interruption import (
     append_interruption_marker,
     classify_interruption,
 )
-from zero_agent.llm.base import MockResponse
+from zero_agent.llm.base import MockResponse, normalize_stop_reason
 from zero_agent.llm.converters import msgs_claude_to_openai
 
 
@@ -223,10 +223,12 @@ class LiteLLMSession:
         collected_thinking = ""
         collected_tool_calls: Dict[int, Dict[str, Any]] = {}
         final_response = None
+        final_stop_reason: Any = None
         stream_interrupted = False
-
+        stream_chunks: List[Any] = []
         try:
             for chunk in response:
+                stream_chunks.append(chunk)
                 final_response = chunk
                 try:
                     choice = chunk.choices[0]
@@ -260,6 +262,9 @@ class LiteLLMSession:
                                         tc["name"] = tc_delta.function.name
                                     if hasattr(tc_delta.function, "arguments") and tc_delta.function.arguments:
                                         tc["arguments"] += tc_delta.function.arguments
+
+                    if hasattr(choice, "finish_reason") and choice.finish_reason:
+                        final_stop_reason = choice.finish_reason
                 except (AttributeError, IndexError):
                     continue
         except Exception:
@@ -309,9 +314,19 @@ class LiteLLMSession:
             if not classify_interruption(mock):
                 mock.stop_reason = "tool_use"
 
+        if not stream_interrupted:
+            has_tool_calls = bool(mock.tool_calls)
+            stop_source = final_stop_reason or mock.stop_reason
+            mock.stop_reason = normalize_stop_reason(stop_source, has_tool_calls=has_tool_calls)
+        mock.usage = next(
+            (usage for usage in (getattr(chunk, "usage", None) for chunk in reversed(stream_chunks)) if usage),
+            getattr(final_response, "usage", None),
+        )
+        mock.tool_protocol = "native"
+
         # 将助手消息追加到历史
         self._record_usage(
-            getattr(final_response, "usage", None),
+            mock.usage,
             streamed_text=collected_content,
         )
         self._record_assistant(mock)
@@ -343,7 +358,7 @@ class LiteLLMSession:
             )
         yield mock.content
 
-        self._record_usage(getattr(response, "usage", None))
+        self._record_usage(mock.usage)
         self._record_assistant(mock)
         return mock
 

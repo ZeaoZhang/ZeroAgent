@@ -195,6 +195,46 @@ class TestAutoFailoverSessionFallback:
         assert response.content == "backup ok"
         assert session.is_fallback_active is True
 
+
+    def test_chat_returns_backup_response_metadata_unchanged_after_fallback(self) -> None:
+        """fallback must not rewrite backup MockResponse metadata."""
+        primary = _make_session("primary")
+        backup = _make_session("backup1")
+        session = AutoFailoverSession(primary, backups=[backup])
+        usage = {"prompt_tokens": 1, "completion_tokens": 2}
+        raw = {"usage": usage, "provider": "backup"}
+
+        def failing_chat(*_args, **_kwargs):
+            if False:
+                yield ""
+            raise RuntimeError("primary down")
+
+        def backup_chat(*_args, **_kwargs):
+            yield "backup ok"
+            return MockResponse(
+                content="backup ok",
+                raw=raw,
+                stop_reason="max_tokens",
+                usage=usage,
+                tool_protocol="text",
+            )
+
+        primary.chat = failing_chat
+        backup.chat = backup_chat
+
+        gen = session.chat(messages=[{"role": "user", "content": "hi"}], tools=[])
+        try:
+            while True:
+                next(gen)
+        except StopIteration as exc:
+            response = exc.value
+
+        assert response.content == "backup ok"
+        assert response.raw is raw
+        assert response.stop_reason == "max_tokens"
+        assert response.usage is usage
+        assert response.tool_protocol == "text"
+
     def test_exception_fallback_does_not_duplicate_current_user_history(self) -> None:
         """同轮异常 fallback 只迁移调用前历史，不重复当前 user 消息."""
         primary = _make_session("primary")

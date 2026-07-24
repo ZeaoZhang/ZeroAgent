@@ -8,6 +8,29 @@ import streamlit as st
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import load_default_config
+from zero_agent.core.types import TerminalEvent, TerminalStatus
+from zero_agent.runners.agent_runner import _consume_agent_run
+
+
+def _waiting_text(terminal: TerminalEvent) -> str:
+    payload = terminal.data if isinstance(terminal.data, dict) else {}
+    nested = payload.get("data")
+    if isinstance(nested, dict):
+        payload = nested
+    fallback = terminal.text or terminal.reason or "Waiting for user input"
+    question = str(payload.get("question") or fallback)
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return question
+    options = "\n".join(f"- {candidate}" for candidate in candidates)
+    return f"{question}\n\n{options}"
+
+
+def _error_text(terminal: TerminalEvent) -> str:
+    if terminal.status == TerminalStatus.BUDGET_EXHAUSTED and not terminal.text:
+        suffix = f" ({terminal.reason})" if terminal.reason else ""
+        return f"Reached the turn/retry budget; task not completed{suffix}"
+    return terminal.text or terminal.reason or terminal.status.value
 
 
 def main():
@@ -56,18 +79,38 @@ def main():
         with st.chat_message("assistant"):
             placeholder = st.empty()
             full_text = ""
-            gen = agent.run(prompt)
             try:
-                for chunk in gen:
+                gen = agent.run(prompt)
+            except Exception as exc:
+                terminal = TerminalEvent(
+                    status=TerminalStatus.FAILED,
+                    reason=type(exc).__name__,
+                    text=str(exc),
+                )
+            else:
+                def on_chunk(chunk):
+                    nonlocal full_text
                     if isinstance(chunk, str):
                         full_text += chunk
                         placeholder.markdown(full_text)
-            except Exception as e:
-                placeholder.error(f"Error: {e}")
-            finally:
-                placeholder.markdown(full_text)
-                st.session_state.messages.append({"role": "assistant", "content": full_text})
-                st.session_state.running = False
+
+                terminal = _consume_agent_run(gen, on_chunk)
+            if terminal.status == TerminalStatus.COMPLETED:
+                placeholder.markdown(full_text or terminal.text)
+                if full_text or terminal.text:
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": full_text or terminal.text,
+                    })
+            elif terminal.status == TerminalStatus.WAITING:
+                message = _waiting_text(terminal)
+                placeholder.info(message)
+                st.session_state.messages.append({"role": "system", "content": message})
+            elif terminal.status == TerminalStatus.CANCELLED:
+                placeholder.warning(terminal.reason or "Cancelled")
+            else:
+                placeholder.error(_error_text(terminal))
+            st.session_state.running = False
 
 
 if __name__ == "__main__":

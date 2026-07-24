@@ -13,7 +13,7 @@
              禁止开放式全量扫描。
 
 notify() 是 ZeroAgent 新增的通知出口（用于将 conductor 事件推送到 IM）。
-check() 保持与 GenericAgent conductor 的兼容性（用于从 IM 拉取新消息唤醒
+check() 保持与 ZeroAgent conductor 的轮询约定兼容（用于从 IM 拉取新消息唤醒
 conductor）。
 """
 

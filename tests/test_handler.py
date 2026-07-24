@@ -3,7 +3,7 @@
 import pytest
 
 from zero_agent.core.handler import BaseHandler
-from zero_agent.core.types import StepOutcome
+from zero_agent.core.types import EvidenceLedger, EvidenceRecord, StepAction, StepOutcome, TaskContract, TaskMode, TerminalStatus
 from zero_agent.llm.base import MockResponse
 from zero_agent.tools.registry import ToolDefinition, ToolRegistry
 
@@ -16,14 +16,18 @@ class TestBaseHandlerDispatch:
         # 注册一个 do_test 方法
         def do_test(self, args, response):
             yield "running test\n"
-            return StepOutcome({"result": "ok"}, next_prompt="")
+            return StepOutcome(
+                {"result": "ok"},
+                next_prompt="continue",
+                action=StepAction.CONTINUE,
+            )
 
         mock_handler.do_test = do_test.__get__(mock_handler)
 
         gen = mock_handler.dispatch("test", {}, MockResponse())
         result = _exhaust(gen)
         assert result.data == {"result": "ok"}
-        assert result.next_prompt == ""
+        assert result.next_prompt == "continue"
 
     def test_dispatch_registry_fallback(self, mock_handler: BaseHandler) -> None:
         """回退到 ToolRegistry 中的 handler."""
@@ -40,7 +44,22 @@ class TestBaseHandlerDispatch:
         )
         result = _exhaust(gen)
         assert result.data is None
-        assert "未知工具" in result.next_prompt
+        assert "不存在的工具" in result.next_prompt
+        assert "工具未执行" in result.next_prompt
+        assert "provider-native tool_call" in result.next_prompt
+        assert "不要猜工具名" in result.next_prompt
+
+    def test_bad_json_retry_prompt_requires_regeneration(self, mock_handler: BaseHandler) -> None:
+        """非法 tool_call JSON 不做 runtime 补正，只要求模型重发合法 native call."""
+        result = _exhaust(mock_handler.do_bad_json(
+            {"msg": "Failed to parse tool call JSON arguments: Expecting ','"},
+            MockResponse(content=""),
+        ))
+
+        assert result.next_prompt is not None
+        assert "工具未执行" in result.next_prompt
+        assert "function.arguments 必须是合法 JSON object string" in result.next_prompt
+        assert "不要在正文中解释或写工具协议" in result.next_prompt
 
     def test_dispatch_injects_meta(self, mock_handler: BaseHandler) -> None:
         """dispatch 注入 _index 和 _tool_num 元信息."""
@@ -48,7 +67,11 @@ class TestBaseHandlerDispatch:
 
         def do_capture(self, args, response):
             captured_args.update(args)
-            return StepOutcome({"ok": True}, next_prompt="")
+            return StepOutcome(
+                {"ok": True},
+                next_prompt="continue",
+                action=StepAction.CONTINUE,
+            )
 
         mock_handler.do_capture = do_capture.__get__(mock_handler)
 
@@ -81,13 +104,14 @@ class TestBaseHandlerDispatch:
         self,
         mock_handler: BaseHandler,
     ) -> None:
-        """registry handler 可直接返回 StepOutcome 并保留 should_exit."""
+        """Registry handlers preserve explicit wait control."""
+
         def custom_handler(args, _response, _handler):
             yield "done\n"
             return StepOutcome(
                 {"result": "interrupt"},
-                next_prompt="",
-                should_exit=True,
+                action=StepAction.WAIT_FOR_USER,
+                reason="human_intervention",
             )
 
         mock_handler.registry.register(ToolDefinition(
@@ -102,11 +126,11 @@ class TestBaseHandlerDispatch:
         ))
 
         assert result.data == {"result": "interrupt"}
-        assert result.next_prompt == ""
-        assert result.should_exit is True
+        assert result.next_prompt is None
+        assert result.action is StepAction.WAIT_FOR_USER
 
-    def test_real_registry_ask_user_exits(self, mock_config) -> None:
-        """真实 ToolRegistry 分发 ask_user 时必须让 loop 退出."""
+    def test_real_registry_ask_user_waits(self, mock_config) -> None:
+        """The built-in ask_user handler explicitly waits for the user."""
         registry = ToolRegistry.with_builtins(mock_config)
         handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
 
@@ -116,8 +140,8 @@ class TestBaseHandlerDispatch:
             MockResponse(),
         ))
 
-        assert result.should_exit is True
-        assert result.next_prompt == ""
+        assert result.action is StepAction.WAIT_FOR_USER
+        assert result.next_prompt is None
         assert result.data["status"] == "INTERRUPT"
         assert result.data["data"]["question"] == "继续吗？"
 
@@ -171,6 +195,63 @@ class TestBaseHandlerDispatch:
         assert "content argument is required" in result.data["msg"]
         assert result.next_prompt == "\n"
         assert not target.exists()
+
+    def test_file_write_repeated_overwrite_uses_last_content(
+        self,
+        mock_config,
+        tmp_path,
+    ) -> None:
+        """重复 overwrite 是显式重写，最终内容应来自最后一次调用。"""
+        mock_config.workspace_dir = str(tmp_path)
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=str(tmp_path))
+
+        _exhaust(handler.dispatch(
+            "file_write",
+            {"path": "out.txt", "content": "first", "mode": "overwrite"},
+            None,
+        ))
+        _exhaust(handler.dispatch(
+            "file_write",
+            {"path": "out.txt", "content": "second", "mode": "overwrite"},
+            None,
+        ))
+
+        assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "second"
+
+    def test_file_write_repeated_append_and_prepend_are_not_deduplicated(
+        self,
+        mock_config,
+        tmp_path,
+    ) -> None:
+        """append/prepend 的重复调用有语义，不能按路径去重。"""
+        mock_config.workspace_dir = str(tmp_path)
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=str(tmp_path))
+
+        _exhaust(handler.dispatch(
+            "file_write",
+            {"path": "append.txt", "content": "a", "mode": "append"},
+            None,
+        ))
+        _exhaust(handler.dispatch(
+            "file_write",
+            {"path": "append.txt", "content": "b", "mode": "append"},
+            None,
+        ))
+        _exhaust(handler.dispatch(
+            "file_write",
+            {"path": "prepend.txt", "content": "a", "mode": "prepend"},
+            None,
+        ))
+        _exhaust(handler.dispatch(
+            "file_write",
+            {"path": "prepend.txt", "content": "b", "mode": "prepend"},
+            None,
+        ))
+
+        assert (tmp_path / "append.txt").read_text(encoding="utf-8") == "ab"
+        assert (tmp_path / "prepend.txt").read_text(encoding="utf-8") == "ba"
 
     def test_real_registry_code_run_missing_script_matches_ga(
         self,
@@ -371,6 +452,32 @@ class TestBaseHandlerDispatch:
         assert "# Insight" in result.next_prompt
 
 
+def _set_chat_contract(handler: BaseHandler) -> None:
+    handler.task_contract = TaskContract(
+        task_id=handler.task_contract.task_id,
+        user_request=handler.task_contract.user_request,
+        mode=TaskMode.CHAT,
+        plan_path=handler.task_contract.plan_path,
+    )
+
+
+def _set_execution_contract(handler: BaseHandler) -> None:
+    handler.task_contract = TaskContract(
+        task_id=handler.task_contract.task_id,
+        user_request=handler.task_contract.user_request,
+        mode=TaskMode.EXECUTION,
+        plan_path=handler.task_contract.plan_path,
+    )
+
+
+def _add_success_evidence(handler: BaseHandler) -> None:
+    handler._record_evidence(
+        "file_read",
+        {"path": "config.py"},
+        StepOutcome("content", next_prompt="continue"),
+    )
+
+
 class TestBaseHandlerDoNoTool:
     """BaseHandler.do_no_tool() tests."""
 
@@ -381,19 +488,23 @@ class TestBaseHandlerDoNoTool:
         assert result.next_prompt is not None
         assert "regenerate" in result.next_prompt.lower()
 
-    def test_normal_response_completes(self, mock_handler: BaseHandler) -> None:
-        """正常文本回复 → 任务完成（next_prompt=None）."""
+    def test_normal_response_requests_completion(self, mock_handler: BaseHandler) -> None:
+        """A deliverable chat response requests typed completion."""
+        _set_chat_contract(mock_handler)
         gen = mock_handler.do_no_tool(
             {}, MockResponse(content="Task is done, here is the result."),
         )
         result = _exhaust(gen)
         assert result.next_prompt is None
+        assert result.action is StepAction.REQUEST_COMPLETION
+        assert mock_handler.completion_certificate is not None
 
     def test_normal_response_with_action_word_completes(
         self,
         mock_handler: BaseHandler,
     ) -> None:
         """普通最终回答里的 reading/checking 不应被误判为工具意图."""
+        _set_chat_contract(mock_handler)
         gen = mock_handler.do_no_tool(
             {},
             MockResponse(
@@ -406,6 +517,7 @@ class TestBaseHandlerDoNoTool:
         result = _exhaust(gen)
 
         assert result.next_prompt is None
+        assert result.action is StepAction.REQUEST_COMPLETION
 
     def test_incomplete_response_retries(self, mock_handler: BaseHandler) -> None:
         """流异常中断触发重试."""
@@ -467,7 +579,23 @@ class TestBaseHandlerDoNoTool:
         result = _exhaust(gen)
 
         assert result.next_prompt is not None
-        assert "native" in result.next_prompt.lower()
+        assert "provider-native" in result.next_prompt
+        assert result.data == {}
+
+    def test_text_protocol_retry_prompt_excludes_provider_native(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        response = MockResponse(
+            content='<tool_use>{"name":"file_read","arguments":[]}</tool_use>',
+        )
+        response.tool_protocol = "text"
+
+        result = _exhaust(mock_handler.do_no_tool({}, response))
+
+        assert result.next_prompt is not None
+        assert '<tool_use>{"name":"file_read","arguments":{"path":"example.txt"}}</tool_use>' in result.next_prompt
+        assert "provider-native" not in result.next_prompt.lower()
         assert result.data == {}
 
     def test_file_content_without_native_call_retries(
@@ -500,6 +628,145 @@ class TestBaseHandlerDoNoTool:
         assert "tool" in result.next_prompt.lower()
         assert result.data == {}
 
+    def test_bare_chinese_action_with_file_names_retries(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """省略主语的“看文件:”动作句不是最终答案，必须要求模型重发 tool_call."""
+        gen = mock_handler.do_no_tool(
+            {},
+            MockResponse(content="看后端核心文件 chat_context.py 和 config_registry.py："),
+        )
+        result = _exhaust(gen)
+
+        assert result.next_prompt is not None
+        assert "没有任何工具被执行" in result.next_prompt
+        assert "provider-native tool_call" in result.next_prompt
+
+    def test_bare_chinese_continue_reading_file_retries(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """继续/再/先 + 动作 + 文件名 的短句应按契约错误重试."""
+        gen = mock_handler.do_no_tool(
+            {},
+            MockResponse(content="继续看 ChatPage.tsx 的加载逻辑："),
+        )
+        result = _exhaust(gen)
+
+        assert result.next_prompt is not None
+        assert "不要只重复计划" in result.next_prompt
+
+    def test_action_intent_uses_independent_judge_before_retry(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """动作句 no-tool 会先走独立 judge；judge 判 needs_tool 后才注入重试提示."""
+        calls = []
+
+        def fake_judge(packet):
+            calls.append(packet)
+            return {"decision": "needs_tool", "confidence": 0.98, "reason": "promised file read"}
+
+        mock_handler.completion_gate._completion_judge = fake_judge
+        result = _exhaust(mock_handler.do_no_tool(
+            {},
+            MockResponse(content="看后端核心文件 chat_context.py 和 config_registry.py："),
+        ))
+
+        assert calls
+        assert calls[0]["reason_hint"] == "promissory_action"
+        assert calls[0]["tool_calls_emitted"] is False
+        assert result.next_prompt is not None
+        assert "没有任何工具被执行" in result.next_prompt
+
+    def test_ambiguous_no_tool_uses_independent_judge(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """不明显 final 的 no-tool 回复由独立 judge 判定是否应 retry."""
+        calls = []
+
+        def fake_judge(packet):
+            calls.append(packet)
+            return {"decision": "ambiguous", "confidence": 0.4, "reason": "no conclusion"}
+
+        mock_handler.completion_gate._completion_judge = fake_judge
+        result = _exhaust(mock_handler.do_no_tool(
+            {},
+            MockResponse(content="我需要进一步判断这个问题。"),
+        ))
+
+        assert calls
+        assert calls[0]["reason_hint"] == "ambiguous_no_tool"
+        assert result.next_prompt is not None
+        assert "最终结论" in result.next_prompt
+
+    def test_greeting_help_reply_does_not_invoke_judge_or_retry(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """普通问候/能力介绍是可交付回复，不应被 independent judge 拉成第二轮."""
+        calls = []
+        mock_handler.completion_gate._completion_judge = lambda packet: calls.append(packet) or {
+            "decision": "needs_tool",
+            "confidence": 1.0,
+            "reason": "should not be called",
+        }
+        _set_chat_contract(mock_handler)
+        response = MockResponse(content=(
+            "你好！我是你的物理级全能执行者。\n"
+            "我已就绪，可以帮你完成浏览器操控、文件系统操作、代码执行和 Web 搜索。\n"
+            "有什么需要我帮忙的吗？直接说任务就行。"
+        ))
+
+        result = _exhaust(mock_handler.do_no_tool({}, response))
+
+        assert calls == []
+        assert result.next_prompt is None
+        assert result.action is StepAction.REQUEST_COMPLETION
+        assert result.data is response
+
+    def test_user_clarification_question_does_not_invoke_judge_or_retry(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """向用户澄清/提问本身是可交付 no-tool 回复，不应被判未完成."""
+        calls = []
+        mock_handler.completion_gate._completion_judge = lambda packet: calls.append(packet) or {
+            "decision": "needs_tool",
+            "confidence": 1.0,
+            "reason": "should not be called",
+        }
+        _set_chat_contract(mock_handler)
+        response = MockResponse(content="请问你想让我修改哪个文件？请提供路径或模块名。")
+
+        result = _exhaust(mock_handler.do_no_tool({}, response))
+
+        assert calls == []
+        assert result.next_prompt is None
+        assert result.action is StepAction.REQUEST_COMPLETION
+        assert result.data is response
+
+    def test_judge_final_is_advisory_and_does_not_allow_completion(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """独立 judge 判 final 也只能作为 metadata，不能签发完成."""
+        mock_handler.completion_gate._completion_judge = lambda packet: {
+            "decision": "final",
+            "confidence": 0.9,
+            "reason": "answers user",
+        }
+        response = MockResponse(content="我需要进一步判断这个问题。")
+        result = _exhaust(mock_handler.do_no_tool({}, response))
+
+        assert result.next_prompt is not None
+        assert result.action is StepAction.CONTINUE
+        assert result.data == {}
+        assert result.next_prompt
+        assert mock_handler.completion_certificate is None
+
     def test_english_future_action_intent_without_native_call_retries(
         self,
         mock_handler: BaseHandler,
@@ -514,6 +781,151 @@ class TestBaseHandlerDoNoTool:
         assert result.next_prompt is not None
         assert "native" in result.next_prompt.lower()
         assert result.data == {}
+
+    def test_thinking_only_retries_with_specific_reason(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        args: dict = {}
+        result = _exhaust(mock_handler.do_no_tool(
+            args,
+            MockResponse(content="", thinking="I should inspect files."),
+        ))
+
+        assert result.action is StepAction.CONTINUE
+        assert result.next_prompt is not None
+        assert args["_completion_gate"]["reason"] == "thinking_only_no_deliverable"
+
+    def test_unknown_stop_reason_retries_without_completion(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        args: dict = {}
+        result = _exhaust(mock_handler.do_no_tool(
+            args,
+            MockResponse(content="Done.", stop_reason="unknown:mystery"),
+        ))
+
+        assert result.action is StepAction.CONTINUE
+        assert result.next_prompt is not None
+        assert args["_completion_gate"]["reason"] == "unsafe_stop_reason"
+        assert mock_handler.completion_certificate is None
+
+    def test_execution_allow_uses_completion_evaluator_and_requires_evidence(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        _set_execution_contract(mock_handler)
+        result = _exhaust(mock_handler.do_no_tool(
+            {},
+            MockResponse(content="Task is done, here is the result."),
+        ))
+
+        assert result.action is StepAction.CONTINUE
+        assert result.next_prompt is not None
+        assert "cannot complete from text alone" in result.next_prompt
+        assert mock_handler.completion_certificate is None
+
+    def test_execution_allow_requests_completion_with_success_evidence(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        _set_execution_contract(mock_handler)
+        _add_success_evidence(mock_handler)
+
+        result = _exhaust(mock_handler.do_no_tool(
+            {},
+            MockResponse(content="Config is valid."),
+        ))
+
+        assert result.action is StepAction.REQUEST_COMPLETION
+        assert result.next_prompt is None
+        assert mock_handler.completion_certificate is not None
+        assert mock_handler.completion_certificate.evidence_count == 1
+
+    def test_dispatch_records_success_evidence_for_real_tools(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        _exhaust(mock_handler.dispatch(
+            "echo",
+            {"message": "hello"},
+            MockResponse(),
+        ))
+
+        assert len(mock_handler.evidence_ledger.records) == 1
+        record = mock_handler.evidence_ledger.records[0]
+        assert record.tool_name == "echo"
+        assert record.status == "success"
+        assert record.kind == "system"
+
+    def test_bad_json_does_not_record_evidence(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        _exhaust(mock_handler.do_bad_json(
+            {"msg": "bad"},
+            MockResponse(),
+        ))
+
+        assert mock_handler.evidence_ledger.records == []
+
+    def test_enter_plan_mode_updates_task_contract(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        result = mock_handler.enter_plan_mode("plan.md")
+
+        assert result == "plan.md"
+        assert mock_handler.task_contract.mode is TaskMode.PLAN
+        assert mock_handler.task_contract.plan_path == "plan.md"
+        assert mock_handler.plan_verify_status == "missing"
+
+    def test_plan_no_tool_loads_verified_artifacts_and_completes(
+        self,
+        mock_handler: BaseHandler,
+        tmp_path,
+    ) -> None:
+        from zero_agent.core.completion import write_evidence_json
+
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("- [x] implemented\n", encoding="utf-8")
+        (tmp_path / "verify_context.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "result.md").write_text("VERDICT: PASS\n", encoding="utf-8")
+        mock_handler.enter_plan_mode(str(plan_path))
+        ledger = EvidenceLedger(records=[
+            EvidenceRecord(1, "code_run", "success", "execute", "tests passed"),
+        ])
+        mock_handler.evidence_ledger = ledger
+        write_evidence_json(
+            tmp_path / "evidence.json",
+            mock_handler.task_contract.task_id,
+            ledger,
+        )
+
+        result = _exhaust(mock_handler.do_no_tool(
+            {},
+            MockResponse(content="Plan verified and complete."),
+        ))
+
+        assert result.action is StepAction.REQUEST_COMPLETION
+        assert mock_handler.completion_certificate is not None
+        assert mock_handler.completion_certificate.verify_status == "pass"
+        assert mock_handler._in_plan_mode() is True
+
+    def test_anchor_prompt_includes_contract_and_recent_evidence(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        _set_execution_contract(mock_handler)
+        _add_success_evidence(mock_handler)
+
+        prompt = mock_handler._build_anchor_prompt()
+
+        assert "<task_contract>" in prompt
+        assert "mode: TaskMode.EXECUTION" in prompt
+        assert "recent_evidence:" in prompt
+        assert "tool=file_read" in prompt
 
     def test_action_intent_retry_budget_exits(
         self,
@@ -533,12 +945,13 @@ class TestBaseHandlerDoNoTool:
             MockResponse(content="需要读取配置文件。"),
         ))
 
-        assert first.should_exit is False
+        assert first.action is StepAction.CONTINUE
         assert first.next_prompt is not None
-        assert second.should_exit is False
+        assert second.action is StepAction.CONTINUE
         assert second.next_prompt is not None
-        assert third.should_exit is True
-        assert third.next_prompt is None
+        assert third.action is StepAction.FAIL
+        assert third.terminal_status is TerminalStatus.BUDGET_EXHAUSTED
+        assert third.reason == "promissory_action_limit"
 
 
     def test_narrative_with_action_phrase_completes(
@@ -546,6 +959,7 @@ class TestBaseHandlerDoNoTool:
         mock_handler: BaseHandler,
     ) -> None:
         """叙述性回复含动作短语但后续有大段正文 → 不应被误判为未执行动作."""
+        _set_chat_contract(mock_handler)
         gen = mock_handler.do_no_tool(
             {},
             MockResponse(
@@ -562,6 +976,7 @@ class TestBaseHandlerDoNoTool:
         assert result.next_prompt is None, (
             "叙述性回复含大段正文不应被当作未执行动作意图"
         )
+        assert result.action is StepAction.REQUEST_COMPLETION
 
     def test_text_tool_protocol_retry_budget_exits(
         self,
@@ -576,9 +991,11 @@ class TestBaseHandlerDoNoTool:
         second = _exhaust(mock_handler.do_no_tool({}, MockResponse(content=content)))
         third = _exhaust(mock_handler.do_no_tool({}, MockResponse(content=content)))
 
-        assert first.should_exit is False
-        assert second.should_exit is False
-        assert third.should_exit is True
+        assert first.action is StepAction.CONTINUE
+        assert second.action is StepAction.CONTINUE
+        assert third.action is StepAction.FAIL
+        assert third.terminal_status is TerminalStatus.PROTOCOL_ERROR
+        assert third.reason == "text_tool_protocol_limit"
 
     def test_native_tool_call_resets_completion_gate_budget(
         self,
@@ -601,7 +1018,7 @@ class TestBaseHandlerDoNoTool:
             {},
             MockResponse(content="我来查看配置文件。"),
         ))
-        assert second.should_exit is False
+        assert second.action is StepAction.CONTINUE
         assert second.next_prompt is not None
 
     def test_no_tool_retry_is_annotated_for_turn_summary(
@@ -622,25 +1039,26 @@ class TestBaseHandlerDoNoTool:
             [],
             turn=1,
             next_prompt=result.next_prompt,
-            exit_reason={},
+            terminal=None,
         )
 
         assert "promissory_action" in mock_handler.history_info[-1]
         assert "直接回答" not in mock_handler.history_info[-1]
 
-    def test_three_empty_retries_exits(self, mock_handler: BaseHandler) -> None:
-        """连续 3 次空响应 → should_exit=True."""
+    def test_three_empty_retries_fail_budget(self, mock_handler: BaseHandler) -> None:
+        """Three empty responses explicitly fail the retry budget."""
         mock_handler._empty_ct = 2
         result = mock_handler._retry_or_exit("retry")
-        # _retry_or_exit 直接返回 StepOutcome（不是 generator）
-        assert result.should_exit is True
+        assert result.action is StepAction.FAIL
+        assert result.terminal_status is TerminalStatus.BUDGET_EXHAUSTED
+        assert result.reason == "blank_response_limit"
         assert mock_handler._empty_ct == 3
 
     def test_retry_or_exit_increments(self, mock_handler: BaseHandler) -> None:
         """_retry_or_exit 递增计数器."""
         mock_handler._empty_ct = 0
         result = mock_handler._retry_or_exit("retry")
-        assert result.should_exit is False
+        assert result.action is StepAction.CONTINUE
         assert mock_handler._empty_ct == 1
 
     def test_reset_session_state_clears_empty_ct_and_budget(
@@ -664,7 +1082,7 @@ class TestBaseHandlerDoNoTool:
             {},
             MockResponse(content="让我检查项目配置情况。"),
         ))
-        assert result.should_exit is False
+        assert result.action is StepAction.CONTINUE
 
 
 class TestBaseHandlerWorking:

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 import select
+import queue as Q
 import sys
 import threading
 import time
@@ -40,6 +41,7 @@ from zero_agent.bots.common import (
     require_runtime,
     split_text,
     strip_files,
+    terminal_notice,
 )
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -186,19 +188,12 @@ class WeComApp(AgentBotMixin):
     async def run_agent(self, chat_id, text, **_):
         state = {"running": True}
         self.user_tasks[chat_id] = state
-        done_event = threading.Event()
-        result: dict = {}
         loop = asyncio.get_running_loop()
         hook_key = f"wecom_{chat_id}"
+        terminal = None
 
         def _on_turn(ctx):
             try:
-                if ctx.get("exit_reason"):
-                    resp = ctx.get("response")
-                    result["raw"] = resp.content if hasattr(resp, "content") else str(resp)
-                    result["summary"] = ctx.get("summary")
-                    done_event.set()
-                    return
                 summary = ctx.get("summary")
                 if not summary:
                     return
@@ -218,28 +213,29 @@ class WeComApp(AgentBotMixin):
         try:
             await self.send_text(chat_id, "🤔 思考中...")
             self._register_hook(hook_key, _on_turn)
-            runner.put_task(f"{FILE_HINT}\n\n{text}", source=self.source)
-
-            t0 = time.time()
-            while state["running"] and not done_event.is_set():
-                await asyncio.sleep(1)
-                elapsed = time.time() - t0
-                if elapsed > 10 and not runner.is_running:
-                    await asyncio.sleep(3)
-                    if not done_event.is_set():
-                        break
-
-            if result.get("raw") is not None:
-                self._stats["completed"] += 1
-                await self.send_done(chat_id, result["raw"])
-                label = result.get("summary") or f'{len(result["raw"])} 字'
-                _tprint(f"[{_ts()}] ✅ Done ({chat_id}) — {label}")
-            elif not state["running"]:
+            dq = runner.put_task(f"{FILE_HINT}\n\n{text}", source=self.source)
+            while state["running"]:
+                try:
+                    item = await asyncio.to_thread(dq.get, True, 1)
+                except asyncio.CancelledError:
+                    raise
+                except Q.Empty:
+                    continue
+                if item.get("type") != "terminal":
+                    continue
+                terminal = item
+                status = item.get("status")
+                if status == "completed":
+                    self._stats["completed"] += 1
+                    raw = item.get("text", "")
+                    await self.send_done(chat_id, raw)
+                    _tprint(f"[{_ts()}] ✅ Done ({chat_id}) — {len(raw)} 字")
+                else:
+                    await self.send_text(chat_id, terminal_notice(item))
+                break
+            if not state["running"] and terminal is None:
                 _tprint(f"[{_ts()}] ⏹️ 停止 ({chat_id})")
                 await self.send_text(chat_id, "⏹️ 已停止")
-            else:
-                _tprint(f"[{_ts()}] ⚠️ 异常退出 ({chat_id})")
-                await self.send_text(chat_id, "⚠️ Agent 异常退出, 请重试")
         except Exception as e:
             traceback.print_exc()
             await self.send_text(chat_id, f"❌ 错误: {e}")

@@ -11,9 +11,9 @@ import pytest
 
 from zero_agent.core.handler import BaseHandler
 from zero_agent.core.loop import AgentLoop
-from zero_agent.core.types import StepOutcome
+from zero_agent.core.types import StepAction, StepOutcome, TaskContract, TaskMode, TerminalStatus
 from zero_agent.llm.base import MockFunction, MockResponse, MockToolCall
-from zero_agent.tools.registry import ToolRegistry
+from zero_agent.tools.registry import ToolDefinition, ToolRegistry
 from zero_agent.utils.text import smart_format
 
 
@@ -43,11 +43,38 @@ def _make_mock_client(responses: List[MockResponse]):
     return MockClient()
 
 
+def _set_chat_contract(handler: BaseHandler) -> None:
+    handler.task_contract = TaskContract(
+        task_id=handler.task_contract.task_id,
+        user_request=handler.task_contract.user_request,
+        mode=TaskMode.CHAT,
+        plan_path=handler.task_contract.plan_path,
+    )
+
+
+def _add_success_evidence(handler: BaseHandler) -> None:
+    handler._record_evidence(
+        "file_read",
+        {"path": "config.py"},
+        StepOutcome("content", next_prompt="continue"),
+    )
+
+def _set_execution_contract(handler: BaseHandler) -> None:
+    handler.task_contract = TaskContract(
+        task_id=handler.task_contract.task_id,
+        user_request=handler.task_contract.user_request,
+        mode=TaskMode.EXECUTION,
+        plan_path=handler.task_contract.plan_path,
+    )
+
+
+
 class TestAgentLoop:
     """AgentLoop tests."""
 
     def test_single_turn_completion(self, mock_handler: BaseHandler) -> None:
-        """单轮文本回复 → CURRENT_TASK_DONE."""
+        """A single deliverable text response returns completed."""
+        _set_chat_contract(mock_handler)
         client = _make_mock_client([
             MockResponse(content="Task is done, no tools needed."),
         ])
@@ -60,11 +87,12 @@ class TestAgentLoop:
         )
 
         gen = loop.run("system prompt", "do something")
-        exit_reason = _exhaust(gen)
-        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        terminal = _exhaust(gen)
+        assert terminal.status is TerminalStatus.COMPLETED
 
     def test_empty_tool_calls_triggers_no_tool(self, mock_handler: BaseHandler) -> None:
         """LLM 不调用工具时自动触发 do_no_tool."""
+        _set_chat_contract(mock_handler)
         client = _make_mock_client([
             MockResponse(content="Here is my answer."),
         ])
@@ -77,11 +105,13 @@ class TestAgentLoop:
         )
 
         gen = loop.run("sp", "task")
-        exit_reason = _exhaust(gen)
-        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        terminal = _exhaust(gen)
+        assert terminal.status is TerminalStatus.COMPLETED
 
     def test_tool_call_dispatch(self, mock_handler: BaseHandler) -> None:
         """工具调用被正确分发到 handler."""
+        _set_execution_contract(mock_handler)
+        _add_success_evidence(mock_handler)
         client = _make_mock_client([
             MockResponse(
                 content="",
@@ -106,19 +136,18 @@ class TestAgentLoop:
         )
 
         gen = loop.run("sp", "task")
-        exit_reason = _exhaust(gen)
-        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        terminal = _exhaust(gen)
+        assert terminal.status is TerminalStatus.COMPLETED
 
-    def test_should_exit_tool(self, mock_handler: BaseHandler) -> None:
-        """should_exit=True 的工具 → 立即退出.
+    def test_wait_for_user_tool(self, mock_handler: BaseHandler) -> None:
+        """WAIT_FOR_USER returns the original payload as a waiting terminal."""
 
-        ask_user 通过 do_ 方法约定实现 should_exit 行为.
-        """
         def do_ask_user(self, args, response):
             yield "asking user\n"
             return StepOutcome(
                 {"question": args.get("question", "")},
-                should_exit=True,
+                action=StepAction.WAIT_FOR_USER,
+                reason="human_intervention",
             )
 
         mock_handler.do_ask_user = do_ask_user.__get__(mock_handler)
@@ -146,11 +175,13 @@ class TestAgentLoop:
         )
 
         gen = loop.run("sp", "task")
-        exit_reason = _exhaust(gen)
-        assert exit_reason["result"] == "EXITED"
+        terminal = _exhaust(gen)
+        assert terminal.status is TerminalStatus.WAITING
+        assert terminal.reason == "human_intervention"
+        assert terminal.data == {"question": "proceed?"}
 
-    def test_real_registry_ask_user_exits_loop(self, mock_config) -> None:
-        """ask_user 通过真实 registry 分发时让 AgentLoop 返回 EXITED."""
+    def test_real_registry_ask_user_waits(self, mock_config) -> None:
+        """The built-in ask_user payload is preserved in a waiting terminal."""
         registry = ToolRegistry.with_builtins(mock_config)
         handler = BaseHandler(
             registry=registry,
@@ -178,11 +209,12 @@ class TestAgentLoop:
             verbose=False,
         )
 
-        exit_reason = _exhaust(loop.run("sp", "task"))
+        terminal = _exhaust(loop.run("sp", "task"))
 
-        assert exit_reason["result"] == "EXITED"
-        assert exit_reason["data"]["status"] == "INTERRUPT"
-        assert exit_reason["data"]["data"]["question"] == "proceed?"
+        assert terminal.status is TerminalStatus.WAITING
+        assert terminal.reason == "human_intervention"
+        assert terminal.data["status"] == "INTERRUPT"
+        assert terminal.data["data"]["question"] == "proceed?"
 
     def test_max_turns_exceeded(self, mock_handler: BaseHandler) -> None:
         """超出最大轮次限制.
@@ -214,11 +246,13 @@ class TestAgentLoop:
         )
 
         gen = loop.run("sp", "task")
-        exit_reason = _exhaust(gen)
-        assert exit_reason["result"] == "MAX_TURNS_EXCEEDED"
+        terminal = _exhaust(gen)
+        assert terminal.status is TerminalStatus.BUDGET_EXHAUSTED
+        assert terminal.reason == "max_turns"
 
     def test_yield_structure_verbose(self, mock_handler: BaseHandler) -> None:
         """verbose 模式下 yield 的结构."""
+        _set_chat_contract(mock_handler)
         client = _make_mock_client([
             MockResponse(content="Done."),
         ])
@@ -240,6 +274,7 @@ class TestAgentLoop:
 
     def test_yield_structure_non_verbose(self, mock_handler: BaseHandler) -> None:
         """非 verbose 模式下 yield 的结构."""
+        _set_chat_contract(mock_handler)
         client = _make_mock_client([
             MockResponse(content="Done."),
         ])
@@ -258,6 +293,8 @@ class TestAgentLoop:
 
     def test_multi_tool_calls(self, mock_handler: BaseHandler) -> None:
         """单轮多个工具调用."""
+        _set_execution_contract(mock_handler)
+        _add_success_evidence(mock_handler)
         client = _make_mock_client([
             MockResponse(
                 content="",
@@ -287,11 +324,60 @@ class TestAgentLoop:
         )
 
         gen = loop.run("sp", "task")
-        exit_reason = _exhaust(gen)
-        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        terminal = _exhaust(gen)
+        assert terminal.status is TerminalStatus.COMPLETED
 
-    def test_empty_next_prompt_completes_like_ga(self, mock_handler: BaseHandler) -> None:
-        """空 next_prompt 应直接视为任务完成."""
+    def test_duplicate_tool_calls_are_dispatched_in_order(self) -> None:
+        """同轮重复工具调用应按模型返回顺序逐个分发。"""
+        calls: list[str] = []
+        registry = ToolRegistry()
+
+        def record_handler(args, _response, _handler):
+            calls.append(args["path"])
+            yield f"wrote {args['path']}\n"
+            return {"status": "success"}
+
+        registry.register(ToolDefinition(
+            name="file_write",
+            description="记录写入调用",
+            parameters={"type": "object", "properties": {"path": {"type": "string"}}},
+            handler=record_handler,
+        ))
+        handler = BaseHandler(registry=registry, cwd="/tmp/test-workspace")
+        _set_execution_contract(handler)
+        _add_success_evidence(handler)
+        client = _make_mock_client([
+            MockResponse(
+                content="",
+                tool_calls=[
+                    MockToolCall(
+                        function=MockFunction(name="file_write", arguments='{"path": "same.txt"}'),
+                        id="call_1",
+                    ),
+                    MockToolCall(
+                        function=MockFunction(name="file_write", arguments='{"path": "same.txt"}'),
+                        id="call_2",
+                    ),
+                ],
+            ),
+            MockResponse(content="Done."),
+        ])
+        loop = AgentLoop(
+            client=client,
+            handler=handler,
+            tools_schema=[],
+            max_turns=5,
+            verbose=False,
+        )
+
+        terminal = _exhaust(loop.run("sp", "task"))
+
+        assert terminal.status is TerminalStatus.COMPLETED
+        assert calls == ["same.txt", "same.txt"]
+
+    def test_invalid_empty_continue_is_protocol_error(self, mock_handler: BaseHandler) -> None:
+        """CONTINUE without a non-empty prompt violates the step contract."""
+
         def do_empty(self, args, response):
             yield "empty prompt\n"
             return StepOutcome({"result": "ok"}, next_prompt="")
@@ -317,9 +403,10 @@ class TestAgentLoop:
             verbose=False,
         )
 
-        exit_reason = _exhaust(loop.run("sp", "task"))
+        terminal = _exhaust(loop.run("sp", "task"))
 
-        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        assert terminal.status is TerminalStatus.PROTOCOL_ERROR
+        assert terminal.reason == "invalid_step_outcome"
         assert client._call_count == 1
 
     def test_loop_sends_system_once_and_tool_results_as_tool_messages(
@@ -327,6 +414,8 @@ class TestAgentLoop:
         mock_handler: BaseHandler,
     ) -> None:
         """下一轮消息保持 tool_results 字段，session 再标准化."""
+        _set_execution_contract(mock_handler)
+        _add_success_evidence(mock_handler)
         client = _make_recording_client([
             MockResponse(
                 content="",
@@ -349,9 +438,9 @@ class TestAgentLoop:
             verbose=False,
         )
 
-        exit_reason = _exhaust(loop.run("system prompt", "task"))
+        terminal = _exhaust(loop.run("system prompt", "task"))
 
-        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        assert terminal.status is TerminalStatus.COMPLETED
         assert client.system == "system prompt"
         assert client.calls[0] == [{"role": "user", "content": "task"}]
         assert len(client.calls[1]) == 1
@@ -367,6 +456,7 @@ class TestAgentLoop:
         self,
         mock_handler: BaseHandler,
     ) -> None:
+        _set_chat_contract(mock_handler)
         client = _make_mock_client([
             MockResponse(content="Done."),
         ])
@@ -386,6 +476,7 @@ class TestAgentLoop:
         self,
         mock_handler: BaseHandler,
     ) -> None:
+        _set_chat_contract(mock_handler)
         client = _make_mock_client([
             MockResponse(content="Done."),
         ])
@@ -410,6 +501,7 @@ class TestAgentLoop:
         self,
         mock_handler: BaseHandler,
     ) -> None:
+        _add_success_evidence(mock_handler)
         client = _make_mock_client([
             MockResponse(
                 content="",
@@ -434,9 +526,9 @@ class TestAgentLoop:
             verbose=False,
         )
 
-        exit_reason = _exhaust(loop.run("system prompt", "task"))
+        terminal = _exhaust(loop.run("system prompt", "task"))
 
-        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        assert terminal.status is TerminalStatus.COMPLETED
         assert client.last_tools == ""
         assert client._last_tools_json == ""
 
@@ -467,9 +559,10 @@ class TestAgentLoop:
             verbose=False,
         )
 
-        exit_reason = _exhaust(loop.run("system prompt", "task"))
+        terminal = _exhaust(loop.run("system prompt", "task"))
 
-        assert exit_reason["result"] == "MAX_TURNS_EXCEEDED"
+        assert terminal.status is TerminalStatus.BUDGET_EXHAUSTED
+        assert terminal.reason == "max_turns"
         assert client.last_tools == ""
         assert client._last_tools_json == ""
 
@@ -477,6 +570,7 @@ class TestAgentLoop:
         self,
         mock_handler: BaseHandler,
     ) -> None:
+        _add_success_evidence(mock_handler)
         client = _make_mock_client([
             MockResponse(
                 content="",
@@ -499,15 +593,111 @@ class TestAgentLoop:
             verbose=False,
         )
 
-        exit_reason = _exhaust(loop.run("system prompt", "task"))
+        terminal = _exhaust(loop.run("system prompt", "task"))
 
-        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        assert terminal.status is TerminalStatus.COMPLETED
+
+    @pytest.mark.parametrize(
+        ("arguments", "expected"),
+        [
+            ("[]", "got list"),
+            ("null", "got null"),
+            ('"raw"', "got string"),
+            ("123", "got number"),
+        ],
+    )
+    def test_native_non_object_tool_arguments_route_to_bad_json(
+        self,
+        mock_handler: BaseHandler,
+        arguments: str,
+        expected: str,
+    ) -> None:
+        _add_success_evidence(mock_handler)
+        seen: list[str] = []
+
+        original_bad_json = mock_handler.do_bad_json
+
+        def do_bad_json(args, response):
+            seen.append(args["msg"])
+            return (yield from original_bad_json(args, response))
+
+        mock_handler.do_bad_json = do_bad_json
+        client = _make_mock_client([
+            MockResponse(
+                content="",
+                tool_calls=[
+                    MockToolCall(
+                        function=MockFunction(name="echo", arguments=arguments),
+                        id="call_1",
+                    ),
+                ],
+            ),
+            MockResponse(content="Recovered."),
+        ])
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=5,
+            verbose=False,
+        )
+
+        terminal = _exhaust(loop.run("system prompt", "task"))
+
+        assert terminal.status is TerminalStatus.COMPLETED
+        assert seen == [f"function.arguments must decode to a JSON object, {expected}"]
+
+    def test_native_malformed_marker_routes_to_bad_json(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        _add_success_evidence(mock_handler)
+        seen: list[str] = []
+        original_bad_json = mock_handler.do_bad_json
+
+        def do_bad_json(args, response):
+            seen.append(args["msg"])
+            return (yield from original_bad_json(args, response))
+
+        mock_handler.do_bad_json = do_bad_json
+        client = _make_mock_client([
+            MockResponse(
+                content="",
+                tool_calls=[
+                    MockToolCall(
+                        function=MockFunction(
+                            name="echo",
+                            arguments=(
+                                '{"_malformed": true, "_raw": "[]", '
+                                '"_error": "tool arguments must be a JSON object"}'
+                            ),
+                        ),
+                        id="call_1",
+                    ),
+                ],
+            ),
+            MockResponse(content="Recovered."),
+        ])
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=5,
+            verbose=False,
+        )
+
+        terminal = _exhaust(loop.run("system prompt", "task"))
+
+        assert terminal.status is TerminalStatus.COMPLETED
+        assert seen == ["tool arguments must be a JSON object"]
+
 
     def test_multi_tool_results_are_sent_as_separate_messages(
         self,
         mock_handler: BaseHandler,
     ) -> None:
         """多工具调用后的 loop payload 保持自定义 tool_results."""
+        _add_success_evidence(mock_handler)
         client = _make_recording_client([
             MockResponse(
                 content="",
@@ -536,9 +726,9 @@ class TestAgentLoop:
             verbose=False,
         )
 
-        exit_reason = _exhaust(loop.run("system prompt", "task"))
+        terminal = _exhaust(loop.run("system prompt", "task"))
 
-        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        assert terminal.status is TerminalStatus.COMPLETED
         assert len(client.calls[1]) == 1
         msg = client.calls[1][0]
         assert msg["role"] == "user"
@@ -549,8 +739,82 @@ class TestAgentLoop:
             {"tool_use_id": "call_2", "content": '{"result": "b"}'},
         ]
 
+    def test_completion_request_without_certificate_is_protocol_error(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        def do_finish(self, args, response):
+            yield "finishing\n"
+            return StepOutcome({}, action=StepAction.REQUEST_COMPLETION)
+
+        mock_handler.do_finish = do_finish.__get__(mock_handler)
+        client = _make_mock_client([
+            MockResponse(
+                tool_calls=[MockToolCall(
+                    function=MockFunction(name="finish", arguments="{}"),
+                    id="call_1",
+                )],
+            ),
+        ])
+        loop = AgentLoop(client, mock_handler, [], max_turns=2, verbose=False)
+
+        terminal = _exhaust(loop.run("sp", "task"))
+
+        assert terminal.status is TerminalStatus.PROTOCOL_ERROR
+        assert terminal.reason == "invalid_step_outcome"
+
+    def test_invalid_fail_status_is_protocol_error(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        def do_fail(self, args, response):
+            yield "failing\n"
+            return StepOutcome(
+                {},
+                action=StepAction.FAIL,
+                reason="bad",
+                terminal_status=TerminalStatus.CANCELLED,
+            )
+
+        mock_handler.do_fail = do_fail.__get__(mock_handler)
+        client = _make_mock_client([
+            MockResponse(
+                tool_calls=[MockToolCall(
+                    function=MockFunction(name="fail", arguments="{}"),
+                    id="call_1",
+                )],
+            ),
+        ])
+        loop = AgentLoop(client, mock_handler, [], max_turns=2, verbose=False)
+
+        terminal = _exhaust(loop.run("sp", "task"))
+
+        assert terminal.status is TerminalStatus.PROTOCOL_ERROR
+        assert terminal.reason == "invalid_step_outcome"
+
+    def test_unhandled_exception_returns_failed_terminal(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        class ExplodingClient:
+            system = ""
+            name = "exploding"
+            last_tools = ""
+
+            def chat(self, messages, tools=None):
+                raise RuntimeError("boom")
+                yield
+
+        loop = AgentLoop(ExplodingClient(), mock_handler, [], max_turns=2, verbose=False)
+
+        terminal = _exhaust(loop.run("sp", "task"))
+
+        assert terminal.status is TerminalStatus.FAILED
+        assert terminal.reason == "RuntimeError"
+
     def test_done_hook_extends_loop(self, mock_handler: BaseHandler) -> None:
         """_done_hooks 在任务声明完成时追加额外轮次."""
+        _set_chat_contract(mock_handler)
         mock_handler._done_hooks.append("Do one more thing: verify the result.")
 
         client = _make_mock_client([
@@ -566,9 +830,56 @@ class TestAgentLoop:
         )
 
         gen = loop.run("sp", "task")
-        exit_reason = _exhaust(gen)
-        # done hook 被消费后任务正常完成
-        assert exit_reason["result"] == "CURRENT_TASK_DONE"
+        terminal = _exhaust(gen)
+        assert terminal.status is TerminalStatus.COMPLETED
+        assert terminal.certificate is not None
+        assert client._call_count == 2
+
+    def test_reload_keeps_current_handler_workspace_and_schema(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        _set_chat_contract(mock_handler)
+        original_cwd = mock_handler.cwd
+        responses = []
+        for index in range(4):
+            responses.append(MockResponse(
+                content="",
+                tool_calls=[MockToolCall(
+                    function=MockFunction(name="echo", arguments=f'{{"message":"{index}"}}'),
+                    id=f"call_{index}",
+                )],
+            ))
+        responses.append(MockResponse(content="Final answer."))
+        client = _make_mock_client(responses)
+
+        class ReloadAgent:
+            def __init__(self):
+                self.client = client
+                self.config = type("Config", (), {"workspace_dir": "/new/workspace"})()
+                self.registry = type("Registry", (), {
+                    "generate_openai_schema": lambda _self: (_ for _ in ()).throw(
+                        AssertionError("runtime schema must remain deferred")
+                    ),
+                })()
+
+            def reload_config(self):
+                return True
+
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[{"stable": True}],
+            max_turns=5,
+            verbose=False,
+            agent=ReloadAgent(),
+        )
+
+        terminal = _exhaust(loop.run("system", "hello"))
+
+        assert terminal.status is TerminalStatus.COMPLETED
+        assert mock_handler.cwd == original_cwd
+        assert loop.tools_schema == [{"stable": True}]
 
 
 def _exhaust(gen: Generator) -> Any:
@@ -578,6 +889,7 @@ def _exhaust(gen: Generator) -> Any:
             next(gen)
     except StopIteration as e:
         return e.value
+
 
 
 def _make_recording_client(responses: List[MockResponse]):

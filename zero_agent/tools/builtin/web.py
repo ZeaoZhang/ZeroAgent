@@ -14,7 +14,7 @@ from importlib import resources
 from typing import Any, Dict, Generator, Optional
 
 from zero_agent.core.config import AgentConfig
-from zero_agent.core.types import StepOutcome
+from zero_agent.core.types import StepAction, StepOutcome
 from zero_agent.tools.registry import ToolRegistry
 from zero_agent.utils.text import smart_format, format_error
 
@@ -361,16 +361,16 @@ def _make_web_scan_handler(config: AgentConfig):
             maxlen=maxlen,
         )
 
-        content = result.pop("content", None)
-        yield f"[Info] {str(result)}\n"
+        content = result.get("content")
+        display_result = {k: v for k, v in result.items() if k != "content"}
+        yield f"[Info] {str(display_result)}\n"
 
         if content:
-            import json
-            output = json.dumps(result, ensure_ascii=False)
+            output = json.dumps(display_result, ensure_ascii=False)
             output += f"\n```html\n{content}\n```"
-            return StepOutcome(output, next_prompt="\n")
+            yield output + "\n"
 
-        return StepOutcome(result, next_prompt="\n")
+        return StepOutcome(result, next_prompt="\n", action=StepAction.CONTINUE)
     return _handler
 
 
@@ -392,6 +392,7 @@ def _make_web_execute_js_handler(config: AgentConfig):
             return StepOutcome(
                 "[Error] Script missing. Use ```javascript block or 'script' arg.",
                 next_prompt="\n",
+                action=StepAction.CONTINUE,
             )
 
         import os
@@ -425,18 +426,15 @@ def _make_web_execute_js_handler(config: AgentConfig):
                 result["js_return"] += f"\n\n[已保存完整内容到 {save_path}]"
             except Exception:
                 result["js_return"] += f"\n\n[保存失败，无法写入文件 {save_to_file}]"
-
-        import json
         show = smart_format(
             json.dumps(result, ensure_ascii=False, indent=2),
             max_str_len=300,
         )
         yield f"JS 执行结果:\n{show}\n"
 
-        maxlen = 8000 // max(args.get("_tool_num", 1), 1)
-        result_json = json.dumps(result, ensure_ascii=False)
         return StepOutcome(
-            smart_format(result_json, max_str_len=maxlen),
+            result,
             next_prompt=handler._default_next_prompt(args),
+            action=StepAction.CONTINUE,
         )
     return _handler

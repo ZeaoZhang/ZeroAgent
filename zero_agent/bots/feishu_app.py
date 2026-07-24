@@ -28,7 +28,14 @@ import uuid
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
-from zero_agent.bots.common import AgentBotMixin, FILE_HINT, bot_config_source, split_text, load_keys
+from zero_agent.bots.common import (
+    AgentBotMixin,
+    FILE_HINT,
+    bot_config_source,
+    split_text,
+    load_keys,
+    terminal_notice,
+)
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -635,18 +642,21 @@ class _TaskCard:
         if not self._push():
             self._fallback_text(f"❌ {msg}", final=True)
 
+    def terminal(self, text):
+        self.status = text
+        self.final = ""
+        if not self._push():
+            self._fallback_text(text, final=True)
 
-def _make_task_hook(card, task_id, on_final):
+
+def _make_task_hook(card, task_id):
+    """Build a progress-only turn hook; queue terminal is authoritative."""
     def hook(ctx):
         try:
             parent = getattr(ctx.get("self"), "parent", None)
             if getattr(parent, "_fs_active_task_id", None) != task_id:
                 return
-            if ctx.get("exit_reason"):
-                resp = ctx.get("response")
-                raw = resp.content if hasattr(resp, "content") else str(resp)
-                on_final(raw)
-            elif ctx.get("summary"):
+            if ctx.get("summary"):
                 detail = _build_step_detail(ctx.get("response"), ctx.get("tool_calls") or [])
                 card.step(ctx["summary"], detail)
         except Exception as e:
@@ -684,39 +694,38 @@ class FeishuApp(AgentBotMixin):
         task_id = f"{chat_id}_{uuid.uuid4().hex}"
         hook_key = f"fs_{task_id}"
         card = _TaskCard(rid, receive_id_type)
-        result = {"raw": None, "sent": False}
-        finish_lock = threading.Lock()
+        terminal = None
 
-        def _finish(raw):
-            with finish_lock:
-                if result["sent"]:
-                    return
-                result["raw"] = raw
-                result["sent"] = True
+        def _complete(raw):
             card.done(_display_text(raw))
             _send_generated_files(rid, raw, receive_id_type=receive_id_type)
 
         try:
             await asyncio.to_thread(card.start)
-            za._turn_end_hooks[hook_key] = _make_task_hook(card, task_id, _finish)
+            za._turn_end_hooks[hook_key] = _make_task_hook(card, task_id)
             za._fs_active_task_id = task_id
             dq = runner.put_task(f"{FILE_HINT}\n\n{text}", source=self.source, images=images or None)
             start = time.time()
-            while state["running"] and not result["sent"]:
+            while state["running"]:
                 try:
                     item = await asyncio.to_thread(dq.get, True, 1)
                 except Q.Empty:
                     item = None
-                if item and "done" in item:
-                    await asyncio.to_thread(_finish, item.get("done", ""))
+                if item and item.get("type") == "terminal":
+                    terminal = item
+                    status = item.get("status")
+                    if status == "completed":
+                        await asyncio.to_thread(_complete, item.get("text", ""))
+                    else:
+                        await asyncio.to_thread(card.terminal, terminal_notice(item))
                     break
                 if time.time() - start > AGENT_TIMEOUT_SEC:
                     runner.abort()
                     await asyncio.to_thread(card.fail, "任务超时")
                     break
-            if not state["running"] and not result["sent"]:
+            if not state["running"] and terminal is None:
                 runner.abort()
-                await asyncio.to_thread(card.fail, "已停止")
+                await asyncio.to_thread(card.terminal, "⏹️ 已停止")
         except Exception as e:
             traceback.print_exc()
             await asyncio.to_thread(card.fail, f"错误: {e}")

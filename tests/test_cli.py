@@ -5,11 +5,14 @@ import argparse
 import pytest
 
 from zero_agent.core.exceptions import LLMError
+from zero_agent.core.types import TerminalEvent, TerminalStatus
 from zero_agent.runners.cli import (
     _build_parser,
     _format_llm_error,
     _load_config,
     _parse_reflect_args,
+    _run_oneshot,
+    _terminal_message,
 )
 
 
@@ -31,6 +34,34 @@ def test_load_config_writes_max_turns_override(monkeypatch, tmp_path) -> None:
     ))
 
     assert config.max_turns == 37
+
+def test_load_config_keeps_yaml_max_turns_without_override(tmp_path) -> None:
+    """未传 --max-turns 时保留 YAML 中的 max_turns。"""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+max_turns: 12
+workspace_dir: {tmp_path / "workspace"}
+llm_backends:
+  default:
+    provider: openai
+    api_key: sk-test
+    api_base: https://api.openai.com/v1
+    model: gpt-test
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    config = _load_config(argparse.Namespace(
+        config=str(config_path),
+        model=None,
+        workspace=None,
+        verbose=False,
+        quiet=False,
+        max_turns=None,
+    ))
+
+    assert config.max_turns == 12
 
 
 def test_parser_accepts_llm_no_and_reflect_args() -> None:
@@ -118,7 +149,10 @@ def test_run_func_mode_writes_out_file(tmp_path, monkeypatch) -> None:
         def run(self, prompt, **kwargs):
             yield "chunk1 "
             yield "chunk2"
-            return {"stop": "end_turn"}
+            return TerminalEvent(
+                status=TerminalStatus.COMPLETED,
+                reason="completion_certificate",
+            )
 
         def abort(self):
             pass
@@ -156,7 +190,10 @@ def test_run_task_mode_writes_output_txt_and_consumes_reply(tmp_path) -> None:
             if call_count[0] == 1:
                 (io_dir / "reply.txt").write_text("Task round 2", encoding="utf-8")
             yield f"round{call_count[0]}_output "
-            return {"stop": "end_turn"}
+            return TerminalEvent(
+                status=TerminalStatus.COMPLETED,
+                reason="completion_certificate",
+            )
 
         def abort(self):
             pass
@@ -187,3 +224,190 @@ def test_run_task_mode_writes_output_txt_and_consumes_reply(tmp_path) -> None:
     assert "round1_output" in first
     assert "round2_output" in second
     assert call_count[0] == 2
+
+
+def test_run_task_mode_writes_evidence_json(tmp_path) -> None:
+    """task mode writes current handler evidence for verifier handoff."""
+    import json
+    from types import SimpleNamespace
+    from zero_agent.core.types import EvidenceLedger, EvidenceRecord, TaskContract, TaskMode
+    from zero_agent.runners.cli import _run_task_mode
+
+    (tmp_path / "input.txt").write_text("Task round 1", encoding="utf-8")
+    ledger = EvidenceLedger(records=[
+        EvidenceRecord(1, "code_run", "success", "execute", "ran check"),
+    ])
+
+    class FakeAgent:
+        config = SimpleNamespace(peer_hint=True)
+        task_dir = "unset"
+        handler = SimpleNamespace(
+            task_contract=TaskContract("task-1", "Task round 1", TaskMode.EXECUTION),
+            evidence_ledger=ledger,
+        )
+
+        def run(self, _prompt):
+            yield "round_output "
+            return TerminalEvent(status=TerminalStatus.COMPLETED)
+
+        def abort(self):
+            pass
+
+    import zero_agent.runners.cli as cli_mod
+    orig_sleep = cli_mod._time.sleep
+    cli_mod._time.sleep = lambda _seconds: None
+
+    try:
+        try:
+            _run_task_mode(FakeAgent(), str(tmp_path), None)
+        except SystemExit as exc:
+            assert exc.code == 0
+    finally:
+        cli_mod._time.sleep = orig_sleep
+
+    payload = json.loads((tmp_path / "evidence.json").read_text(encoding="utf-8"))
+    assert payload == {
+        "task_id": "task-1",
+        "records": [{
+            "turn": 1,
+            "tool_name": "code_run",
+            "status": "success",
+            "kind": "execute",
+            "summary": "ran check",
+            "data_ref": None,
+        }],
+    }
+
+
+def test_terminal_message_renders_waiting_question_and_candidates() -> None:
+    terminal = TerminalEvent(
+        status=TerminalStatus.WAITING,
+        reason="human_intervention",
+        data={
+            "status": "INTERRUPT",
+            "intent": "HUMAN_INTERVENTION",
+            "data": {
+                "question": "Proceed?",
+                "candidates": ["Yes", "No"],
+            },
+        },
+    )
+
+    assert _terminal_message(terminal) == "Proceed?\n\n- Yes\n- No"
+
+
+def test_terminal_message_explains_budget_exhaustion() -> None:
+    terminal = TerminalEvent(
+        status=TerminalStatus.BUDGET_EXHAUSTED,
+        reason="max_turns",
+    )
+
+    message = _terminal_message(terminal)
+    assert "task not completed" in message
+    assert "max_turns" in message
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        TerminalStatus.FAILED,
+        TerminalStatus.PROTOCOL_ERROR,
+        TerminalStatus.BUDGET_EXHAUSTED,
+    ],
+)
+def test_run_oneshot_exits_nonzero_for_error_terminals(status) -> None:
+    class FakeAgent:
+        def run(self, _prompt):
+            if False:
+                yield None
+            return TerminalEvent(status=status, reason="terminal_reason")
+
+        def abort(self):
+            pass
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_oneshot(FakeAgent(), "task")
+
+    assert exc_info.value.code == 1
+
+def test_run_oneshot_converts_synchronous_exception() -> None:
+    class FakeAgent:
+        def run(self, _prompt):
+            raise RuntimeError("broken")
+
+        def abort(self):
+            pass
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_oneshot(FakeAgent(), "task")
+
+    assert exc_info.value.code == 1
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        TerminalStatus.FAILED,
+        TerminalStatus.PROTOCOL_ERROR,
+        TerminalStatus.BUDGET_EXHAUSTED,
+    ],
+)
+def test_run_func_mode_exits_nonzero_for_error_terminals(tmp_path, status) -> None:
+    from types import SimpleNamespace
+    from zero_agent.runners.cli import _run_func_mode
+
+    prompt_file = tmp_path / "failure.txt"
+    prompt_file.write_text("task", encoding="utf-8")
+
+    class FakeAgent:
+        config = SimpleNamespace(peer_hint=True)
+        task_dir = "unset"
+
+        def run(self, _prompt):
+            yield "partial"
+            return TerminalEvent(status=status, reason="terminal_reason")
+
+        def abort(self):
+            pass
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_func_mode(FakeAgent(), str(prompt_file))
+
+    assert exc_info.value.code == 1
+    output = (tmp_path / "failure.out.txt").read_text(encoding="utf-8")
+    assert f"[{status.value}]" in output
+    assert "terminal_reason" in output
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        TerminalStatus.FAILED,
+        TerminalStatus.PROTOCOL_ERROR,
+        TerminalStatus.BUDGET_EXHAUSTED,
+    ],
+)
+def test_run_task_mode_exits_nonzero_for_error_terminals(tmp_path, status) -> None:
+    from types import SimpleNamespace
+    from zero_agent.runners.cli import _run_task_mode
+
+    (tmp_path / "input.txt").write_text("task", encoding="utf-8")
+
+    class FakeAgent:
+        config = SimpleNamespace(peer_hint=True)
+        task_dir = "unset"
+
+        def run(self, _prompt):
+            yield "partial"
+            return TerminalEvent(status=status, reason="terminal_reason")
+
+        def abort(self):
+            pass
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run_task_mode(FakeAgent(), str(tmp_path))
+
+    assert exc_info.value.code == 1
+    output = (tmp_path / "output.txt").read_text(encoding="utf-8")
+    assert f"[{status.value}]" in output
+    assert "terminal_reason" in output

@@ -44,6 +44,7 @@ from zero_agent.bots.common import (
     require_runtime,
     split_text,
     strip_files,
+    terminal_notice,
 )
 from zero_agent.bots.shared.continue_cmd import handle_frontend_command, reset_conversation
 from zero_agent.bots.shared.btw_cmd import handle_frontend_command as handle_btw_frontend_command
@@ -430,24 +431,18 @@ class DiscordApp(AgentBotMixin):
         return await self.send_text(chat_id, HELP_TEXT, **ctx)
 
     async def run_agent(self, chat_id, text, **ctx):
-        """在隔离的 per-chat agent 上执行任务, 流式推送进度.
-
-        从 AgentRunner display queue 消费输出, 提取 <summary> 标签
-        作为步骤进度推送给用户.
-
-        Args:
-            chat_id: 会话标识.
-            text: 用户消息文本.
-        """
+        """在隔离的 per-chat agent 上消费 chunk/terminal 输出."""
         r = self._get_runner(chat_id)
         state = {"running": True}
         self.user_tasks[chat_id] = state
+        terminal = None
         try:
             await self.send_text(chat_id, "思考中...", **ctx)
             dq = r.put_task(f"{FILE_HINT}\n\n{text}", source=self.source)
             last_ping = time.time()
             last_step = ""
             step_no = 0
+            chunk_text = ""
             while state["running"]:
                 try:
                     item = await asyncio.to_thread(dq.get, True, 3)
@@ -456,18 +451,25 @@ class DiscordApp(AgentBotMixin):
                         await self.send_text(chat_id, "⏳ 还在处理中, 请稍等...", **ctx)
                         last_ping = time.time()
                     continue
-                if "next" in item:
-                    step = _extract_discord_progress(item.get("next", ""))
+                if item.get("type") == "chunk":
+                    current = str(item.get("text", ""))
+                    chunk_text = chunk_text + current if getattr(r, "inc_out", False) else current
+                    step = _extract_discord_progress(chunk_text)
                     if step and step != last_step:
                         step_no += 1
                         await self.send_text(chat_id, f"步骤{step_no}: {step}", **ctx)
                         last_step = step
                         last_ping = time.time()
                     continue
-                if "done" in item:
-                    await self.send_done(chat_id, item.get("done", ""), **ctx)
-                    break
-            if not state["running"]:
+                if item.get("type") != "terminal":
+                    continue
+                terminal = item
+                if item.get("status") == "completed":
+                    await self.send_done(chat_id, item.get("text", ""), **ctx)
+                else:
+                    await self.send_text(chat_id, terminal_notice(item), **ctx)
+                break
+            if not state["running"] and terminal is None:
                 await self.send_text(chat_id, "⏹️ 已停止", **ctx)
         except Exception as e:
             import traceback

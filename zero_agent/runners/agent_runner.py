@@ -8,12 +8,64 @@ and history helpers.
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import queue
 import os
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from zero_agent.core.agent import ZeroAgent
+from zero_agent.core.types import TerminalEvent, TerminalStatus
+
+
+def _consume_agent_run(
+    gen,
+    on_chunk: Callable[[Any], None],
+    *,
+    cancel_event: Optional[threading.Event] = None,
+    cancel_reason: str = "user_cancelled",
+) -> TerminalEvent:
+    """Consume an agent generator without discarding its typed return value."""
+
+    def cancelled() -> TerminalEvent:
+        try:
+            gen.close()
+        except Exception:
+            pass
+        return TerminalEvent(
+            status=TerminalStatus.CANCELLED,
+            reason=cancel_reason,
+        )
+
+    try:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                return cancelled()
+            try:
+                chunk = next(gen)
+            except StopIteration as stop:
+                if cancel_event is not None and cancel_event.is_set():
+                    return cancelled()
+                terminal = stop.value
+                if isinstance(terminal, TerminalEvent):
+                    return terminal
+                return TerminalEvent(
+                    status=TerminalStatus.FAILED,
+                    reason="invalid_terminal_return",
+                )
+            if cancel_event is not None and cancel_event.is_set():
+                return cancelled()
+            on_chunk(chunk)
+    except Exception as exc:
+        try:
+            gen.close()
+        except Exception:
+            pass
+        return TerminalEvent(
+            status=TerminalStatus.FAILED,
+            reason=type(exc).__name__,
+            text=str(exc),
+        )
 
 
 _FORWARDED_RUNTIME_ATTRS = {
@@ -114,10 +166,10 @@ class AgentRunner:
         dq = runner.put_task("hello world", source="telegram")
         while True:
             item = dq.get()
-            if "next" in item:
-                print(item["next"], end="", flush=True)
-            if "done" in item:
-                print(item["done"])
+            if item["type"] == "chunk":
+                print(item["text"], end="", flush=True)
+            elif item["type"] == "terminal":
+                print(item["text"])
                 break
     """
 
@@ -126,8 +178,9 @@ class AgentRunner:
         self._task_queue: queue.Queue = queue.Queue()
         self._lock = threading.Lock()
         self._running = False
-        self._stop_sig = False
+        self._shutdown_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
+        self._cancel_event = threading.Event()
         self.inc_out = False
         self.no_print = False
         self._configure_shared_session_commands()
@@ -145,7 +198,8 @@ class AgentRunner:
                     "_task_queue",
                     "_lock",
                     "_running",
-                    "_stop_sig",
+                    "_shutdown_event",
+                    "_cancel_event",
                     "_worker_thread",
                     "_handle_slash_cmd",
                 }
@@ -234,6 +288,10 @@ class AgentRunner:
         client = getattr(self._agent, "client", None)
         if client is not None and hasattr(client, "last_tools"):
             client.last_tools = ""
+
+    def clear_pending_task(self) -> None:
+        """Discard any task paused for user input."""
+        self._agent.clear_pending_task()
 
     def config_snapshot(self):
         """Return a deep-copy snapshot of the ZeroAgent config."""
@@ -450,8 +508,9 @@ class AgentRunner:
             existing = self._worker_thread
             if existing and existing.is_alive() and existing is not current:
                 return None
+            if self._shutdown_event.is_set():
+                return None
             self._worker_thread = current
-            self._stop_sig = False
         self._worker_loop()
         return None
 
@@ -468,8 +527,8 @@ class AgentRunner:
         非阻塞: 任务在后台线程中执行, 结果通过返回的 queue.Queue 推送.
 
         Queue 消息格式:
-            {"next": str, "source": str, "turn": int}  — 增量输出
-            {"done": str, "source": str, "turn": int}   — 任务完成, 完整输出
+            {"type": "chunk", "text": str, "source": str, "turn": int}
+            TerminalEvent.to_dict()  — 任务终态，text 为本次完整输出
 
         Args:
             query: 用户输入 / 任务描述.
@@ -480,18 +539,24 @@ class AgentRunner:
             queue.Queue — 消费者从中读取流式输出.
         """
         display_queue: queue.Queue = queue.Queue()
-        self._task_queue.put({
-            "query": query,
-            "source": source,
-            "images": images or [],
-            "output": display_queue,
-        })
+        with self._lock:
+            if self._shutdown_event.is_set():
+                self._put_runner_shutdown(display_queue, source=source)
+                return display_queue
+            if not self._running:
+                self._cancel_event.clear()
+            self._task_queue.put({
+                "query": query,
+                "source": source,
+                "images": images or [],
+                "output": display_queue,
+            })
         self._ensure_worker()
         return display_queue
 
     def abort(self) -> None:
         """中止当前任务."""
-        self._stop_sig = True
+        self._cancel_event.set()
         self._agent.abort()
 
     # —— 生命周期 ——
@@ -502,19 +567,53 @@ class AgentRunner:
 
     def stop(self) -> None:
         """停止后台 worker 并等待线程退出."""
-        self._stop_sig = True
-        self.abort()
-        if self._worker_thread and self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=5.0)
+        with self._lock:
+            self._shutdown_event.set()
+        self._cancel_event.set()
+        self._agent.abort()
+        self._task_queue.put("EXIT")
+        self._drain_not_started_tasks()
+        worker = self._worker_thread
+        if (
+            worker
+            and worker.is_alive()
+            and worker is not threading.current_thread()
+        ):
+            worker.join(timeout=5.0)
+
+    @staticmethod
+    def _put_runner_shutdown(display_queue: queue.Queue, *, source: str = "agent") -> None:
+        display_queue.put(TerminalEvent(
+            status=TerminalStatus.CANCELLED,
+            reason="runner_shutdown",
+            source=source,
+        ).to_dict())
+
+    def _drain_not_started_tasks(self) -> None:
+        """Cancel queued tasks that have not been claimed by the worker."""
+        while True:
+            try:
+                task = self._task_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                if isinstance(task, dict):
+                    self._put_runner_shutdown(
+                        task["output"],
+                        source=task.get("source", "agent"),
+                    )
+            finally:
+                self._task_queue.task_done()
 
     # —— 内部 ——
 
     def _ensure_worker(self) -> None:
         """确保 worker 线程已启动."""
         with self._lock:
+            if self._shutdown_event.is_set():
+                return
             if self._worker_thread and self._worker_thread.is_alive():
                 return
-            self._stop_sig = False
             self._worker_thread = threading.Thread(
                 target=self._worker_loop,
                 name="za-agent-runner",
@@ -524,7 +623,9 @@ class AgentRunner:
 
     def _worker_loop(self) -> None:
         """主循环: 从 task_queue 取任务, 依次串行执行."""
-        while not self._stop_sig:
+        while True:
+            if self._shutdown_event.is_set():
+                break
             try:
                 task = self._task_queue.get(timeout=0.5)
             except queue.Empty:
@@ -538,47 +639,76 @@ class AgentRunner:
             source = task["source"]
             display_queue = task["output"]
 
+            if self._shutdown_event.is_set():
+                self._put_runner_shutdown(display_queue, source=source)
+                self._task_queue.task_done()
+                continue
+
             if isinstance(query, str) and query.strip().startswith("/"):
-                handled = self._handle_slash_cmd(query, display_queue)
+                try:
+                    handled = self._handle_slash_cmd(query, display_queue)
+                except Exception as exc:
+                    display_queue.put(TerminalEvent(
+                        status=TerminalStatus.FAILED,
+                        reason=type(exc).__name__,
+                        text=str(exc),
+                        source=source,
+                    ).to_dict())
+                    self._task_queue.task_done()
+                    continue
                 if handled is None:
                     self._task_queue.task_done()
                     continue
                 query = handled
 
             with self._lock:
+                if self._shutdown_event.is_set():
+                    self._put_runner_shutdown(display_queue, source=source)
+                    self._task_queue.task_done()
+                    continue
                 self._running = True
-            self._stop_sig = False
 
             full_resp = ""
             curr_turn = 0
+
+            def on_chunk(chunk: Any) -> None:
+                nonlocal full_resp, curr_turn
+                if isinstance(chunk, dict) and "turn" in chunk:
+                    curr_turn = int(chunk["turn"])
+                    return
+                chunk_str = str(chunk)
+                full_resp += chunk_str
+                display_queue.put({
+                    "type": "chunk",
+                    "text": chunk_str if self.inc_out else full_resp,
+                    "source": source,
+                    "turn": curr_turn,
+                })
+
             try:
-                gen = self._agent.run(query)
-                for chunk in gen:
-                    if self._stop_sig:
-                        break
-                    if isinstance(chunk, dict) and "turn" in chunk:
-                        curr_turn = chunk["turn"]
-                        continue
-                    chunk_str = str(chunk)
-                    full_resp += chunk_str
-                    display_queue.put({
-                        "next": chunk_str if self.inc_out else full_resp,
-                        "source": source,
-                        "turn": curr_turn,
-                    })
-                display_queue.put({
-                    "done": full_resp,
-                    "source": source,
-                    "turn": curr_turn,
-                })
-            except Exception as exc:
-                display_queue.put({
-                    "done": f"{full_resp}\n```\n{exc}\n```",
-                    "source": source,
-                    "turn": curr_turn,
-                })
+                try:
+                    gen = self._agent.run(query)
+                except Exception as exc:
+                    terminal = TerminalEvent(
+                        status=TerminalStatus.FAILED,
+                        reason=type(exc).__name__,
+                        text=str(exc),
+                    )
+                else:
+                    terminal = _consume_agent_run(
+                        gen,
+                        on_chunk,
+                        cancel_event=self._cancel_event,
+                    )
+                terminal = replace(
+                    terminal,
+                    text=full_resp,
+                    source=source,
+                    turn=terminal.turn or curr_turn,
+                )
+                display_queue.put(terminal.to_dict())
             finally:
                 with self._lock:
                     self._running = False
-                self._stop_sig = False
+                self._cancel_event.clear()
                 self._task_queue.task_done()

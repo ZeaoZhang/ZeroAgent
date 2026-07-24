@@ -20,6 +20,35 @@ from typing import Optional
 # 配置文件 mtime 缓存，用于热加载检测
 _config_mtime: dict[str, int] = {}
 
+
+def _config_path_key(path: str | Path) -> str:
+    """Return the stable key used for config mtime tracking."""
+
+    return str(Path(path).expanduser())
+
+
+def _read_config_mtime(path: str | Path) -> Optional[int]:
+    """Return a config file mtime, or None when the file is unavailable."""
+
+    try:
+        return os.stat(_config_path_key(path)).st_mtime_ns
+    except OSError:
+        return None
+
+
+def _seed_config_mtime(path: str | Path, *, mtime: Optional[int] = None) -> None:
+    """Record the current mtime baseline for a loaded config file."""
+
+    current_mtime = _read_config_mtime(path) if mtime is None else mtime
+    if current_mtime is not None:
+        _config_mtime[_config_path_key(path)] = current_mtime
+
+
+def _commit_config_mtime(path: str | Path, *, mtime: Optional[int] = None) -> None:
+    """Commit a successfully-applied hot reload mtime baseline."""
+
+    _seed_config_mtime(path, mtime=mtime)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -46,7 +75,7 @@ def load_default_config() -> "AgentConfig":
         config = AgentConfig.from_yaml(path)
     else:
         config = AgentConfig.from_env()
-    config._source_path = str(path)  # type: ignore[attr-defined]
+    config._source_path = _config_path_key(path)  # type: ignore[attr-defined]
     return config
 
 
@@ -182,7 +211,12 @@ class AgentConfig:
         return "en"
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "AgentConfig":
+    def from_yaml(
+        cls,
+        path: str | Path,
+        *,
+        seed_mtime: bool = True,
+    ) -> "AgentConfig":
         """从 YAML 配置文件加载 Agent 配置.
 
         YAML 格式示例:
@@ -199,6 +233,7 @@ class AgentConfig:
 
         Args:
             path: YAML 文件路径.
+            seed_mtime: 是否把该文件当前 mtime 作为热重载基线.
 
         Returns:
             解析后的 AgentConfig 实例.
@@ -209,10 +244,17 @@ class AgentConfig:
         """
         import yaml
 
-        with open(path, encoding="utf-8") as f:
+        path_key = _config_path_key(path)
+        with open(path_key, encoding="utf-8") as f:
             data = yaml.safe_load(f)
         config = cls._from_dict(data)
-        config._resolve_paths(os.path.dirname(os.path.abspath(str(path))))
+        config._resolve_paths(os.path.dirname(os.path.abspath(path_key)))
+        config._source_path = path_key  # type: ignore[attr-defined]
+        mtime = _read_config_mtime(path_key)
+        if mtime is not None:
+            config._source_mtime_ns = mtime  # type: ignore[attr-defined]
+            if seed_mtime:
+                _seed_config_mtime(path_key, mtime=mtime)
         return config
 
     def _resolve_paths(self, base_dir: str) -> None:
@@ -335,7 +377,8 @@ def reload_config_if_changed(config_path: str) -> Optional[AgentConfig]:
     """若配置文件自上次读取以来已更改，则重新加载并返回新配置.
 
     通过比较文件 mtime 检测变更，仅在文件内容变化时重新读取，
-    避免不必要的 I/O.
+    避免不必要的 I/O. The caller commits the new mtime only after the
+    parsed config has been fully applied.
 
     Args:
         config_path: YAML 配置文件路径.
@@ -343,13 +386,13 @@ def reload_config_if_changed(config_path: str) -> Optional[AgentConfig]:
     Returns:
         新的 AgentConfig 如果文件已变更，否则 None.
     """
-    try:
-        mtime = os.stat(config_path).st_mtime_ns
-    except OSError:
+    path_key = _config_path_key(config_path)
+    mtime = _read_config_mtime(path_key)
+    if mtime is None:
         return None
 
-    if config_path in _config_mtime and _config_mtime[config_path] == mtime:
+    current = _config_mtime.get(path_key)
+    if current == mtime:
         return None
 
-    _config_mtime[config_path] = mtime
-    return AgentConfig.from_yaml(config_path)
+    return AgentConfig.from_yaml(path_key, seed_mtime=False)

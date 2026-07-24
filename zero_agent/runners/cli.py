@@ -17,6 +17,84 @@ from typing import Optional
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import AgentConfig, default_config_path, load_default_config
 from zero_agent.core.exceptions import LLMError
+from zero_agent.core.types import TerminalEvent, TerminalStatus
+from zero_agent.runners.agent_runner import _consume_agent_run
+
+
+_ERROR_TERMINAL_STATUSES = {
+    TerminalStatus.FAILED,
+    TerminalStatus.PROTOCOL_ERROR,
+    TerminalStatus.BUDGET_EXHAUSTED,
+}
+
+
+def _waiting_terminal_text(terminal: TerminalEvent) -> str:
+    payload = terminal.data if isinstance(terminal.data, dict) else {}
+    nested = payload.get("data")
+    if isinstance(nested, dict):
+        payload = nested
+    fallback = terminal.text or terminal.reason or "Waiting for user input"
+    question = str(payload.get("question") or fallback)
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return question
+    options = "\n".join(f"- {candidate}" for candidate in candidates)
+    return f"{question}\n\n{options}"
+
+
+def _terminal_message(terminal: TerminalEvent) -> str:
+    if terminal.status == TerminalStatus.WAITING:
+        return _waiting_terminal_text(terminal)
+    if terminal.status == TerminalStatus.CANCELLED:
+        return terminal.reason or "Cancelled"
+    if terminal.status == TerminalStatus.BUDGET_EXHAUSTED:
+        if terminal.text:
+            return terminal.text
+        suffix = f" ({terminal.reason})" if terminal.reason else ""
+        return f"Reached the turn/retry budget; task not completed{suffix}"
+    if terminal.status in _ERROR_TERMINAL_STATUSES:
+        return terminal.text or terminal.reason or terminal.status.value
+    return ""
+
+
+def _display_terminal(terminal: TerminalEvent) -> None:
+    message = _terminal_message(terminal)
+    if not message:
+        return
+    label = "Waiting" if terminal.status == TerminalStatus.WAITING else terminal.status.value
+    stream = sys.stderr if terminal.status in _ERROR_TERMINAL_STATUSES else sys.stdout
+    print(f"\n[{label}] {message}", file=stream)
+
+
+def _consume_prompt(agent: ZeroAgent, prompt: str, on_chunk) -> TerminalEvent:
+    try:
+        gen = agent.run(prompt)
+    except Exception as exc:
+        return TerminalEvent(
+            status=TerminalStatus.FAILED,
+            reason=type(exc).__name__,
+            text=str(exc),
+        )
+    return _consume_agent_run(gen, on_chunk)
+
+
+def _write_task_mode_evidence(agent: ZeroAgent, io_dir: str) -> None:
+    """Write the current task evidence ledger for plan verifier handoff."""
+
+    handler = getattr(agent, "handler", None)
+    ledger = getattr(handler, "evidence_ledger", None)
+    contract = getattr(handler, "task_contract", None)
+    if ledger is None or contract is None:
+        return
+    try:
+        from zero_agent.core.completion import write_evidence_json
+
+        task_id = str(getattr(contract, "task_id", "") or "")
+        if not task_id:
+            return
+        write_evidence_json(os.path.join(io_dir, "evidence.json"), task_id, ledger)
+    except Exception:
+        return
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -143,8 +221,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-turns",
         type=int,
-        default=80,
-        help="最大轮次限制（默认 80）",
+        default=None,
+        help="最大轮次限制（默认使用 YAML 配置值）",
     )
     parser.add_argument(
         "--workspace",
@@ -238,21 +316,15 @@ def _load_config(args: argparse.Namespace) -> AgentConfig:
 
 
 def _run_oneshot(agent: ZeroAgent, task: str) -> None:
-    """一次性任务模式：执行单个任务并退出.
-
-    Args:
-        agent: ZeroAgent 实例.
-        task: 任务描述.
-    """
-    gen = agent.run(task)
+    """一次性任务模式：执行单个任务并退出."""
     try:
-        for chunk in gen:
-            _display_chunk(chunk)
+        terminal = _consume_prompt(agent, task, _display_chunk)
     except KeyboardInterrupt:
         agent.abort()
         print("\n[Interrupted]")
-    except LLMError as exc:
-        _print_llm_error(exc)
+        return
+    _display_terminal(terminal)
+    if terminal.status in _ERROR_TERMINAL_STATUSES:
         sys.exit(1)
 
 
@@ -282,17 +354,13 @@ def _run_repl(agent: ZeroAgent) -> None:
             if _handle_slash_cmd(user_input, agent):
                 break
             continue
-
-        # 执行任务
-        gen = agent.run(user_input)
         try:
-            for chunk in gen:
-                _display_chunk(chunk)
+            terminal = _consume_prompt(agent, user_input, _display_chunk)
         except KeyboardInterrupt:
             agent.abort()
             print("\n[Interrupted]")
-        except LLMError as exc:
-            _print_llm_error(exc)
+            continue
+        _display_terminal(terminal)
 
 
 def _setup_readline() -> None:
@@ -504,6 +572,7 @@ def _new_session(agent: ZeroAgent) -> None:
     agent.handler.working = {}
     agent.handler.history_info = []
     agent.handler._empty_ct = 0
+    agent.clear_pending_task()
     print("  新会话已开始（后端配置保留）")
 
 
@@ -562,24 +631,28 @@ def _run_task_mode(agent: ZeroAgent, io_dir: str, history_file: Optional[str] = 
             outfile = os.path.join(io_dir, "output.txt")
 
         output_lines: list[str] = []
-        gen = agent.run(raw)
+
+        def on_chunk(chunk: object) -> None:
+            _display_chunk(chunk)
+            if isinstance(chunk, str):
+                output_lines.append(chunk)
+
         try:
-            for chunk in gen:
-                _display_chunk(chunk)
-                if isinstance(chunk, str):
-                    output_lines.append(chunk)
+            terminal = _consume_prompt(agent, raw, on_chunk)
         except KeyboardInterrupt:
             agent.abort()
             output_lines.append("\n[Interrupted]")
             with open(outfile, "w", encoding="utf-8") as f:
                 f.write("".join(output_lines) + "\n\n[ROUND END]\n")
             sys.exit(1)
-        except LLMError as exc:
-            message = _format_llm_error(exc)
-            _print_llm_error(exc)
-            output_lines.append(f"\n[Error] {message}\n")
-            failed = True
 
+        _write_task_mode_evidence(agent, io_dir)
+        terminal_message = _terminal_message(terminal)
+        if terminal_message and terminal.status != TerminalStatus.COMPLETED:
+            output_lines.append(
+                f"\n[{terminal.status.value}] {terminal_message}\n"
+            )
+        failed = terminal.status in _ERROR_TERMINAL_STATUSES
         # 写入输出 + [ROUND END]
         with open(outfile, "w", encoding="utf-8") as f:
             f.write("".join(output_lines) + "\n\n[ROUND END]\n")
@@ -646,24 +719,25 @@ def _run_func_mode(agent: ZeroAgent, prompt_file: str, history_file: Optional[st
     out_path = os.path.splitext(prompt_file)[0] + ".out.txt"
 
     output_lines: list[str] = []
-    failed = False
-    gen = agent.run(prompt)
+
+    def on_chunk(chunk: object) -> None:
+        _display_chunk(chunk)
+        if isinstance(chunk, str):
+            output_lines.append(chunk)
+
     try:
-        for chunk in gen:
-            _display_chunk(chunk)
-            if isinstance(chunk, str):
-                output_lines.append(chunk)
+        terminal = _consume_prompt(agent, prompt, on_chunk)
     except KeyboardInterrupt:
         agent.abort()
         output_lines.append("\n[Interrupted]")
         with open(out_path, "w", encoding="utf-8") as f:
             f.write("".join(output_lines) + "\n\n[ROUND END]\n")
         sys.exit(1)
-    except LLMError as exc:
-        message = _format_llm_error(exc)
-        _print_llm_error(exc)
-        output_lines.append(f"\n[Error] {message}\n")
-        failed = True
+
+    terminal_message = _terminal_message(terminal)
+    if terminal_message and terminal.status != TerminalStatus.COMPLETED:
+        output_lines.append(f"\n[{terminal.status.value}] {terminal_message}\n")
+    failed = terminal.status in _ERROR_TERMINAL_STATUSES
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("".join(output_lines) + "\n\n[ROUND END]\n")

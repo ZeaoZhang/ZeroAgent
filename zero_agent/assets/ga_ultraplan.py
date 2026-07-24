@@ -175,17 +175,41 @@ def _fmt(x, data):
     return x.format(**data) if isinstance(x, str) else x
 
 def _subagent(desc, prompt=None, *, llm_no=0, timeout=3600):
+    """使用选定配置运行一个隔离 worker，并保留有界证据。"""
     global _FUNC_SEQ
-    _FUNC_SEQ += 1; path = os.path.join(_RUN_DIR, f"{_FUNC_SEQ:03d}_{_TASK_SLUG}_{_slug(desc)}.txt")
+    _FUNC_SEQ += 1
+    path = os.path.join(_RUN_DIR, f"{_FUNC_SEQ:03d}_{_TASK_SLUG}_{_slug(desc)}.txt")
     with open(path, "w", encoding="utf-8") as f:
         f.write(desc if prompt is None else prompt)
     print(f"[subagent] {desc} -> {path}", flush=True); _note(f"agent: {desc}")
-    cmd = [
-        sys.executable, "-m", "zero_agent.runners.cli", "--func", path,
-        "--llm_no", str(llm_no), "--nobg", "--nolog", "--no-user-tools",
-    ]
-    r = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
-    if r.returncode: raise RuntimeError(f"subagent failed: {desc}\n{r.stdout}\n{r.stderr}")
+    cmd = [sys.executable, "-m", "zero_agent.runners.cli"]
+    config_path = os.environ.get("ZA_CONFIG_PATH")
+    if config_path:
+        cmd += ["-c", config_path]
+    cmd += ["--func", path, "--llm_no", str(llm_no), "--nobg", "--no-user-tools"]
+    proc = subprocess.Popen(
+        cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        import signal
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            stdout, stderr = proc.communicate()
+        raise TimeoutError(f"subagent timed out after {timeout}s: {desc}") from exc
+    if proc.returncode:
+        raise RuntimeError(f"subagent failed: {desc}\n{stdout}\n{stderr}")
     return os.path.splitext(path)[0] + ".out.txt"
 
 def _run(task, data):

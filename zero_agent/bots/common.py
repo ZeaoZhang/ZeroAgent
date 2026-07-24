@@ -110,6 +110,49 @@ def build_done_text(raw_text: str) -> str:
     return body or "..."
 
 
+def extract_waiting_event(item: dict) -> dict | None:
+    """Normalize a waiting terminal payload into a bot-friendly prompt."""
+    if item.get("type") != "terminal" or item.get("status") != "waiting":
+        return None
+    payload = item.get("data")
+    if not isinstance(payload, dict):
+        payload = {}
+    if payload.get("status") == "INTERRUPT" and payload.get("intent") == "HUMAN_INTERVENTION":
+        nested = payload.get("data")
+        payload = nested if isinstance(nested, dict) else {}
+    raw_candidates = payload.get("candidates") or []
+    if not isinstance(raw_candidates, (list, tuple)):
+        raw_candidates = []
+    candidates = [str(value).strip() for value in raw_candidates if str(value).strip()]
+    question = str(
+        payload.get("question") or item.get("text") or "请提供下一步输入。"
+    ).strip() or "请提供下一步输入。"
+    return {"question": question, "candidates": candidates}
+
+
+def terminal_notice(item: dict) -> str:
+    """Render non-success terminal states without implying completion."""
+    status = str(item.get("status") or "failed")
+    reason = str(item.get("reason") or "unknown").strip() or "unknown"
+    if status == "waiting":
+        event = extract_waiting_event(item) or {
+            "question": "请提供下一步输入。",
+            "candidates": [],
+        }
+        lines = [f"⏸️ {event['question']}"]
+        lines.extend(f"{idx}. {candidate}" for idx, candidate in enumerate(event["candidates"], 1))
+        return "\n".join(lines)
+    if status == "cancelled":
+        return "⏹️ 已停止"
+    if status == "budget_exhausted":
+        return f"⚠️ 达到轮次/重试预算，任务未完成（{reason}）"
+    if status == "protocol_error":
+        return f"❌ 协议错误（{reason}）"
+    if status == "failed":
+        return f"❌ 任务失败（{reason}）"
+    return f"❌ 未知终态 {status}（{reason}）"
+
+
 # —— 历史恢复 ——
 
 def _restore_log_files() -> list:
@@ -478,9 +521,10 @@ class AgentBotMixin:
         return await self.send_text(chat_id, HELP_TEXT, **ctx)
 
     async def run_agent(self, chat_id, text, **ctx):
-        """提交任务到 AgentRunner 并流式推送结果."""
+        """提交任务到 AgentRunner 并消费 chunk/terminal 队列."""
         state = {"running": True}
         self.user_tasks[chat_id] = state
+        terminal = None
         try:
             await self.send_text(chat_id, "思考中...", **ctx)
             dq = self.runner.put_task(
@@ -495,10 +539,15 @@ class AgentBotMixin:
                         await self.send_text(chat_id, "⏳ 还在处理中, 请稍等...", **ctx)
                         last_ping = time.time()
                     continue
-                if "done" in item:
-                    await self.send_done(chat_id, item.get("done", ""), **ctx)
-                    break
-            if not state["running"]:
+                if item.get("type") != "terminal":
+                    continue
+                terminal = item
+                if item.get("status") == "completed":
+                    await self.send_done(chat_id, item.get("text", ""), **ctx)
+                else:
+                    await self.send_text(chat_id, terminal_notice(item), **ctx)
+                break
+            if not state["running"] and terminal is None:
                 await self.send_text(chat_id, "⏹️ 已停止", **ctx)
         except Exception as e:
             import traceback

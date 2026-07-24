@@ -30,7 +30,7 @@ WS API:
 """
 from __future__ import annotations
 
-import asyncio, contextlib, copy, importlib, json, os, sys, webbrowser
+import asyncio, contextlib, copy, hmac, importlib, ipaddress, json, os, secrets, sys, urllib.parse, webbrowser
 import threading, time, traceback, uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,6 +58,71 @@ def find_default_project_root() -> Path:
 
 DEFAULT_PROJECT_ROOT = find_default_project_root()
 
+
+@dataclass(frozen=True)
+class BridgeSecurity:
+    host: str
+    port: int
+    token: str
+    token_explicit: bool
+    allowed_origins: frozenset[str]
+    allow_remote: bool
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = (host or "").strip().strip("[]").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _loopback_origins(port: int) -> set[str]:
+    return {
+        f"http://127.0.0.1:{port}",
+        f"http://localhost:{port}",
+        f"http://[::1]:{port}",
+    }
+
+
+def _validate_bridge_security(security: BridgeSecurity) -> BridgeSecurity:
+    if not security.token:
+        raise ValueError("Desktop bridge security token must be non-empty")
+    if not _is_loopback_host(security.host) and not (
+        security.allow_remote and security.token_explicit
+    ):
+        raise ValueError(
+            "Remote desktop bridge host requires ZA_DESKTOP_BRIDGE_ALLOW_REMOTE=1 "
+            "and an explicit non-empty ZA_DESKTOP_BRIDGE_TOKEN"
+        )
+    return security
+
+
+def load_bridge_security(host: str, port: int) -> BridgeSecurity:
+    token_env = os.environ.get("ZA_DESKTOP_BRIDGE_TOKEN")
+    token = token_env.strip() if token_env is not None else ""
+    token_explicit = bool(token)
+    if not token:
+        token = secrets.token_urlsafe(32)
+
+    allowed_origins = _loopback_origins(port)
+    for origin in os.environ.get("ZA_DESKTOP_BRIDGE_ALLOWED_ORIGINS", "").replace("\n", ",").split(","):
+        origin = origin.strip().rstrip("/")
+        if origin:
+            allowed_origins.add(origin)
+
+    allow_remote = os.environ.get("ZA_DESKTOP_BRIDGE_ALLOW_REMOTE") == "1"
+    return _validate_bridge_security(BridgeSecurity(
+        host=host,
+        port=port,
+        token=token,
+        token_explicit=token_explicit,
+        allowed_origins=frozenset(allowed_origins),
+        allow_remote=allow_remote,
+    ))
+
 for _s in (sys.stdout, sys.stderr):
     with contextlib.suppress(Exception):
         _s.reconfigure(encoding="utf-8", errors="replace")
@@ -77,11 +142,12 @@ class Session:
     messages: List[dict] = field(default_factory=list)
     msg_seq: int = 0
     partial: Optional[dict] = None
-    status: str = "idle"  # idle|running|error|cancelled
+    status: str = "idle"  # idle|running|waiting|error|cancelled
     agent: Any = None
     thread: Optional[threading.Thread] = None
-    cancel_requested: bool = False
     last_error: str = ""
+    terminal_status: str = ""
+    terminal_reason: str = ""
     # New fields for frontend redesign
     model_override: Optional[str] = None  # Override model for this session
     token_usage: Dict[str, int] = field(default_factory=lambda: {"input": 0, "output": 0, "total": 0, "limit": 200000})
@@ -179,10 +245,11 @@ class AgentManager:
             "title": sess.title,
             "cwd": sess.cwd,
             "status": sess.status,
+            "terminalStatus": sess.terminal_status,
+            "reason": sess.terminal_reason,
             "createdAt": sess.created_at,
             "updatedAt": sess.updated_at,
             "lastError": sess.last_error,
-            "msgSeq": sess.msg_seq,
             "modelOverride": sess.model_override,
             "tokenUsage": sess.token_usage,
             "groupId": sess.group_id,
@@ -279,6 +346,8 @@ class AgentManager:
             sess.partial = None
             sess.status = "idle"
             sess.last_error = ""
+            sess.terminal_status = ""
+            sess.terminal_reason = ""
             for msg in ui_messages:
                 self.add_message(
                     sess,
@@ -316,8 +385,9 @@ class AgentManager:
                 extra["image_ids"] = image_ids
             user_msg = self.add_message(sess, "user", prompt, **extra)
             sess.status = "running"
-            sess.cancel_requested = False
             sess.last_error = ""
+            sess.terminal_status = ""
+            sess.terminal_reason = ""
             sess.partial = {"id": sess.msg_seq + 1, "role": "assistant", "content": "", "ts": time.time(), "partial": True}
             t = threading.Thread(target=self.run_agent_turn, args=(sess, prompt, None), daemon=True, name=f"Turn-{sid}")
             sess.thread = t
@@ -326,67 +396,124 @@ class AgentManager:
         emit_session_state(sess, "running")
         return {"ok": True, "sessionId": sid, "accepted": True, "userMessageId": user_msg["id"], "seq": seq}
 
+    def _sync_token_usage(self, sess: Session) -> None:
+        """Refresh session token/context usage from the live runner if available."""
+
+        runner = sess.agent
+        za = getattr(runner, "_agent", None)
+        client = getattr(za, "client", None)
+        if client is None:
+            return
+        active = getattr(client, "_active", client)
+        stats = getattr(client, "usage_stats", None) or getattr(active, "usage_stats", {}) or {}
+        history = getattr(active, "history", getattr(client, "history", [])) or []
+        system = getattr(active, "system", getattr(client, "system", "")) or ""
+        try:
+            history_chars = len(json.dumps(history, ensure_ascii=False, default=str)) + len(str(system))
+            current_context = max(history_chars // 3, 0)
+        except Exception:
+            current_context = 0
+        limit = int(
+            getattr(active, "_context_window", 0)
+            or getattr(getattr(active, "config", None), "context_window", 0)
+            or getattr(getattr(client, "config", None), "context_window", 200000)
+            or 200000
+        )
+        sess.token_usage = {
+            "input": int(stats.get("total_input_tokens", 0) or 0),
+            "output": int(stats.get("total_output_tokens", 0) or 0),
+            "total": current_context,
+            "limit": limit,
+        }
+
     def run_agent_turn(self, sess: Session, prompt: str, images: Optional[list] = None):
         try:
             if sess.agent is None:
                 sess.agent = self.make_agent(sess)
             agent = sess.agent
-            full = ""
-            if hasattr(agent, "put_task"):
-                display_q = agent.put_task(prompt, images=images or [])
-                pieces = []
-                import queue as _queue
-                while True:
-                    if sess.cancel_requested:
-                        break
-                    try:
-                        item = display_q.get(timeout=1.0)
-                    except _queue.Empty:
+            if not hasattr(agent, "put_task"):
+                raise RuntimeError("AgentRunner object has no put_task method")
+
+            display_q = agent.put_task(prompt, images=images or [])
+            pieces: list[str] = []
+            terminal: Optional[dict] = None
+            import queue as _queue
+            while terminal is None:
+                try:
+                    item = display_q.get(timeout=1.0)
+                except _queue.Empty:
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                if item_type == "chunk":
+                    text = str(item.get("text") or "")
+                    if not text:
                         continue
-                    if isinstance(item, dict):
-                        if item.get("next"):
-                            text = str(item["next"])
-                            pieces.append(text)
-                            with self.lock:
-                                if sess.partial is not None:
-                                    sess.partial["content"] = "".join(pieces) if getattr(agent, "inc_out", False) else text
-                                    sess.partial["ts"] = time.time()
-                                    sess.updated_at = time.time()
-                        if "done" in item:
-                            full = str(item.get("done") or "")
-                            break
-                    else:
-                        pieces.append(str(item))
-                if not full and pieces:
-                    full = pieces[-1] if not getattr(agent, "inc_out", False) else "".join(pieces)
-            else:
-                full = "AgentRunner object has no put_task method"
-            if not full:
-                full = "(completed)"
-            if sess.cancel_requested:
-                with self.lock:
-                    sess.partial = None
-                    # Ensure status stays cancelled (don't overwrite)
-                    if sess.status != "cancelled":
-                        sess.status = "cancelled"
-                    sess.updated_at = time.time()
-                emit_session_state(sess, "cancelled")
-                return
+                    pieces.append(text)
+                    with self.lock:
+                        if sess.partial is not None:
+                            sess.partial["content"] = "".join(pieces) if getattr(agent, "inc_out", False) else text
+                            sess.partial["ts"] = time.time()
+                            sess.updated_at = time.time()
+                            self._sync_token_usage(sess)
+                    continue
+                if item_type == "terminal":
+                    terminal = item
+                    if "status" not in terminal:
+                        raise RuntimeError("invalid terminal event")
+                    continue
+
+            terminal_status = str(terminal.get("status") or "failed")
+            reason = str(terminal.get("reason") or "")
+            text = str(terminal.get("text") or "")
             with self.lock:
                 sess.partial = None
-                # Strip trailing [Info] Final response to user. marker
-                import re as _re
-                full = _re.sub(r'\n*`{5}\n*\[Info\] Final response to user\.\n*`{5}\s*$', '', full)
-                self.add_message(sess, "assistant", full)
-                sess.status = "idle"
-                sess.last_error = ""
-            emit_session_state(sess, "idle")
+                sess.terminal_status = terminal_status
+                sess.terminal_reason = reason
+                self._sync_token_usage(sess)
+
+                if terminal_status == "completed":
+                    import re as _re
+                    text = _re.sub(r'\n*`{5}\n*\[Info\] Final response to user\.\n*`{5}\s*$', '', text)
+                    self.add_message(sess, "assistant", text)
+                    sess.status = "idle"
+                    sess.last_error = ""
+                elif terminal_status == "waiting":
+                    data = terminal.get("data")
+                    payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
+                    payload = payload if isinstance(payload, dict) else {}
+                    question = str(payload.get("question") or text or reason)
+                    candidates = payload.get("candidates")
+                    if not isinstance(candidates, list):
+                        candidates = []
+                    self.add_message(
+                        sess,
+                        "system",
+                        question,
+                        kind="input_required",
+                        candidates=[str(candidate) for candidate in candidates],
+                    )
+                    sess.status = "waiting"
+                    sess.last_error = ""
+                elif terminal_status == "cancelled":
+                    sess.status = "cancelled"
+                    sess.last_error = ""
+                else:
+                    error_detail = reason or text or terminal_status
+                    sess.status = "error"
+                    sess.last_error = error_detail
+                    self.add_message(sess, "error", text or error_detail)
+                sess.updated_at = time.time()
+            emit_session_state(sess, sess.status)
         except Exception as e:
             tb = traceback.format_exc()
             with self.lock:
                 sess.partial = None
                 sess.status = "error"
                 sess.last_error = str(e)
+                sess.terminal_status = "failed"
+                sess.terminal_reason = type(e).__name__
                 self.add_message(sess, "error", str(e))
             print(tb, file=sys.stderr)
             emit_session_state(sess, "error")
@@ -407,6 +534,8 @@ class AgentManager:
                 "msgSeq": sess.msg_seq,
                 "updatedAt": sess.updated_at,
                 "lastError": sess.last_error,
+                "terminalStatus": sess.terminal_status,
+                "reason": sess.terminal_reason,
             }
 
     def cancel(self, sid: str) -> dict:
@@ -414,12 +543,13 @@ class AgentManager:
             sess = self.sessions.get(sid)
             if not sess:
                 raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
-            sess.cancel_requested = True
             if sess.agent and hasattr(sess.agent, "abort"):
                 with contextlib.suppress(Exception):
                     sess.agent.abort()
             sess.status = "cancelled"
             sess.partial = None
+            sess.terminal_status = "cancelled"
+            sess.terminal_reason = "user_cancelled"
             sess.updated_at = time.time()
         emit_session_state(sess, "cancelled")
         return {"ok": True, "sessionId": sid}
@@ -536,6 +666,8 @@ def emit_session_state(sess: Session, state_name: str):
         "sessionId": sess.id,
         "state": state_name,
         "status": sess.status,
+        "terminalStatus": sess.terminal_status,
+        "reason": sess.terminal_reason,
         "seq": sess.msg_seq,
         "updatedAt": sess.updated_at,
         "title": sess.title,
@@ -571,26 +703,76 @@ async def ws_handler(request):
 # Transport layer: HTTP command/data API
 # ---------------------------------------------------------------------------
 
-def cors_headers():
+_CORS_METHODS = "GET,POST,DELETE,OPTIONS"
+_CORS_HEADERS = "Content-Type, Authorization, X-ZA-Desktop-Token"
+
+
+def _is_public_request(request: web.Request) -> bool:
+    if request.path in {"/", "/status"}:
+        return True
+    route = request.match_info.route
+    return isinstance(getattr(route, "resource", None), web.StaticResource)
+
+
+def cors_headers(request: Optional[web.Request] = None) -> dict[str, str]:
+    if request is None:
+        return {}
+    origin = request.headers.get("Origin")
+    security = request.app.get("bridge_security")
+    if not origin or not isinstance(security, BridgeSecurity) or origin not in security.allowed_origins:
+        return {}
     return {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": _CORS_METHODS,
+        "Access-Control-Allow-Headers": _CORS_HEADERS,
+        "Vary": "Origin",
     }
 
 
+def _request_auth_tokens(request: web.Request) -> tuple[str, ...]:
+    if request.path == "/ws":
+        return (request.query.get("token", "").strip(),)
+
+    candidates: list[str] = []
+    auth = request.headers.get("Authorization", "")
+    scheme, _, value = auth.partition(" ")
+    if scheme.lower() == "bearer" and value:
+        candidates.append(value.strip())
+    candidates.append(request.headers.get("X-ZA-Desktop-Token", "").strip())
+    return tuple(candidates)
+
+
 @web.middleware
-async def cors_middleware(request, handler):
+async def security_middleware(request, handler):
+    security = request.app["bridge_security"]
+    origin = request.headers.get("Origin")
+    if origin and origin not in security.allowed_origins:
+        return web.json_response({"error": "origin not allowed"}, status=403)
+
+    headers = cors_headers(request)
     if request.method == "OPTIONS":
-        return web.Response(status=204, headers=cors_headers())
-    resp = await handler(request)
-    for k, v in cors_headers().items():
-        resp.headers[k] = v
+        return web.Response(status=204, headers=headers)
+    if not _is_public_request(request):
+        if not any(
+            token and hmac.compare_digest(token, security.token)
+            for token in _request_auth_tokens(request)
+        ):
+            return web.json_response({"error": "unauthorized"}, status=401, headers=headers)
+
+    try:
+        resp = await handler(request)
+    except web.HTTPException as exc:
+        for k, v in headers.items():
+            exc.headers[k] = v
+        raise
+    if not getattr(resp, "prepared", False):
+        for k, v in headers.items():
+            resp.headers[k] = v
     return resp
 
 
 def json_ok(data: dict, status: int = 200):
-    return web.json_response(data, status=status, headers=cors_headers(), dumps=lambda x: json.dumps(x, ensure_ascii=False, default=str))
+    return web.json_response(data, status=status, dumps=lambda x: json.dumps(x, ensure_ascii=False, default=str))
 
 
 async def read_json(request) -> dict:
@@ -608,12 +790,7 @@ async def status_handler(request):
         "ok": True,
         "running": True,
         "ready": True,
-        "workspaceDir": manager.workspace_dir,
-        "configPath": manager.config_path,
-        "sessionCount": len(manager.sessions),
-        "activeSessionId": manager.active_session_id,
-        "ws": "/ws",
-        "transport": {"http": True, "wsEventsOnly": True},
+        "authRequired": True,
     })
 
 
@@ -806,6 +983,7 @@ async def get_tokens_handler(request):
     """Get token usage for a session"""
     sid = request.match_info["sid"]
     sess = manager.get_session(sid)
+    manager._sync_token_usage(sess)
     return json_ok({"ok": True, "sessionId": sid, "tokenUsage": sess.token_usage})
 
 
@@ -852,7 +1030,8 @@ async def cancel_agent_handler(request):
         if agent.get("id") == aid:
             agent["status"] = "cancelled"
             agent["updated_at"] = time.time()
-            break
+            return json_ok({"ok": True, "sessionId": sid, "agentId": aid})
+    return json_ok({"ok": False, "error": "agent not found"}, status=404)
 
 
 async def worldline_handler(request):
@@ -916,10 +1095,10 @@ async def worldline_restore_handler(request):
 
 
 
-
-
-def create_app():
-    app = web.Application(middlewares=[cors_middleware])
+def create_app(*, security: Optional[BridgeSecurity] = None, host: str = "127.0.0.1", port: int = 14168):
+    security = _validate_bridge_security(security) if security is not None else load_bridge_security(host, port)
+    app = web.Application(middlewares=[security_middleware])
+    app["bridge_security"] = security
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/status", status_handler)
     app.router.add_get("/config", get_config_handler)
@@ -967,8 +1146,10 @@ def create_app():
 if __name__ == "__main__":
     host = os.environ.get("BRIDGE_HOST", "127.0.0.1")
     port = int(os.environ.get("BRIDGE_PORT", "14168"))
+    security = load_bridge_security(host, port)
     url = f"http://{host}:{port}/"
+    browser_url = f"{url}#token={urllib.parse.quote(security.token, safe='')}"
     print(f"ZeroAgent Web2 bridge: {url}  ws://{host}:{port}/ws", file=sys.stderr)
     if os.environ.get("ZA_DESKTOP_BRIDGE_NO_BROWSER") != "1":
-        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
-    web.run_app(create_app(), host=host, port=port, print=None)
+        threading.Timer(0.8, lambda: webbrowser.open(browser_url)).start()
+    web.run_app(create_app(security=security, host=host, port=port), host=host, port=port, print=None)

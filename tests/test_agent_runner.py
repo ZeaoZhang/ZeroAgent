@@ -11,7 +11,8 @@ import pytest
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import AgentConfig, LLMBackendConfig
-from zero_agent.runners.agent_runner import AgentRunner
+from zero_agent.core.types import TerminalEvent, TerminalStatus
+from zero_agent.runners.agent_runner import AgentRunner, _consume_agent_run
 
 
 @pytest.fixture
@@ -261,6 +262,121 @@ class TestAgentRunnerHistoryHelpers:
         assert mock_agent._turn_end_hooks["pet"] is hook
 
 
+class TestConsumeAgentRun:
+    @staticmethod
+    def _generator(terminal: TerminalEvent, *chunks):
+        yield from chunks
+        return terminal
+
+    @pytest.mark.parametrize(
+        ("status", "reason"),
+        [
+            (TerminalStatus.COMPLETED, "completion_certificate"),
+            (TerminalStatus.WAITING, "human_intervention"),
+            (TerminalStatus.BUDGET_EXHAUSTED, "max_turns"),
+            (TerminalStatus.PROTOCOL_ERROR, "text_tool_protocol_limit"),
+        ],
+    )
+    def test_retains_typed_terminal_return(self, status, reason) -> None:
+        chunks = []
+        terminal = _consume_agent_run(
+            self._generator(TerminalEvent(status=status, reason=reason), "hello"),
+            chunks.append,
+        )
+
+        assert chunks == ["hello"]
+        assert terminal.status == status
+        assert terminal.reason == reason
+
+    def test_converts_invalid_return_to_failed(self) -> None:
+        def gen():
+            if False:
+                yield None
+            return {"status": "completed"}
+
+        terminal = _consume_agent_run(gen(), lambda _chunk: None)
+
+        assert terminal.status == TerminalStatus.FAILED
+        assert terminal.reason == "invalid_terminal_return"
+
+    def test_converts_exception_to_failed(self) -> None:
+        def gen():
+            yield "before"
+            raise ValueError("broken")
+
+        terminal = _consume_agent_run(gen(), lambda _chunk: None)
+
+        assert terminal.status == TerminalStatus.FAILED
+        assert terminal.reason == "ValueError"
+        assert terminal.text == "broken"
+
+    def test_cancellation_after_next_closes_generator(self) -> None:
+        cancel_event = threading.Event()
+        closed = threading.Event()
+
+        def gen():
+            try:
+                cancel_event.set()
+                yield "discarded"
+            finally:
+                closed.set()
+
+        chunks = []
+        terminal = _consume_agent_run(
+            gen(),
+            chunks.append,
+            cancel_event=cancel_event,
+        )
+
+        assert terminal.status == TerminalStatus.CANCELLED
+        assert terminal.reason == "user_cancelled"
+        assert chunks == []
+        assert closed.is_set()
+
+    def test_cancellation_before_next_closes_generator(self) -> None:
+        cancel_event = threading.Event()
+        cancel_event.set()
+        started = threading.Event()
+
+        def gen():
+            started.set()
+            yield "discarded"
+
+        chunks = []
+        terminal = _consume_agent_run(
+            gen(),
+            chunks.append,
+            cancel_event=cancel_event,
+            cancel_reason="runner_cancelled",
+        )
+
+        assert terminal.status == TerminalStatus.CANCELLED
+        assert terminal.reason == "runner_cancelled"
+        assert chunks == []
+        assert not started.is_set()
+
+    def test_cancellation_after_terminal_return_wins(self) -> None:
+        cancel_event = threading.Event()
+
+        def gen():
+            if False:
+                yield None
+            cancel_event.set()
+            return TerminalEvent(
+                status=TerminalStatus.COMPLETED,
+                reason="completion_certificate",
+            )
+
+        terminal = _consume_agent_run(
+            gen(),
+            lambda _chunk: None,
+            cancel_event=cancel_event,
+        )
+
+        assert terminal.status == TerminalStatus.CANCELLED
+        assert terminal.reason == "user_cancelled"
+
+
 class TestAgentRunnerTaskDispatch:
     """put_task / abort / 生命周期."""
 
@@ -270,10 +386,10 @@ class TestAgentRunnerTaskDispatch:
         import queue
         assert isinstance(dq, queue.Queue)
 
-    def test_abort_sets_stop_signal(self, mock_agent: ZeroAgent) -> None:
+    def test_abort_sets_cancel_event(self, mock_agent: ZeroAgent) -> None:
         runner = AgentRunner(mock_agent)
         runner.abort()
-        assert runner._stop_sig is True
+        assert runner._cancel_event.is_set()
 
     def test_stop_joins_thread(self, mock_agent: ZeroAgent) -> None:
         runner = AgentRunner(mock_agent)
@@ -282,18 +398,21 @@ class TestAgentRunnerTaskDispatch:
         runner.stop()
         assert not runner.is_running
 
-    def test_multiple_tasks_sequential(self, mock_agent: ZeroAgent) -> None:
+    def test_multiple_tasks_sequential(self, mock_agent: ZeroAgent, monkeypatch) -> None:
+        def fake_run(prompt):
+            yield prompt
+            return TerminalEvent(
+                status=TerminalStatus.COMPLETED,
+                reason="completion_certificate",
+            )
+
+        monkeypatch.setattr(mock_agent, "run", fake_run)
         runner = AgentRunner(mock_agent)
         dq1 = runner.put_task("task 1")
         dq2 = runner.put_task("task 2")
         for dq in (dq1, dq2):
-            try:
-                while True:
-                    item = dq.get(timeout=3)
-                    if "done" in item:
-                        break
-            except Exception:
-                pass
+            assert dq.get(timeout=3)["type"] == "chunk"
+            assert dq.get(timeout=3)["type"] == "terminal"
         assert not runner.is_running
 
     def test_put_task_worker_auto_starts(self, mock_agent: ZeroAgent) -> None:
@@ -309,6 +428,10 @@ class TestAgentRunnerTaskDispatch:
             yield {"turn": 1}
             yield "Hel"
             yield "lo"
+            return TerminalEvent(
+                status=TerminalStatus.COMPLETED,
+                reason="completion_certificate",
+            )
 
         monkeypatch.setattr(mock_agent, "run", fake_run)
         runner = AgentRunner(mock_agent)
@@ -317,17 +440,22 @@ class TestAgentRunnerTaskDispatch:
 
         dq = runner.put_task("hello")
 
-        assert dq.get(timeout=3) == {"next": "Hel", "source": "user", "turn": 1}
-        assert dq.get(timeout=3) == {"next": "Hello", "source": "user", "turn": 1}
-        assert dq.get(timeout=3) == {"done": "Hello", "source": "user", "turn": 1}
+        assert dq.get(timeout=3) == {"type": "chunk", "text": "Hel", "source": "user", "turn": 1}
+        assert dq.get(timeout=3) == {"type": "chunk", "text": "Hello", "source": "user", "turn": 1}
+        terminal = dq.get(timeout=3)
+        assert terminal["type"] == "terminal"
+        assert terminal["status"] == "completed"
+        assert terminal["reason"] == "completion_certificate"
+        assert terminal["text"] == "Hello"
         runner.task_queue.put("EXIT")
         thread.join(timeout=3)
         assert not thread.is_alive()
 
-    def test_inc_out_emits_incremental_next_chunks(self, mock_agent: ZeroAgent, monkeypatch) -> None:
+    def test_inc_out_emits_incremental_chunks(self, mock_agent: ZeroAgent, monkeypatch) -> None:
         def fake_run(_prompt):
             yield "Hel"
             yield "lo"
+            return TerminalEvent(status=TerminalStatus.WAITING, reason="human_intervention")
 
         monkeypatch.setattr(mock_agent, "run", fake_run)
         runner = AgentRunner(mock_agent)
@@ -335,21 +463,205 @@ class TestAgentRunnerTaskDispatch:
 
         dq = runner.put_task("hello")
 
-        assert dq.get(timeout=3)["next"] == "Hel"
-        assert dq.get(timeout=3)["next"] == "lo"
-        assert dq.get(timeout=3)["done"] == "Hello"
+        assert dq.get(timeout=3)["text"] == "Hel"
+        assert dq.get(timeout=3)["text"] == "lo"
+        terminal = dq.get(timeout=3)
+        assert terminal["status"] == "waiting"
+        assert terminal["text"] == "Hello"
 
     def test_slash_hook_can_consume_commands(self, mock_agent: ZeroAgent, monkeypatch) -> None:
         runner = AgentRunner(mock_agent)
 
         def fake_slash(raw_query, display_queue):
             assert raw_query == "/help"
-            display_queue.put({"done": "handled", "source": "system"})
+            display_queue.put(TerminalEvent(
+                status=TerminalStatus.COMPLETED,
+                reason="slash_command",
+                text="handled",
+                source="system",
+            ).to_dict())
             return None
 
         monkeypatch.setattr(runner, "_handle_slash_cmd", fake_slash)
 
         dq = runner.put_task("/help")
 
-        assert dq.get(timeout=3) == {"done": "handled", "source": "system"}
+        terminal = dq.get(timeout=3)
+        assert terminal["type"] == "terminal"
+        assert terminal["status"] == "completed"
+        assert terminal["text"] == "handled"
+        assert terminal["source"] == "system"
         assert mock_agent.client.chat.call_count == 0
+
+    def test_slash_hook_exception_emits_failed_terminal(
+        self, mock_agent: ZeroAgent, monkeypatch
+    ) -> None:
+        runner = AgentRunner(mock_agent)
+
+        def fake_slash(_raw_query, _display_queue):
+            raise RuntimeError("broken slash")
+
+        monkeypatch.setattr(runner, "_handle_slash_cmd", fake_slash)
+
+        terminal = runner.put_task("/broken", source="system").get(timeout=3)
+
+        assert terminal["type"] == "terminal"
+        assert terminal["status"] == "failed"
+        assert terminal["reason"] == "RuntimeError"
+        assert terminal["text"] == "broken slash"
+        assert terminal["source"] == "system"
+        assert mock_agent.client.chat.call_count == 0
+
+    @pytest.mark.parametrize(
+        ("status", "reason"),
+        [
+            (TerminalStatus.BUDGET_EXHAUSTED, "max_turns"),
+            (TerminalStatus.PROTOCOL_ERROR, "invalid_step_outcome"),
+        ],
+    )
+    def test_queue_preserves_non_success_terminal(
+        self, mock_agent: ZeroAgent, monkeypatch, status, reason
+    ) -> None:
+        def fake_run(_prompt):
+            if False:
+                yield None
+            return TerminalEvent(status=status, reason=reason)
+
+        monkeypatch.setattr(mock_agent, "run", fake_run)
+        terminal = AgentRunner(mock_agent).put_task("hello").get(timeout=3)
+
+        assert terminal["status"] == status.value
+        assert terminal["reason"] == reason
+
+    def test_queue_converts_generator_exception(self, mock_agent: ZeroAgent, monkeypatch) -> None:
+        def fake_run(_prompt):
+            yield "partial"
+            raise LookupError("broken")
+
+        monkeypatch.setattr(mock_agent, "run", fake_run)
+        dq = AgentRunner(mock_agent).put_task("hello")
+
+        assert dq.get(timeout=3)["type"] == "chunk"
+        terminal = dq.get(timeout=3)
+        assert terminal["status"] == "failed"
+        assert terminal["reason"] == "LookupError"
+        assert terminal["text"] == "partial"
+
+    def test_queue_emits_cancelled_terminal(self, mock_agent: ZeroAgent, monkeypatch) -> None:
+        yielded = threading.Event()
+        release = threading.Event()
+
+        def fake_run(_prompt):
+            yield "partial"
+            yielded.set()
+            release.wait(timeout=3)
+            yield "discarded"
+            return TerminalEvent(status=TerminalStatus.COMPLETED)
+
+        monkeypatch.setattr(mock_agent, "run", fake_run)
+        runner = AgentRunner(mock_agent)
+        dq = runner.put_task("hello")
+        assert dq.get(timeout=3)["type"] == "chunk"
+        assert yielded.wait(timeout=3)
+
+        runner.abort()
+        release.set()
+        terminal = dq.get(timeout=3)
+
+        assert terminal["status"] == "cancelled"
+        assert terminal["reason"] == "user_cancelled"
+        assert terminal["text"] == "partial"
+
+    def test_put_task_after_shutdown_returns_runner_shutdown_terminal(self, mock_agent: ZeroAgent) -> None:
+        runner = AgentRunner(mock_agent)
+        runner.stop()
+
+        dq = runner.put_task("after shutdown", source="desktop")
+        terminal = dq.get(timeout=3)
+
+        assert terminal["type"] == "terminal"
+        assert terminal["status"] == "cancelled"
+        assert terminal["reason"] == "runner_shutdown"
+        assert terminal["source"] == "desktop"
+        assert runner._worker_thread is None
+
+    def test_put_task_after_shutdown_does_not_restart_stopped_worker(self, mock_agent: ZeroAgent) -> None:
+        runner = AgentRunner(mock_agent)
+        runner.start()
+        worker = runner._worker_thread
+        assert worker is not None
+        assert worker.is_alive()
+
+        runner.stop()
+        assert not worker.is_alive()
+
+        dq = runner.put_task("after shutdown")
+        terminal = dq.get(timeout=3)
+
+        assert terminal["status"] == "cancelled"
+        assert terminal["reason"] == "runner_shutdown"
+        assert runner._worker_thread is worker
+        assert not runner._worker_thread.is_alive()
+
+    def test_stop_sends_runner_shutdown_to_queued_tasks(self, mock_agent: ZeroAgent, monkeypatch) -> None:
+        active_started = threading.Event()
+        release_active = threading.Event()
+        calls: list[str] = []
+
+        def fake_run(prompt):
+            calls.append(prompt)
+            active_started.set()
+            yield "partial"
+            release_active.wait(timeout=3)
+            yield "discarded"
+            return TerminalEvent(status=TerminalStatus.COMPLETED)
+
+        monkeypatch.setattr(mock_agent, "run", fake_run)
+        runner = AgentRunner(mock_agent)
+
+        active_queue = runner.put_task("active")
+        assert active_queue.get(timeout=3)["type"] == "chunk"
+        assert active_started.wait(timeout=3)
+        queued_queue = runner.put_task("queued")
+
+        stop_thread = threading.Thread(target=runner.stop)
+        stop_thread.start()
+
+        queued_terminal = queued_queue.get(timeout=3)
+        assert queued_terminal["type"] == "terminal"
+        assert queued_terminal["status"] == "cancelled"
+        assert queued_terminal["reason"] == "runner_shutdown"
+        assert calls == ["active"]
+
+        release_active.set()
+        active_terminal = active_queue.get(timeout=3)
+        stop_thread.join(timeout=3)
+
+        assert not stop_thread.is_alive()
+        assert active_terminal["status"] == "cancelled"
+        assert active_terminal["reason"] == "user_cancelled"
+        assert active_terminal["text"] == "partial"
+
+    def test_stop_racing_put_task_cancels_task_without_starting_worker(
+        self, mock_agent: ZeroAgent, monkeypatch
+    ) -> None:
+        run_mock = MagicMock()
+        monkeypatch.setattr(mock_agent, "run", run_mock)
+        original_ensure_worker = AgentRunner._ensure_worker
+
+        def stop_before_worker_start(runner: AgentRunner) -> None:
+            runner.stop()
+            original_ensure_worker(runner)
+
+        monkeypatch.setattr(AgentRunner, "_ensure_worker", stop_before_worker_start)
+        runner = AgentRunner(mock_agent)
+
+        dq = runner.put_task("raced", source="race")
+        terminal = dq.get(timeout=3)
+
+        assert terminal["type"] == "terminal"
+        assert terminal["status"] == "cancelled"
+        assert terminal["reason"] == "runner_shutdown"
+        assert terminal["source"] == "race"
+        assert runner._worker_thread is None
+        run_mock.assert_not_called()

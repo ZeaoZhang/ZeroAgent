@@ -1,15 +1,11 @@
-"""ask_user — 中断 agent 循环请求用户输入.
-
-返回 INTERRUPT 状态，包含问题和可选候选项，
-由 AgentLoop 检测 should_exit 后将控制权交还给调用方.
-"""
+"""ask_user — interrupt the agent loop and request user input."""
 
 from __future__ import annotations
 
 from typing import Any, Dict, Generator, List, Optional
 
 from zero_agent.core.config import AgentConfig
-from zero_agent.core.types import StepOutcome
+from zero_agent.core.types import StepAction, StepOutcome
 from zero_agent.tools.registry import ToolRegistry
 
 
@@ -21,8 +17,8 @@ def _t(zh: str, en: str, lang: str) -> str:
 def ask_user(question: str, candidates: Optional[List[str]] = None) -> dict:
     """构建用户中断请求.
 
-    此函数不包含副作用，仅构造返回数据结构。
-    由 AgentLoop 在检测到 should_exit=True 时中断循环。
+    This function has no side effects; AgentLoop maps its explicit wait action
+    to a waiting terminal event.
 
     Args:
         question: 向用户提出的问题.
@@ -96,7 +92,7 @@ def _make_ask_user_handler(config: AgentConfig):
         yield f"Waiting for your answer ...\n"
         return StepOutcome(
             ask_user(question, candidates),
-            next_prompt="",
-            should_exit=True,
+            action=StepAction.WAIT_FOR_USER,
+            reason="human_intervention",
         )
     return _handler

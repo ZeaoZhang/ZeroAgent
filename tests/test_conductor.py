@@ -50,3 +50,14 @@ def test_short_id_is_hex():
     sid = short_id()
     assert len(sid) == 8
     assert all(c in "0123456789abcdef" for c in sid)
+
+
+def test_conductor_approval_uses_start_endpoint() -> None:
+    """前端批准子任务时应调用后端的 /subagent/start 路由。"""
+    from pathlib import Path
+    import zero_agent.frontends.conductor as conductor
+
+    html = Path(conductor.HTML_PATH).read_text(encoding="utf-8")
+
+    assert "fetch('/subagent/start'" in html
+    assert "fetch('/subagent',{method:'POST'" not in html

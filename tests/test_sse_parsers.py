@@ -198,8 +198,24 @@ class TestTryParseToolArgs:
         assert result[0] == {"a": 1}
         assert result[1] == {"b": 2}
 
-    def test_invalid_stores_raw(self) -> None:
-        assert _try_parse_tool_args("{not valid") == [{"_raw": "{not valid"}]
+    def test_invalid_returns_malformed_object(self) -> None:
+        assert _try_parse_tool_args("{not valid") == [
+            {
+                "_malformed": True,
+                "_raw": "{not valid",
+                "_error": "tool arguments must be a JSON object",
+            }
+        ]
+
+    def test_non_object_returns_malformed_object(self) -> None:
+        for raw in ("[]", "null", '"text"', "1"):
+            assert _try_parse_tool_args(raw) == [
+                {
+                    "_malformed": True,
+                    "_raw": raw,
+                    "_error": "tool arguments must be a JSON object",
+                }
+            ]
 
 
 # ---- parse_openai_sse tests ----

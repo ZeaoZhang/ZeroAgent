@@ -1,15 +1,30 @@
-use std::process::{Command, Child};
-use std::sync::Mutex;
+use rand::{rngs::OsRng, RngCore};
+use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::time::{Duration, Instant};
-use std::thread;
 use std::path::PathBuf;
+use std::process::{Child, Command};
+use std::sync::Mutex;
+use std::thread;
+use std::time::{Duration, Instant};
 use tauri::Manager;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+const BRIDGE_HOST: &str = "127.0.0.1";
+const BRIDGE_PORT: u16 = 14168;
+const OCCUPIED_UNAUTHENTICATED_ERROR: &str = "Bridge port 14168 is occupied by an unauthenticated process";
+
 static BRIDGE_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
+static BRIDGE_TOKEN: Mutex<Option<String>> = Mutex::new(None);
+
+fn bridge_process_lock() -> std::sync::MutexGuard<'static, Option<Child>> {
+    BRIDGE_PROCESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn bridge_token_lock() -> std::sync::MutexGuard<'static, Option<String>> {
+    BRIDGE_TOKEN.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Get project root (parent of zero_agent/)
 fn project_root() -> PathBuf {
@@ -145,14 +160,89 @@ pub fn get_or_discover_config() -> (String, String) {
     (python, project)
 }
 
-fn is_bridge_running() -> bool {
-    TcpStream::connect(("127.0.0.1", 14168)).is_ok()
+fn generate_bridge_token() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        token.push(HEX[(byte >> 4) as usize] as char);
+        token.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    token
 }
 
-fn wait_for_port(port: u16, timeout: Duration) -> bool {
+fn configured_bridge_token() -> (String, bool) {
+    if let Ok(token) = std::env::var("ZA_DESKTOP_BRIDGE_TOKEN") {
+        let token = token.trim().to_string();
+        if !token.is_empty() {
+            *bridge_token_lock() = Some(token.clone());
+            return (token, true);
+        }
+    }
+
+    let mut guard = bridge_token_lock();
+    if let Some(token) = guard.as_ref() {
+        return (token.clone(), false);
+    }
+
+    let token = generate_bridge_token();
+    *guard = Some(token.clone());
+    (token, false)
+}
+
+fn bridge_url_with_token(token: &str) -> tauri::Url {
+    let encoded = urlencoding::encode(token);
+    tauri::Url::parse(&format!("http://{}:{}/#token={}", BRIDGE_HOST, BRIDGE_PORT, encoded)).unwrap()
+}
+
+fn is_bridge_running() -> bool {
+    TcpStream::connect((BRIDGE_HOST, BRIDGE_PORT)).is_ok()
+}
+
+fn owned_bridge_running() -> bool {
+    let mut guard = bridge_process_lock();
+    if let Some(child) = guard.as_mut() {
+        if matches!(child.try_wait(), Ok(None)) {
+            return true;
+        }
+    }
+    *guard = None;
+    false
+}
+
+fn bridge_config_accepts_token(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+
+    let mut stream = match TcpStream::connect((BRIDGE_HOST, BRIDGE_PORT)) {
+        Ok(stream) => stream,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+
+    let request = format!(
+        "GET /config HTTP/1.1\r\nHost: {}:{}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        BRIDGE_HOST, BRIDGE_PORT, token
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+
+    let mut response = String::new();
+    if stream.read_to_string(&mut response).is_err() {
+        return false;
+    }
+    response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")
+}
+
+fn wait_for_authenticated_bridge(token: &str, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        if bridge_config_accepts_token(token) {
             return true;
         }
         thread::sleep(Duration::from_millis(100));
@@ -160,9 +250,82 @@ fn wait_for_port(port: u16, timeout: Duration) -> bool {
     false
 }
 
+fn start_bridge_process(python_path: &str, project_dir: &PathBuf, token: &str) -> Result<(), String> {
+    let py = PathBuf::from(python_path);
+    let script = bridge_script_for_project(project_dir);
+    if !script.exists() {
+        return Err(format!("desktop_bridge.py not found at {:?}", script));
+    }
+
+    let mut cmd = Command::new(&py);
+    cmd.arg(&script)
+        .current_dir(script.parent().unwrap_or(project_dir))
+        .env("ZA_DESKTOP_BRIDGE_NO_BROWSER", "1")
+        .env("ZA_DESKTOP_BRIDGE_TOKEN", token);
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    let child = cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?;
+    *bridge_process_lock() = Some(child);
+    Ok(())
+}
+
+fn stop_owned_bridge() {
+    let mut guard = bridge_process_lock();
+    if let Some(mut child) = guard.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    *bridge_token_lock() = None;
+}
+
+fn ensure_bridge_ready(python_path: &str, project_dir: &str, timeout: Duration) -> Result<(), String> {
+    let (token, token_explicit) = configured_bridge_token();
+
+    if owned_bridge_running() {
+        if wait_for_authenticated_bridge(&token, timeout) {
+            return Ok(());
+        }
+        return Err("Bridge did not become ready within 20s".into());
+    }
+
+    if is_bridge_running() {
+        if token_explicit && bridge_config_accepts_token(&token) {
+            return Ok(());
+        }
+        return Err(OCCUPIED_UNAUTHENTICATED_ERROR.into());
+    }
+
+    let dir = PathBuf::from(project_dir);
+    start_bridge_process(python_path, &dir, &token)?;
+    if wait_for_authenticated_bridge(&token, timeout) {
+        Ok(())
+    } else {
+        Err("Bridge did not become ready within 20s".into())
+    }
+}
+
+fn navigate_main_window(app_handle: &tauri::AppHandle) {
+    if let Some(main_win) = app_handle.get_webview_window("main") {
+        let (token, _) = configured_bridge_token();
+        let _ = main_win.navigate(bridge_url_with_token(&token));
+        let _ = main_win.show();
+        let _ = main_win.set_focus();
+    }
+}
+
+fn show_setup_error(app_handle: &tauri::AppHandle, message: &str) {
+    if let Some(setup_win) = app_handle.get_webview_window("setup") {
+        let script = format!(
+            "const s=document.getElementById('status');if(s){{s.className='err';s.textContent={};}}",
+            serde_json::to_string(message).unwrap_or_else(|_| "\"\"".to_string())
+        );
+        let _ = setup_win.eval(&script);
+    }
+}
+
 #[tauri::command(rename_all = "snake_case")]
 fn start_bridge_with_config(app_handle: tauri::AppHandle, python_path: String, project_dir: String) -> Result<(), String> {
-    // Save to settings
+    // Save to settings without persisting any bridge token.
     let path = settings_path();
     let obj = serde_json::json!({
         "python_path": python_path,
@@ -171,37 +334,8 @@ fn start_bridge_with_config(app_handle: tauri::AppHandle, python_path: String, p
     std::fs::write(&path, serde_json::to_string_pretty(&obj).unwrap())
         .map_err(|e| format!("Failed to write settings: {}", e))?;
 
-    // Start bridge only if it is not already accepting connections.
-    if !is_bridge_running() {
-        let py = PathBuf::from(&python_path);
-        let dir = PathBuf::from(&project_dir);
-        let script = bridge_script_for_project(&dir);
-        if !script.exists() {
-            return Err(format!("desktop_bridge.py not found at {:?}", script));
-        }
-
-        let mut cmd = Command::new(&py);
-        cmd.arg(&script)
-            .current_dir(script.parent().unwrap_or(&dir))
-            .env("ZA_DESKTOP_BRIDGE_NO_BROWSER", "1");
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        let child = cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?;
-        *BRIDGE_PROCESS.lock().unwrap() = Some(child);
-    }
-
-    // Wait for port
-    if !wait_for_port(14168, Duration::from_secs(20)) {
-        return Err("Bridge did not become ready within 20s".into());
-    }
-
-    // Navigate main window to bridge URL after the bridge is ready, then show it.
-    if let Some(main_win) = app_handle.get_webview_window("main") {
-        let url = tauri::Url::parse("http://127.0.0.1:14168/").unwrap();
-        let _ = main_win.navigate(url);
-        let _ = main_win.show();
-        let _ = main_win.set_focus();
-    }
+    ensure_bridge_ready(&python_path, &project_dir, Duration::from_secs(20))?;
+    navigate_main_window(&app_handle);
     if let Some(setup_win) = app_handle.get_webview_window("setup") {
         let _ = setup_win.hide();
     }
@@ -219,24 +353,25 @@ pub fn run() {
     let args: Vec<String> = std::env::args().collect();
     let no_autostart = args.iter().any(|a| a == "--no-autostart");
     let dev_mode = args.iter().any(|a| a == "--dev");
+    let (bridge_token, token_explicit) = configured_bridge_token();
 
-    let bridge_ok = is_bridge_running();
     let mut spawned_bridge = false;
-    if !bridge_ok && !no_autostart {
-        // Try to start bridge with saved/discovered config
-        let (py_str, dir_str) = get_or_discover_config();
-        let dir = PathBuf::from(&dir_str);
-        let script = bridge_script_for_project(&dir);
-        if script.exists() {
-            let mut cmd = Command::new(&py_str);
-            cmd.arg(&script)
-                .current_dir(script.parent().unwrap_or(&dir))
-                .env("ZA_DESKTOP_BRIDGE_NO_BROWSER", "1");
-            #[cfg(windows)]
-            cmd.creation_flags(0x08000000);
-            if let Ok(child) = cmd.spawn() {
-                *BRIDGE_PROCESS.lock().unwrap() = Some(child);
-                spawned_bridge = true;
+    let mut startup_error: Option<String> = None;
+
+    if !no_autostart {
+        if is_bridge_running() {
+            if !(token_explicit && bridge_config_accepts_token(&bridge_token)) {
+                startup_error = Some(OCCUPIED_UNAUTHENTICATED_ERROR.to_string());
+            }
+        } else {
+            let (py_str, dir_str) = get_or_discover_config();
+            let dir = PathBuf::from(&dir_str);
+            let script = bridge_script_for_project(&dir);
+            if script.exists() {
+                match start_bridge_process(&py_str, &dir, &bridge_token) {
+                    Ok(()) => spawned_bridge = true,
+                    Err(err) => startup_error = Some(err),
+                }
             }
         }
     }
@@ -256,13 +391,12 @@ pub fn run() {
             } else {
                 Duration::from_secs(2)
             };
-            let bridge_ready = wait_for_port(14168, bridge_wait);
+            let bridge_ready = startup_error.is_none() && wait_for_authenticated_bridge(&bridge_token, bridge_wait);
             if bridge_ready {
-                // Navigate to bridge HTTP only after it is ready; the window starts on loading.html
+                // Navigate to bridge HTTP only after authenticated /config succeeds; the window starts on loading.html
                 // so WebView never caches an early "connection refused" error page.
                 if let Some(w) = app.get_webview_window("main") {
-                    let url = tauri::Url::parse("http://127.0.0.1:14168/").unwrap();
-                    let _ = w.navigate(url);
+                    let _ = w.navigate(bridge_url_with_token(&bridge_token));
                     if dev_mode {
                         w.open_devtools();
                     } else {
@@ -290,6 +424,9 @@ pub fn run() {
                     }
                     let _ = w.show();
                 }
+                if let Some(err) = startup_error.as_deref() {
+                    show_setup_error(app.handle(), err);
+                }
             }
             Ok(())
         })
@@ -297,15 +434,18 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let label = window.label();
                 if label == "main" {
+                    stop_owned_bridge();
                     // Main closed -> exit app
                     window.app_handle().exit(0);
                 } else if label == "setup" {
                     // Setup closed -> exit if main is not visible
                     if let Some(main_win) = window.app_handle().get_webview_window("main") {
                         if !main_win.is_visible().unwrap_or(false) {
+                            stop_owned_bridge();
                             window.app_handle().exit(0);
                         }
                     } else {
+                        stop_owned_bridge();
                         window.app_handle().exit(0);
                     }
                 }

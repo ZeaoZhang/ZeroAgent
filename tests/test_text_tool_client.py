@@ -13,8 +13,10 @@ from zero_agent.llm.base import MockFunction, MockResponse, MockToolCall
 class FakeBackend:
     """A fake backend that returns predetermined text when .chat() is called."""
 
-    def __init__(self, response_text="", name="fake"):
+    def __init__(self, response_text="", name="fake", backend_response=None):
         self._response = response_text
+        self._backend_response = backend_response
+        self.messages = []
         self.name = name
         self._history = []
         self._system = ""
@@ -40,7 +42,10 @@ class FakeBackend:
         self._system = value
 
     def chat(self, messages, tools=None):
+        self.messages.append(messages)
         yield self._response
+        if self._backend_response is not None:
+            return self._backend_response
         return MockResponse(content=self._response)
 
 
@@ -114,6 +119,35 @@ def test_parse_json_array_of_tool_use():
     )
     tts = _make_tts()
     result = tts._parse_mixed_response(text)
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "bad_json"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [[], None, "abc", 1, True],
+)
+def test_text_tool_arguments_must_be_json_object(args):
+    text = f'<tool_use>{json.dumps({"name": "file_read", "arguments": args})}</tool_use>'
+    tts = _make_tts()
+    tts._prepare_tool_instruction([{"type": "function", "function": {"name": "file_read"}}])
+
+    result = tts._parse_mixed_response(text)
+
+    assert len(result.tool_calls) == 1
+    tc = result.tool_calls[0]
+    assert tc.function.name == "bad_json"
+    assert "JSON object" in json.loads(tc.function.arguments)["msg"]
+    assert tts._last_tools_json == ""
+
+
+@pytest.mark.parametrize("payload", ['[]', 'null', '"abc"', '1'])
+def test_top_level_non_object_tool_payload_is_bad_json(payload):
+    tts = _make_tts()
+    result = tts._parse_mixed_response(f"<tool_use>{payload}</tool_use>")
+
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "bad_json"
 
 def test_bad_json_yields_bad_json_tool_call():
     """On parse failure, returns bad_json tool call with error."""
@@ -125,6 +159,21 @@ def test_bad_json_yields_bad_json_tool_call():
     result = tts._parse_mixed_response(text)
 
     assert any(tc.function.name == "bad_json" for tc in result.tool_calls)
+    assert tts._last_tools_json == ""
+
+
+def test_incomplete_tool_tag_clears_cache_and_next_prompt_is_full():
+    tts = _make_tts('<tool_use>{"name":"file_read","arguments":{"path":"a"}')
+    tools = [{"type": "function", "function": {"name": "file_read", "description": "read"}}]
+    first = tts._prepare_tool_instruction(tools)
+    assert "file_read" in first
+    assert "file_read" not in tts._prepare_tool_instruction(tools)
+
+    result = tts._parse_mixed_response('<tool_use>{"name":"file_read","arguments":{"path":"a"}')
+
+    assert result.tool_calls[0].function.name == "bad_json"
+    assert tts._last_tools_json == ""
+    assert "file_read" in tts._prepare_tool_instruction(tools)
 
 
 def test_no_tools_returns_empty():
@@ -213,3 +262,36 @@ def test_chat_yields_and_returns_mock_response():
     assert mock.content == "<summary>done</summary>\nThe file is ready."
     assert len(mock.tool_calls) == 1
     assert mock.tool_calls[0].function.name == "file_write"
+    assert mock.tool_protocol == "text"
+    assert mock.raw["protocol"] == "text"
+    assert mock.raw["text_raw"] == text
+
+
+def test_chat_preserves_backend_stop_usage_and_raw_metadata():
+    text = 'Final text <tool_use>{"name":"file_read","arguments":{"path":"a"}}</tool_use>'
+    usage = {"prompt_tokens": 3, "completion_tokens": 4}
+    backend_raw = {"id": "resp-1", "usage": {"fallback": True}}
+    backend_response = MockResponse(
+        content=text,
+        raw=backend_raw,
+        stop_reason="max_tokens",
+        usage=usage,
+    )
+    tts = TextToolSession(FakeBackend(text, backend_response=backend_response), auto_save_tokens=True)
+    gen = tts.chat([{"role": "user", "content": "read"}], tools=[])
+
+    chunks = []
+    mock = None
+    try:
+        while True:
+            chunks.append(next(gen))
+    except StopIteration as e:
+        mock = e.value
+
+    assert chunks == [text]
+    assert mock.stop_reason == "max_tokens"
+    assert mock.usage == usage
+    assert mock.tool_protocol == "text"
+    assert mock.raw == {"protocol": "text", "backend_raw": backend_raw, "text_raw": text}
+    assert mock.content == "Final text"
+    assert mock.tool_calls[0].function.name == "file_read"

@@ -396,7 +396,7 @@
         const card = btn.closest('.approval');
         const act = btn.dataset.act;
         const prompt = card.querySelector('.appr-prompt').value;
-        if(act==='ok') fetch('/subagent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt})});
+        if(act==='ok') fetch('/subagent/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt})});
         card.remove();
         const left = apprBody.querySelectorAll('.approval').length;
         apprBadge.textContent = left;

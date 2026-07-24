@@ -18,7 +18,7 @@ from importlib import resources
 from typing import Any, Dict, Generator, List, Optional
 
 from zero_agent.core.config import AgentConfig
-from zero_agent.core.types import StepOutcome
+from zero_agent.core.types import StepAction, StepOutcome
 from zero_agent.tools.registry import ToolRegistry
 from zero_agent.utils.text import smart_format
 
@@ -283,6 +283,7 @@ def _make_code_run_handler(config: AgentConfig):
                 return StepOutcome(
                     "[Error] Code missing. Must use reply code block or 'script' arg.",
                     next_prompt="\n",
+                    action=StepAction.CONTINUE,
                 )
 
         # inline_eval: 在进程内执行 Python 代码（用于自省/调试）

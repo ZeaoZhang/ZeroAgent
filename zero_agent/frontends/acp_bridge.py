@@ -181,7 +181,7 @@ class ZeroAgentAcpBridge:
             "agentInfo": {
                 "name": "zeroagent-acp",
                 "title": "ZeroAgent",
-                "version": "0.1.0",
+                "version": "0.2.0",
             },
             "authMethods": [],
         }
@@ -236,19 +236,14 @@ class ZeroAgentAcpBridge:
             stop_reason = "end_turn"
             try:
                 dq = session.agent.put_task(prompt_text, source="acp")
-                self._drain_agent_queue(session, dq)
+                stop_reason = self._drain_agent_queue(session, dq)
             except Exception as exc:
-                stop_reason = "end_turn"
-                self.write_message(
-                    make_session_update(
-                        session.session_id,
-                        {
-                            "sessionUpdate": "agent_message_chunk",
-                            "content": make_text_block(
-                                f"[Bridge error] {type(exc).__name__}: {exc}"
-                            ),
-                        },
-                    )
+                reason = type(exc).__name__
+                self._emit_terminal_update(
+                    session,
+                    status="failed",
+                    reason=reason,
+                    text=f"[Bridge error] {reason}: {exc}",
                 )
                 eprint("[ZeroAgent ACP] prompt thread failed:", traceback.format_exc())
             finally:
@@ -264,15 +259,39 @@ class ZeroAgentAcpBridge:
 
         threading.Thread(target=run_prompt, daemon=True).start()
 
-    def _drain_agent_queue(self, session: SessionState, dq: "queue.Queue[Dict[str, Any]]") -> None:
+    def _emit_terminal_update(
+        self,
+        session: SessionState,
+        *,
+        status: str,
+        reason: str,
+        text: str = "",
+    ) -> None:
+        self.write_message(
+            make_session_update(
+                session.session_id,
+                {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": make_text_block(text or reason),
+                    "terminalStatus": status,
+                    "reason": reason,
+                },
+            )
+        )
+
+    def _drain_agent_queue(
+        self,
+        session: SessionState,
+        dq: "queue.Queue[Dict[str, Any]]",
+    ) -> str:
         sent_any = False
         while True:
             item = dq.get()
             if not isinstance(item, dict):
                 continue
-            # With inc_out=True, "next" items are already incremental deltas.
-            if "next" in item and "done" not in item:
-                delta = item["next"]
+            item_type = item.get("type")
+            if item_type == "chunk":
+                delta = item.get("text")
                 if isinstance(delta, str) and delta:
                     sent_any = True
                     try:
@@ -285,28 +304,44 @@ class ZeroAgentAcpBridge:
                                 },
                             )
                         )
-                    except Exception as e:
-                        eprint(f"[ACP-BRIDGE] ERROR writing update: {e}")
-            if "done" in item:
-                # "done" text has post-processing (</summary>\n\n insertion)
-                # that shifts offsets — cannot safely compute a tail delta.
-                # Only use "done" content if nothing was streamed (error case).
-                if not sent_any:
-                    done_text = item["done"]
-                    if isinstance(done_text, str) and done_text:
-                        try:
-                            self.write_message(
-                                make_session_update(
-                                    session.session_id,
-                                    {
-                                        "sessionUpdate": "agent_message_chunk",
-                                        "content": make_text_block(done_text),
-                                    },
-                                )
-                            )
-                        except Exception as e:
-                            eprint(f"[ACP-BRIDGE] ERROR writing done: {e}")
-                break
+                    except Exception as exc:
+                        eprint(f"[ACP-BRIDGE] ERROR writing update: {exc}")
+                continue
+            if item_type != "terminal":
+                continue
+            if "status" not in item:
+                self._emit_terminal_update(
+                    session,
+                    status="failed",
+                    reason="invalid_terminal_event",
+                )
+                return "end_turn"
+
+            status = str(item.get("status") or "failed")
+            reason = str(item.get("reason") or "")
+            text = str(item.get("text") or "")
+            if status == "completed":
+                if text and not sent_any:
+                    self.write_message(
+                        make_session_update(
+                            session.session_id,
+                            {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": make_text_block(text),
+                            },
+                        )
+                    )
+                return "end_turn"
+            if status == "cancelled":
+                return "cancelled"
+
+            self._emit_terminal_update(
+                session,
+                status=status,
+                reason=reason,
+                text=text,
+            )
+            return "end_turn"
 
     def handle_session_cancel(self, params: Dict[str, Any]) -> None:
         session_id = params.get("sessionId")

@@ -1,60 +1,138 @@
-"""Tests for core/types.py — StepOutcome and TurnResult."""
+"""Tests for core/types.py terminal and step control models."""
 
-from zero_agent.core.types import StepOutcome, TurnResult
+from zero_agent.core.types import (
+    CompletionCertificate,
+    EvidenceLedger,
+    EvidenceRecord,
+    PendingTaskState,
+    StepAction,
+    StepOutcome,
+    TaskContract,
+    TaskMode,
+    TerminalEvent,
+    TerminalStatus,
+    TurnResult,
+)
 
+
+
+class TestTaskEvidenceModels:
+    def test_contract_ledger_and_pending_state(self) -> None:
+        contract = TaskContract(
+            task_id="task-1",
+            user_request="write a file",
+            mode=TaskMode.EXECUTION,
+        )
+        record = EvidenceRecord(
+            turn=1,
+            tool_name="file_write",
+            status="success",
+            kind="write",
+            summary="wrote out.txt",
+            data_ref="out.txt",
+        )
+        ledger = EvidenceLedger(records=[record])
+        pending = PendingTaskState(
+            contract=contract,
+            ledger=ledger,
+            plan_verify_status="missing",
+            waiting_kind="ask_user",
+            waiting_data={"question": "continue?"},
+        )
+
+        assert pending.contract.mode is TaskMode.EXECUTION
+        assert pending.ledger.records[0].status == "success"
+        assert pending.waiting_data == {"question": "continue?"}
 
 class TestStepOutcome:
-    """StepOutcome dataclass tests."""
-
-    def test_defaults(self) -> None:
+    def test_defaults_to_continue(self) -> None:
         outcome = StepOutcome(data="test")
         assert outcome.data == "test"
         assert outcome.next_prompt is None
-        assert outcome.should_exit is False
+        assert outcome.action is StepAction.CONTINUE
+        assert outcome.reason == ""
+        assert outcome.terminal_status is None
 
-    def test_next_prompt_empty_string(self) -> None:
-        """空字符串 next_prompt 由 loop 解释为当前任务完成."""
-        outcome = StepOutcome(data={}, next_prompt="")
-        assert outcome.next_prompt == ""
-        assert outcome.should_exit is False
-
-    def test_next_prompt_custom(self) -> None:
-        """自定义 next_prompt 作为下一轮 user message."""
-        outcome = StepOutcome(data={}, next_prompt="Continue with step 2")
-        assert outcome.next_prompt == "Continue with step 2"
-
-    def test_should_exit(self) -> None:
-        """should_exit=True 表示硬退出."""
-        outcome = StepOutcome(data={"question": "..."}, should_exit=True)
-        assert outcome.should_exit is True
+    def test_explicit_completion_request(self) -> None:
+        outcome = StepOutcome(data={}, action=StepAction.REQUEST_COMPLETION)
+        assert outcome.action is StepAction.REQUEST_COMPLETION
         assert outcome.next_prompt is None
 
-    def test_data_dict(self) -> None:
-        outcome = StepOutcome(data={"status": "success", "output": "hello"})
-        assert outcome.data["status"] == "success"
+    def test_explicit_wait(self) -> None:
+        outcome = StepOutcome(
+            data={"question": "..."},
+            action=StepAction.WAIT_FOR_USER,
+            reason="human_intervention",
+        )
+        assert outcome.action is StepAction.WAIT_FOR_USER
+        assert outcome.reason == "human_intervention"
 
-    def test_data_str(self) -> None:
-        outcome = StepOutcome(data="just a string")
-        assert outcome.data == "just a string"
+    def test_explicit_failure(self) -> None:
+        outcome = StepOutcome(
+            data={"error": "bad"},
+            action=StepAction.FAIL,
+            reason="bad_request",
+            terminal_status=TerminalStatus.FAILED,
+        )
+        assert outcome.terminal_status is TerminalStatus.FAILED
+
+
+class TestTerminalEvent:
+    def test_defaults(self) -> None:
+        event = TerminalEvent()
+        assert event.type == "terminal"
+        assert event.status is TerminalStatus.FAILED
+        assert event.reason == ""
+        assert event.turn == 0
+
+    def test_to_dict_serializes_literals_and_certificate(self) -> None:
+        certificate = CompletionCertificate(
+            task_id="task-1",
+            status="completed",
+            reason="verified",
+            evidence_count=2,
+            verify_status="pass",
+            plan_remaining=0,
+            final_text="done",
+        )
+        event = TerminalEvent(
+            status=TerminalStatus.COMPLETED,
+            reason="completion_certificate",
+            text="done",
+            data={"ok": True},
+            turn=3,
+            source="agent",
+            certificate=certificate,
+        )
+
+        assert event.to_dict() == {
+            "type": "terminal",
+            "status": "completed",
+            "reason": "completion_certificate",
+            "text": "done",
+            "data": {"ok": True},
+            "turn": 3,
+            "source": "agent",
+            "certificate": {
+                "task_id": "task-1",
+                "status": "completed",
+                "reason": "verified",
+                "evidence_count": 2,
+                "verify_status": "pass",
+                "plan_remaining": 0,
+                "final_text": "done",
+            },
+        }
 
 
 class TestTurnResult:
-    """TurnResult dataclass tests."""
-
     def test_defaults(self) -> None:
-        tr = TurnResult(turn=1)
-        assert tr.turn == 1
-        assert tr.tool_calls == []
-        assert tr.tool_results == []
-        assert tr.exit_reason is None
+        result = TurnResult(turn=1)
+        assert result.tool_calls == []
+        assert result.tool_results == []
+        assert result.terminal is None
 
-    def test_with_data(self) -> None:
-        tr = TurnResult(
-            turn=3,
-            tool_calls=[{"tool_name": "echo", "args": {"message": "hi"}}],
-            tool_results=[{"tool_use_id": "call_1", "content": '{"result": "hi"}'}],
-            exit_reason={"result": "CURRENT_TASK_DONE", "data": "done"},
-        )
-        assert len(tr.tool_calls) == 1
-        assert len(tr.tool_results) == 1
-        assert tr.exit_reason is not None
+    def test_terminal(self) -> None:
+        terminal = TerminalEvent(status=TerminalStatus.WAITING)
+        result = TurnResult(turn=2, terminal=terminal)
+        assert result.terminal is terminal

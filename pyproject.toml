@@ -1,6 +1,6 @@
 [project]
 name = "zero-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "A clean, reusable autonomous agent framework"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
@@ -43,6 +43,7 @@ zero-agent-configure = "zero_agent.utils.configure:main"
 zero-agent-conductor = "zero_agent.frontends.conductor:main"
 zero-agent-acp = "zero_agent.frontends.acp_bridge:main"
 zero-agent-tui = "zero_agent.frontends.tui:main"
+zero-agent-launcher = "zero_agent.frontends.launcher:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]
@@ -64,6 +65,7 @@ packages = [
     "zero_agent.reflect",
     "zero_agent.plugins",
     "zero_agent.frontends",
+    "zero_agent.frontends.commands",
     "zero_agent.assets",
 ]
 

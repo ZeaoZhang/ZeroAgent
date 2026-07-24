@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Generator, List, Optional, Protocol
 
+from zero_agent.core.types import StepOutcome, TerminalEvent
+
 
 class LLMClient(Protocol):
     """LLM 会话的协议接口.
@@ -48,14 +50,20 @@ class ToolDispatcher(Protocol):
         tool_name: str,
         args: Dict[str, Any],
         response: Any,
-    ) -> Generator[str, None, Any]:
+        index: int = 0,
+        tool_num: int = 1,
+    ) -> Generator[str, None, StepOutcome]:
         """分发工具调用."""
         ...
 
     def turn_end_callback(
         self,
-        next_prompts: List[str],
-        ctx: Dict[str, Any],
-    ) -> List[str]:
-        """轮次结束回调."""
+        response: Any,
+        tool_calls: list,
+        tool_results: list,
+        turn: int,
+        next_prompt: str,
+        terminal: Optional[TerminalEvent],
+    ) -> str:
+        """Record and enhance one completed turn."""
         ...

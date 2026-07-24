@@ -46,6 +46,42 @@ def test_ultraplan_py_imports():
     assert "parallel" in up_all
     assert "mapchain" in up_all
 
+def test_ultraplan_subagent_propagates_config_and_keeps_logs(monkeypatch, tmp_path) -> None:
+    """UltraPlan worker 应继承 ZA_CONFIG_PATH，且不再禁用日志。"""
+    import zero_agent.assets.ga_ultraplan as up
+
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        returncode = 0
+        pid = 12345
+
+        def communicate(self, timeout=None):
+            captured["timeout"] = timeout
+            return "", ""
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setenv("ZA_CONFIG_PATH", str(tmp_path / "live.yaml"))
+    monkeypatch.setattr(up.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(up, "_RUN_DIR", str(tmp_path))
+    monkeypatch.setattr(up, "_TASK_SLUG", "case")
+    monkeypatch.setattr(up, "_FUNC_SEQ", 0)
+
+    output = up._subagent("worker", llm_no=2, timeout=17)
+
+    cmd = captured["cmd"]
+    assert "-c" in cmd
+    assert cmd[cmd.index("-c") + 1] == str(tmp_path / "live.yaml")
+    assert "--nolog" not in cmd
+    assert "--no-user-tools" in cmd
+    assert captured["timeout"] == 17
+    assert captured["kwargs"]["start_new_session"] is True
+    assert output.endswith(".out.txt")
+
 
 def test_macljqctrl_import_does_not_crash():
     """macljqctrl module imports without crashing."""

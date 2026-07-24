@@ -33,6 +33,7 @@ _TEMP_DIR = os.path.join(_PROJECT_ROOT, "temp")
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import load_keys
+from zero_agent.bots.common import terminal_notice
 
 _KEYS = load_keys()
 
@@ -507,10 +508,11 @@ def on_message(bot: WxBotClient, msg):
 
         threading.Thread(target=_keep_typing, daemon=True).start()
         result = ""
-        sent = 0
+        latest_chunk = ""
+        sent_chunk = ""
         mi = 0
         last_send = 0
-        item = {}
+        terminal = None
 
         def _wx_send(text):
             s = text.strip()
@@ -540,39 +542,38 @@ def on_message(bot: WxBotClient, msg):
             return False
 
         try:
-            done = []
-            turn = 1
             while True:
                 item = dq.get(timeout=300)
-                if "done" in item:
+                if item.get("type") == "chunk":
+                    current = str(item.get("text", ""))
+                    latest_chunk = latest_chunk + current if getattr(runner, "inc_out", False) else current
+                    if latest_chunk != sent_chunk:
+                        merged = _clean(latest_chunk)
+                        if _send(merged):
+                            sent_chunk = latest_chunk
+                    continue
+                if item.get("type") == "terminal":
+                    terminal = item
+                    result = str(item.get("text", ""))
                     break
-                if item.get("turn", turn) > turn:
-                    outputs = item.get("outputs", [])
-                    lastdone = outputs[-2] if len(outputs) >= 2 else ""
-                    turn = item["turn"]
-                    done.append(lastdone)
-                if len(done) > sent:
-                    merged = _clean("\n\n".join(done[sent:]))
-                    print(
-                        f"[WX] turns={len(done)}/{len(done) + 1} sent={sent} "
-                        f"sending={len(done) - sent}", file=sys.__stdout__
-                    )
-                    if _send(merged):
-                        sent = len(done)
         except queue.Empty:
-            result = "[超时]"
+            terminal = {
+                "type": "terminal",
+                "status": "failed",
+                "reason": "timeout",
+                "text": "",
+            }
         _typing_stop.set()
 
-        if "done" in item:
-            result = item["done"]
-            done = item.get("outputs", [])
-        aborted = _task_aborted.pop(uid, False)
-        tag = "[已停止]" if aborted else "[任务已完成]"
-        rest = _clean("\n\n".join(done[sent:] + ["\n\n" + tag]).strip())
-        if rest:
-            _wx_send(rest[-3000:])
-
-        files = re.findall(r"\[FILE:([^\]]+)\]", result)
+        status = terminal.get("status") if terminal else "failed"
+        if status == "completed":
+            final_text = _clean(result)
+        else:
+            final_text = terminal_notice(terminal or {})
+        if final_text:
+            _wx_send(final_text[-3000:])
+        _task_aborted.pop(uid, None)
+        files = re.findall(r"\[FILE:([^\]]+)\]", result) if status == "completed" else []
         bad = {"filepath", "<filepath>", "path", "<path>", "file_path", "<file_path>", "..."}
         files = [
             f for f in files

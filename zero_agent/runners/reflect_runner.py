@@ -17,6 +17,8 @@ import os
 import sys
 import time
 from typing import Any, Callable, Optional
+from zero_agent.core.types import TerminalEvent, TerminalStatus
+from zero_agent.runners.agent_runner import _consume_agent_run
 
 logger = logging.getLogger(__name__)
 
@@ -140,42 +142,39 @@ class ReflectRunner:
         """调用模块的 on_done() 方法（如果存在）.
 
         Args:
-            result: 任务执行结果.
+            result: 任务的 TerminalEvent 终态.
         """
         on_done_fn: Optional[Callable[[Any], None]] = getattr(
             self._module, "on_done", None
         )
         if on_done_fn is not None:
             on_done_fn(result)
-    def _run_task(self, task: str) -> Any:
-        """执行单个 reflect 任务.
 
-        调用 agent.run(task) 并消费 generator 直到完成。
-
-        Args:
-            task: 任务描述字符串.
-
-        Returns:
-            agent.run() 的 return value.
-        """
-        gen = self.agent.run(task)
-        result = None
+    def _run_task(self, task: str) -> TerminalEvent:
+        """Execute one reflect task and retain the typed terminal return."""
         try:
-            while True:
-                try:
-                    chunk = next(gen)
-                    # 将文本 chunk 输出到 stdout（与 CLI 行为一致）
-                    if isinstance(chunk, str):
-                        import sys
-                        sys.stdout.write(chunk)
-                        sys.stdout.flush()
-                except StopIteration as e:
-                    result = e.value
-                    break
+            gen = self.agent.run(task)
+        except Exception as exc:
+            return TerminalEvent(
+                status=TerminalStatus.FAILED,
+                reason=type(exc).__name__,
+                text=str(exc),
+            )
+
+        def on_chunk(chunk: Any) -> None:
+            if isinstance(chunk, str):
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+
+        try:
+            return _consume_agent_run(gen, on_chunk)
         except KeyboardInterrupt:
             self.agent.abort()
             logger.info("Reflect 任务被中断: %s", task[:80])
-        return result
+            return TerminalEvent(
+                status=TerminalStatus.CANCELLED,
+                reason="keyboard_interrupt",
+            )
 
     def _write_reflect_log(self, result: Any) -> None:
         """Append a reflect log entry to <workspace_dir>/reflect_logs/<name>_<date>.log.
