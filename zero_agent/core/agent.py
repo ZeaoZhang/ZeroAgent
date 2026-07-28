@@ -419,7 +419,7 @@ class ZeroAgent:
             self.handler.task_contract = TaskContract(
                 task_id=f"task-{time.time_ns()}",
                 user_request=user_input,
-                mode=self._classify_task_mode(user_input),
+                mode=TaskMode.OPEN,
             )
             self.handler.evidence_ledger = EvidenceLedger()
             self.handler.plan_verify_status = "missing"
@@ -427,6 +427,8 @@ class ZeroAgent:
             self.handler.task_contract = copy.deepcopy(pending_state.contract)
             self.handler.evidence_ledger = copy.deepcopy(pending_state.ledger)
             self.handler.plan_verify_status = pending_state.plan_verify_status
+            if self.handler.task_contract.mode is TaskMode.PLAN:
+                self.handler.max_turns = 120
             effective_initial_content = self._pending_continuation_content(
                 pending_state,
                 user_input,
@@ -441,7 +443,7 @@ class ZeroAgent:
             client=self.client,
             handler=self.handler,
             tools_schema=tools_schema,
-            max_turns=self.config.max_turns,
+            max_turns=(120 if self.handler.task_contract.mode is TaskMode.PLAN else self.config.max_turns),
             verbose=self.config.verbose,
             hooks=self.hooks,
             agent=self,
@@ -460,34 +462,6 @@ class ZeroAgent:
         finally:
             self._is_running_task = False
 
-    @staticmethod
-    def _classify_task_mode(user_input: str) -> TaskMode:
-        """Classify only obvious conversational requests as chat.
-
-        Ambiguous requests default to execution so text alone cannot certify work.
-        """
-
-        text = " ".join(str(user_input or "").strip().lower().split())
-        if not text:
-            return TaskMode.EXECUTION
-        if re.fullmatch(r"(?:hi|hello|hey|你好|您好|嗨|哈喽)[!！,.，。 ]*", text):
-            return TaskMode.CHAT
-        chat_markers = (
-            "what can you do",
-            "who are you",
-            "explain ",
-            "what is ",
-            "what are ",
-            "只回答",
-            "仅回答",
-            "不要执行",
-            "无需执行",
-            "解释一下",
-            "什么是",
-            "你能做什么",
-            "你是谁",
-        )
-        return TaskMode.CHAT if any(marker in text for marker in chat_markers) else TaskMode.EXECUTION
 
     def clear_pending_task(self) -> None:
         """Discard a task paused for user input."""
@@ -770,6 +744,15 @@ class ZeroAgent:
         prompt = self._load_system_prompt_template(lang)
         prompt += f"\nToday: {time.strftime('%Y-%m-%d %a')}\n"
         prompt += self.memory.get_global_memory_context()
+        prompt += (
+            "\n## Task control protocol\n"
+            "Each new task starts in OPEN state; do not infer chat/execution from wording. "
+            "Call a real tool whenever external state must be inspected or changed. "
+            "After any real tool call, the task is EXECUTING and must finish with provider-native "
+            "complete_task(answer, evidence_refs), citing relevant successful ledger records. "
+            "Answer-only tasks may call complete_task with no evidence_refs. "
+            "Use ask_user only when user input is required. Do not end an executed task with plain text.\n"
+        )
 
         extra_sys = getattr(self.client, "extra_sys_prompt", "")
         if extra_sys:

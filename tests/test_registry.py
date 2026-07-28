@@ -156,6 +156,7 @@ class TestToolRegistry:
         names = {tool.name for tool in registry.list_all()}
 
         assert names == {
+            "complete_task",
             "code_run",
             "file_read",
             "file_patch",

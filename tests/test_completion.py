@@ -19,9 +19,9 @@ def _contract(mode: TaskMode, *, plan_path: str | None = None) -> TaskContract:
     )
 
 
-def test_chat_completion_needs_visible_content() -> None:
+def test_open_completion_needs_visible_content() -> None:
     cert, prompt = evaluate_completion(
-        _contract(TaskMode.CHAT),
+        _contract(TaskMode.OPEN),
         EvidenceLedger(),
         MockResponse(content="Hello, I can help."),
         plan_remaining=None,
@@ -31,21 +31,22 @@ def test_chat_completion_needs_visible_content() -> None:
     assert prompt is None
     assert cert is not None
     assert cert.verify_status == "not_required"
-    assert cert.reason == "chat_final_answer"
+    assert cert.reason == "open_answer_completed"
 
 
-def test_execution_text_only_does_not_complete() -> None:
+def test_executing_completion_requires_explicit_evidence_refs() -> None:
     cert, prompt = evaluate_completion(
-        _contract(TaskMode.EXECUTION),
+        _contract(TaskMode.EXECUTING),
         EvidenceLedger(),
         MockResponse(content="Done."),
+        evidence_refs=[],
         plan_remaining=None,
         plan_verify_status="missing",
     )
 
     assert cert is None
     assert prompt is not None
-    assert "cannot complete from text alone" in prompt
+    assert "evidence_refs" in prompt
 
 
 def test_execution_requires_last_relevant_evidence_not_error() -> None:
@@ -55,16 +56,17 @@ def test_execution_requires_last_relevant_evidence_not_error() -> None:
     ])
 
     cert, prompt = evaluate_completion(
-        _contract(TaskMode.EXECUTION),
+        _contract(TaskMode.EXECUTING),
         ledger,
         MockResponse(content="Fixed."),
+        evidence_refs=[1, 2],
         plan_remaining=None,
         plan_verify_status="missing",
     )
 
     assert cert is None
     assert prompt is not None
-    assert "latest relevant tool evidence is an error" in prompt
+    assert "contains an error" in prompt
 
 
 def test_execution_success_evidence_signs_certificate() -> None:
@@ -73,9 +75,10 @@ def test_execution_success_evidence_signs_certificate() -> None:
     ])
 
     cert, prompt = evaluate_completion(
-        _contract(TaskMode.EXECUTION),
+        _contract(TaskMode.EXECUTING),
         ledger,
         MockResponse(content="Config is valid."),
+        evidence_refs=[1],
         plan_remaining=None,
         plan_verify_status="missing",
     )
@@ -84,6 +87,40 @@ def test_execution_success_evidence_signs_certificate() -> None:
     assert cert is not None
     assert cert.evidence_count == 1
     assert cert.reason == "execution_evidence_satisfied"
+
+def test_execution_rejects_any_referenced_error_even_after_success() -> None:
+    ledger = EvidenceLedger(records=[
+        EvidenceRecord(1, "code_run", "error", "execute", "failed"),
+        EvidenceRecord(2, "file_read", "success", "read", "read config"),
+    ])
+
+    cert, prompt = evaluate_completion(
+        _contract(TaskMode.EXECUTING),
+        ledger,
+        MockResponse(content="Done."),
+        evidence_refs=[1, 2],
+        plan_remaining=None,
+        plan_verify_status="missing",
+    )
+
+    assert cert is None
+    assert prompt is not None
+    assert "contains an error" in prompt
+
+
+def test_plan_pass_still_requires_visible_answer() -> None:
+    cert, prompt = evaluate_completion(
+        _contract(TaskMode.PLAN),
+        EvidenceLedger(),
+        MockResponse(content=""),
+        final_text="",
+        plan_remaining=0,
+        plan_verify_status="pass",
+    )
+
+    assert cert is None
+    assert prompt is not None
+    assert "visible final answer" in prompt
 
 
 def test_plan_pass_requires_matching_successful_evidence(tmp_path) -> None:

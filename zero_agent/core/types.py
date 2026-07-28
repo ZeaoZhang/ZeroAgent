@@ -18,10 +18,10 @@ class TerminalStatus(str, Enum):
 
 
 class TaskMode(str, Enum):
-    """Task contract mode selected at task start."""
+    """Observed task state; it never predicts intent from user text."""
 
-    CHAT = "chat"
-    EXECUTION = "execution"
+    OPEN = "open"
+    EXECUTING = "executing"
     PLAN = "plan"
 
 

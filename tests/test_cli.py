@@ -242,7 +242,7 @@ def test_run_task_mode_writes_evidence_json(tmp_path) -> None:
         config = SimpleNamespace(peer_hint=True)
         task_dir = "unset"
         handler = SimpleNamespace(
-            task_contract=TaskContract("task-1", "Task round 1", TaskMode.EXECUTION),
+            task_contract=TaskContract("task-1", "Task round 1", TaskMode.EXECUTING),
             evidence_ledger=ledger,
         )
 

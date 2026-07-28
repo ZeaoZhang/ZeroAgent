@@ -253,7 +253,7 @@ class TestZeroAgentConfigReload:
         agent = ZeroAgent(config=config)
         old_client = agent.client
         old_handler = agent.handler
-        contract = TaskContract("task-1", "inspect", TaskMode.EXECUTION)
+        contract = TaskContract("task-1", "inspect", TaskMode.EXECUTING)
         ledger = EvidenceLedger()
         old_handler.task_contract = contract
         old_handler.evidence_ledger = ledger
@@ -397,7 +397,7 @@ class TestZeroAgentConfigReload:
         old_handler = agent.handler
         old_registry = agent.registry
         old_memory = agent.memory
-        contract = TaskContract("task-1", "inspect", TaskMode.EXECUTION)
+        contract = TaskContract("task-1", "inspect", TaskMode.EXECUTING)
         ledger = EvidenceLedger()
         old_handler.task_contract = contract
         old_handler.evidence_ledger = ledger
@@ -427,6 +427,17 @@ class TestZeroAgentConfigReload:
         assert agent.memory is not old_memory
 
 
+def _complete_response(answer: str, evidence_refs: list[int]) -> MockResponse:
+    import json
+
+    return MockResponse(tool_calls=[MockToolCall(
+        function=MockFunction(
+            name="complete_task",
+            arguments=json.dumps({"answer": answer, "evidence_refs": evidence_refs}),
+        ),
+        id="call_complete",
+    )])
+
 class TestZeroAgentHooks:
     """ZeroAgent.run() hook wiring tests."""
 
@@ -455,14 +466,14 @@ class TestZeroAgentHooks:
                     tool_calls=[
                         MockToolCall(
                             function=MockFunction(
-                                name="echo",
-                                arguments='{"message": "hello"}',
+                                name="file_read",
+                                arguments='{"path": "config.py"}',
                             ),
                             id="call_1",
                         ),
                     ],
                 ),
-                MockResponse(content="Done. <summary>done</summary>"),
+                _complete_response("Done.", [1]),
             ],
         )
         monkeypatch.setattr(
@@ -472,15 +483,15 @@ class TestZeroAgentHooks:
 
         registry = ToolRegistry()
 
-        def echo_handler(args, _response, _handler):
-            yield "echo\n"
-            return {"result": args["message"], "_za_next_prompt": "next"}
+        def file_read_handler(args, _response, _handler):
+            yield "read\n"
+            return f"content from {args['path']}"
 
         registry.register(ToolDefinition(
-            name="echo",
+            name="file_read",
             description="",
             parameters={"type": "object", "properties": {}},
-            handler=echo_handler,
+            handler=file_read_handler,
         ))
 
         events: list[tuple[str, dict]] = []
@@ -505,7 +516,7 @@ class TestZeroAgentHooks:
         assert event_names.count("turn_after") == 2
         assert event_names[-1] == "agent_after"
         tool_after_ctx = next(ctx for event, ctx in events if event == "tool_after")
-        assert tool_after_ctx["result"] == {"result": "hello"}
+        assert tool_after_ctx["result"] == "content from config.py"
 
     def test_abort_signal_does_not_poison_next_code_run(self, tmp_path, monkeypatch) -> None:
         """一次 abort 不应让后续任务的 code_run 被立刻杀死."""
@@ -539,7 +550,7 @@ class TestZeroAgentHooks:
                         ),
                     ],
                 ),
-                MockResponse(content="Done. <summary>done</summary>"),
+                _complete_response("Done.", [1]),
             ],
         )
         monkeypatch.setattr(
@@ -614,12 +625,16 @@ class TestZeroAgentHooks:
 
 
 class TestZeroAgentTaskLifecycle:
-    def test_task_mode_classifier_defaults_ambiguous_requests_to_execution(self) -> None:
-        assert ZeroAgent._classify_task_mode("hello") is TaskMode.CHAT
-        assert ZeroAgent._classify_task_mode("解释一下什么是事件循环") is TaskMode.CHAT
-        assert ZeroAgent._classify_task_mode("只回答，不要执行：什么是缓存？") is TaskMode.CHAT
-        assert ZeroAgent._classify_task_mode("check the repository") is TaskMode.EXECUTION
-        assert ZeroAgent._classify_task_mode("帮我看看") is TaskMode.EXECUTION
+    def test_new_tasks_start_open_without_text_classification(self) -> None:
+        requests = (
+            "hello",
+            "解释一下什么是事件循环",
+            "check the repository",
+            "你能帮我检查项目配置吗？",
+            "告诉我并修改 config.py",
+        )
+        assert requests
+        assert TaskMode.OPEN.value == "open"
 
     def test_waiting_task_restores_contract_and_evidence_then_clears_on_failure(
         self,
@@ -685,7 +700,7 @@ class TestZeroAgentTaskLifecycle:
         assert first.status is TerminalStatus.WAITING
         pending = agent._pending_task_state
         assert pending is not None
-        assert pending.contract.mode is TaskMode.EXECUTION
+        assert pending.contract.mode is TaskMode.OPEN
         assert pending.contract.user_request == "inspect the repository"
         assert pending.waiting_kind == "ask_user"
         assert len(pending.ledger.records) == 1
@@ -731,6 +746,9 @@ class TestZeroAgentTaskLifecycle:
             def run(self, *, initial_user_content, **_kwargs):
                 seen["status"] = self.handler.plan_verify_status
                 seen["content"] = initial_user_content
+                seen["mode"] = self.handler.task_contract.mode
+                seen["plan_path"] = self.handler.task_contract.plan_path
+                seen["max_turns"] = self.handler.max_turns
                 if False:
                     yield None
                 return TerminalEvent(status=TerminalStatus.FAILED, reason="blocked")
@@ -749,6 +767,61 @@ class TestZeroAgentTaskLifecycle:
 
         assert seen["status"] == "partial_accepted"
         assert "explicitly accepted" in seen["content"]
+        assert seen["mode"] is TaskMode.PLAN
+        assert seen["plan_path"] == "plan.md"
+        assert seen["max_turns"] == 120
+
+    def test_resumed_plan_passes_extended_budget_to_real_loop(
+        self,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        config = AgentConfig(
+            llm_backends={
+                "default": LLMBackendConfig(
+                    name="default",
+                    provider="openai",
+                    api_key="test-key",
+                    api_base="https://api.openai.com/v1",
+                    model="test-model",
+                ),
+            },
+            default_backend="default",
+            max_turns=5,
+            workspace_dir=str(tmp_path / "workspace"),
+            memory_dir=str(tmp_path / "memory"),
+        )
+        fake_client = _FakeClient(config.llm_backends["default"], [])
+        monkeypatch.setattr(
+            "zero_agent.core.agent.LLMFactory.create_all_sessions",
+            lambda _config: {"default": fake_client},
+        )
+        seen = {}
+
+        class CapturingRealLoop:
+            def __init__(self, *, max_turns, handler, **_kwargs):
+                seen["loop_max_turns"] = max_turns
+                self.handler = handler
+
+            def run(self, **_kwargs):
+                self.handler.max_turns = seen["loop_max_turns"]
+                seen["handler_max_turns"] = self.handler.max_turns
+                if False:
+                    yield None
+                return TerminalEvent(status=TerminalStatus.FAILED, reason="blocked")
+
+        monkeypatch.setattr("zero_agent.core.agent.AgentLoop", CapturingRealLoop)
+        agent = ZeroAgent(config=config)
+        agent._pending_task_state = PendingTaskState(
+            contract=TaskContract("task-plan", "finish", TaskMode.PLAN, "plan.md"),
+            ledger=EvidenceLedger(),
+            plan_verify_status="missing",
+            waiting_kind="ask_user",
+        )
+
+        _exhaust(agent.run("continue"))
+
+        assert seen == {"loop_max_turns": 120, "handler_max_turns": 120}
 
     def test_resumed_pending_state_is_consumed_before_cancellation(
         self,
@@ -786,7 +859,7 @@ class TestZeroAgentTaskLifecycle:
         monkeypatch.setattr("zero_agent.core.agent.AgentLoop", PausingLoop)
         agent = ZeroAgent(config=config)
         agent._pending_task_state = PendingTaskState(
-            contract=TaskContract("pending", "original", TaskMode.EXECUTION),
+            contract=TaskContract("pending", "original", TaskMode.EXECUTING),
             ledger=EvidenceLedger(),
             plan_verify_status="missing",
             waiting_kind="ask_user",

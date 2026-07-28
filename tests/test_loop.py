@@ -5,6 +5,7 @@ Uses mock LLM client to test the loop flow without real API calls.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Generator, List, Optional
 
 import pytest
@@ -42,12 +43,23 @@ def _make_mock_client(responses: List[MockResponse]):
 
     return MockClient()
 
+def _complete_response(answer: str, evidence_refs: list[int]) -> MockResponse:
+    return MockResponse(
+        tool_calls=[MockToolCall(
+            function=MockFunction(
+                name="complete_task",
+                arguments=json.dumps({"answer": answer, "evidence_refs": evidence_refs}),
+            ),
+            id="call_complete",
+        )],
+    )
 
-def _set_chat_contract(handler: BaseHandler) -> None:
+
+def _set_open_contract(handler: BaseHandler) -> None:
     handler.task_contract = TaskContract(
         task_id=handler.task_contract.task_id,
         user_request=handler.task_contract.user_request,
-        mode=TaskMode.CHAT,
+        mode=TaskMode.OPEN,
         plan_path=handler.task_contract.plan_path,
     )
 
@@ -63,7 +75,7 @@ def _set_execution_contract(handler: BaseHandler) -> None:
     handler.task_contract = TaskContract(
         task_id=handler.task_contract.task_id,
         user_request=handler.task_contract.user_request,
-        mode=TaskMode.EXECUTION,
+        mode=TaskMode.EXECUTING,
         plan_path=handler.task_contract.plan_path,
     )
 
@@ -74,7 +86,7 @@ class TestAgentLoop:
 
     def test_single_turn_completion(self, mock_handler: BaseHandler) -> None:
         """A single deliverable text response returns completed."""
-        _set_chat_contract(mock_handler)
+        _set_open_contract(mock_handler)
         client = _make_mock_client([
             MockResponse(content="Task is done, no tools needed."),
         ])
@@ -92,7 +104,7 @@ class TestAgentLoop:
 
     def test_empty_tool_calls_triggers_no_tool(self, mock_handler: BaseHandler) -> None:
         """LLM 不调用工具时自动触发 do_no_tool."""
-        _set_chat_contract(mock_handler)
+        _set_open_contract(mock_handler)
         client = _make_mock_client([
             MockResponse(content="Here is my answer."),
         ])
@@ -125,7 +137,7 @@ class TestAgentLoop:
                     ),
                 ],
             ),
-            MockResponse(content="After tool, task done."),
+            _complete_response("After tool, task done.", [1]),
         ])
         loop = AgentLoop(
             client=client,
@@ -252,9 +264,9 @@ class TestAgentLoop:
 
     def test_yield_structure_verbose(self, mock_handler: BaseHandler) -> None:
         """verbose 模式下 yield 的结构."""
-        _set_chat_contract(mock_handler)
+        _set_open_contract(mock_handler)
         client = _make_mock_client([
-            MockResponse(content="Done."),
+            _complete_response("Done.", []),
         ])
         loop = AgentLoop(
             client=client,
@@ -274,9 +286,9 @@ class TestAgentLoop:
 
     def test_yield_structure_non_verbose(self, mock_handler: BaseHandler) -> None:
         """非 verbose 模式下 yield 的结构."""
-        _set_chat_contract(mock_handler)
+        _set_open_contract(mock_handler)
         client = _make_mock_client([
-            MockResponse(content="Done."),
+            _complete_response("Done.", []),
         ])
         loop = AgentLoop(
             client=client,
@@ -313,7 +325,7 @@ class TestAgentLoop:
                     ),
                 ],
             ),
-            MockResponse(content="Both done."),
+            _complete_response("Both done.", [1]),
         ])
         loop = AgentLoop(
             client=client,
@@ -360,7 +372,7 @@ class TestAgentLoop:
                     ),
                 ],
             ),
-            MockResponse(content="Done."),
+            _complete_response("Done.", [1]),
         ])
         loop = AgentLoop(
             client=client,
@@ -428,7 +440,7 @@ class TestAgentLoop:
                     ),
                 ],
             ),
-            MockResponse(content="Done."),
+            _complete_response("Done.", [1]),
         ])
         loop = AgentLoop(
             client=client,
@@ -456,9 +468,9 @@ class TestAgentLoop:
         self,
         mock_handler: BaseHandler,
     ) -> None:
-        _set_chat_contract(mock_handler)
+        _set_open_contract(mock_handler)
         client = _make_mock_client([
-            MockResponse(content="Done."),
+            _complete_response("Done.", [1]),
         ])
         loop = AgentLoop(
             client=client,
@@ -476,9 +488,9 @@ class TestAgentLoop:
         self,
         mock_handler: BaseHandler,
     ) -> None:
-        _set_chat_contract(mock_handler)
+        _set_open_contract(mock_handler)
         client = _make_mock_client([
-            MockResponse(content="Done."),
+            _complete_response("Done.", [1]),
         ])
         loop = AgentLoop(
             client=client,
@@ -514,7 +526,7 @@ class TestAgentLoop:
                     ),
                 ],
             ),
-            MockResponse(content="Done."),
+            _complete_response("Done.", [1]),
         ])
         client.last_tools = "cached"
         client._last_tools_json = "cached-json"
@@ -716,7 +728,7 @@ class TestAgentLoop:
                     ),
                 ],
             ),
-            MockResponse(content="Both done."),
+            _complete_response("Both done.", [1]),
         ])
         loop = AgentLoop(
             client=client,
@@ -814,7 +826,7 @@ class TestAgentLoop:
 
     def test_done_hook_extends_loop(self, mock_handler: BaseHandler) -> None:
         """_done_hooks 在任务声明完成时追加额外轮次."""
-        _set_chat_contract(mock_handler)
+        _set_open_contract(mock_handler)
         mock_handler._done_hooks.append("Do one more thing: verify the result.")
 
         client = _make_mock_client([
@@ -839,8 +851,9 @@ class TestAgentLoop:
         self,
         mock_handler: BaseHandler,
     ) -> None:
-        _set_chat_contract(mock_handler)
+        _set_open_contract(mock_handler)
         original_cwd = mock_handler.cwd
+        _add_success_evidence(mock_handler)
         responses = []
         for index in range(4):
             responses.append(MockResponse(
@@ -850,7 +863,7 @@ class TestAgentLoop:
                     id=f"call_{index}",
                 )],
             ))
-        responses.append(MockResponse(content="Final answer."))
+        responses.append(_complete_response("Final answer.", [1]))
         client = _make_mock_client(responses)
 
         class ReloadAgent:

@@ -96,22 +96,16 @@ class CompletionGate:
         plan_verification_prompt_factory: Callable[[], str],
         in_plan_mode: Callable[[], bool],
         check_plan_completion: Callable[[], Optional[int]],
-        exit_plan_mode: Callable[[], None],
-        completion_judge: Optional[Callable[[dict[str, Any]], Optional[dict[str, Any]]]] = None,
         protocol_retry_limit: int = 2,
         action_retry_limit: int = 2,
-        judge_retry_limit: int = 1,
     ) -> None:
         self._retry_prompt_factory = retry_prompt_factory
         self._large_code_prompt_factory = large_code_prompt_factory
         self._plan_verification_prompt_factory = plan_verification_prompt_factory
         self._in_plan_mode = in_plan_mode
         self._check_plan_completion = check_plan_completion
-        self._exit_plan_mode = exit_plan_mode
         self._protocol_retry_limit = protocol_retry_limit
         self._action_retry_limit = action_retry_limit
-        self._completion_judge = completion_judge
-        self._judge_retry_limit = judge_retry_limit
         self._retry_counts: dict[str, int] = {}
 
     def reset(self) -> None:
@@ -180,17 +174,18 @@ class CompletionGate:
             )
 
         combined = "\n".join(part for part in (content, thinking) if part)
-        if self._has_text_tool_protocol(combined):
+        executable_text_call = self._extract_executable_text_tool_call(combined)
+        if executable_text_call:
             return self._budgeted_retry(
                 reason="text_tool_protocol",
                 limit=self._protocol_retry_limit,
                 protocol=protocol,
                 message_zh=(
-                    "[Warn] 检测到文本工具协议，但没有可执行 tool_calls，要求重试.\n"
+                    "[Warn] 检测到正文中的可执行工具调用，但没有 tool_calls，要求重试.\n"
                 ),
                 message_en=(
-                    "[Warn] Text tool protocol detected without executable "
-                    "tool calls; retrying.\n"
+                    "[Warn] Executable tool-call text was emitted without tool_calls; "
+                    "retrying.\n"
                 ),
                 exhausted_zh=(
                     "[Warn] 文本工具协议纠正已达到上限，停止本轮以避免无效循环.\n"
@@ -202,11 +197,6 @@ class CompletionGate:
             )
 
         if self._looks_like_unexecuted_action(content):
-            judged = self._judge_no_tool_completion(
-                content=content,
-                thinking=thinking,
-                reason_hint="promissory_action",
-            )
             return self._budgeted_retry(
                 reason="promissory_action",
                 limit=self._action_retry_limit,
@@ -225,7 +215,6 @@ class CompletionGate:
                     "[Warn] Promissory action correction limit reached; stopping "
                     "this run to avoid an ineffective loop.\n"
                 ),
-                metadata={"judge_decision": judged} if judged else None,
             )
 
         if (
@@ -252,130 +241,12 @@ class CompletionGate:
                 metadata={"budgeted": False},
             )
 
-        if self._should_judge_ambiguous_no_tool(content):
-            judged = self._judge_no_tool_completion(
-                content=content,
-                thinking=thinking,
-                reason_hint="ambiguous_no_tool",
-            )
-            if judged in {"final", "needs_tool", "ambiguous"}:
-                return self._budgeted_retry(
-                    reason="judge_no_tool_incomplete",
-                    limit=self._judge_retry_limit,
-                    protocol=protocol,
-                    message_zh=(
-                        "[Warn] 独立完成判定仅作为参考；上一轮 no-tool 回复尚未形成可信可交付结果，要求重试.\n"
-                    ),
-                    message_en=(
-                        "[Warn] Independent completion judge output is advisory only; "
-                        "the previous no-tool reply is not trusted as deliverable; "
-                        "retrying.\n"
-                    ),
-                    exhausted_zh=(
-                        "[Warn] no-tool 完成判定重试已达到上限，停止本轮以避免无效循环.\n"
-                    ),
-                    exhausted_en=(
-                        "[Warn] No-tool completion judge retry limit reached; stopping "
-                        "this run to avoid an ineffective loop.\n"
-                    ),
-                    metadata={"judge_decision": judged},
-                )
 
         messages: tuple[tuple[str, str], ...] = ()
 
         self.reset()
         return CompletionGateDecision.allow(messages=messages)
 
-    def _judge_no_tool_completion(
-        self,
-        *,
-        content: str,
-        thinking: str,
-        reason_hint: str,
-    ) -> Optional[str]:
-        """Ask an optional independent judge whether a no-tool turn is final."""
-
-        if self._completion_judge is None:
-            return None
-        try:
-            result = self._completion_judge({
-                "assistant_no_tool_text": content,
-                "assistant_thinking": thinking,
-                "reason_hint": reason_hint,
-                "tool_calls_emitted": False,
-            })
-        except Exception:
-            return None
-        if not isinstance(result, dict):
-            return None
-        decision = str(result.get("decision") or "").strip().lower()
-        if decision in {"final", "needs_tool", "ambiguous"}:
-            return decision
-        return None
-
-    @staticmethod
-    def _should_judge_ambiguous_no_tool(text: str) -> bool:
-        """Return True for no-tool replies that lack a clear final-answer shape."""
-
-        clean = re.sub(
-            r"<\s*(?:thinking|summary)[^>]*>[\s\S]*?<\s*/\s*(?:thinking|summary)\s*>",
-            "",
-            text or "",
-            flags=re.IGNORECASE,
-        ).strip()
-        if not clean:
-            return False
-        if len(clean) < 8:
-            return False
-        return not CompletionGate._looks_like_deliverable_no_tool(clean)
-
-    @staticmethod
-    def _looks_like_deliverable_no_tool(text: str) -> bool:
-        """Return True when a no-tool reply is itself deliverable to the user.
-
-        Deliverable no-tool replies include final answers, ordinary chat/help
-        replies, and explicit questions for the user. They are not evidence that
-        a tool should have been called.
-        """
-
-        clean = text or ""
-        lowered = clean.lower()
-        final_markers = (
-            "结论", "根因", "原因", "证据", "验证", "已完成", "修复", "建议",
-            "无法继续", "缺少", "blocked", "conclusion", "root cause", "evidence",
-            "verified", "completed", "done", "recommendation",
-        )
-        if any(marker.lower() in lowered for marker in final_markers):
-            return True
-
-        conversational_markers = (
-            "你好", "您好", "嗨", "hello", "hi ", "hey",
-            "有什么需要", "需要我帮", "我可以帮", "我能帮", "我已就绪",
-            "直接说", "告诉我任务", "随时", "how can i help", "what can i help",
-        )
-        if any(marker in lowered for marker in conversational_markers):
-            return True
-
-        user_question_markers = (
-            "请问", "能否", "是否", "要不要", "哪个", "哪一个", "哪些", "怎么", "你想",
-            "你希望", "请提供", "请确认", "请选择", "需要你", "需要用户", "回复我",
-            "do you", "would you", "which", "what would", "please provide",
-            "please confirm", "choose", "clarify",
-        )
-        if ("?" in clean or "？" in clean) and any(marker in lowered for marker in user_question_markers):
-            return True
-        if any(marker in lowered for marker in user_question_markers[:16]):
-            return True
-
-        # Capability/menu answers commonly end by asking for the user's next task;
-        # they are valid no-tool replies even without evidence markers.
-        return bool(re.search(r"(?:可以帮你|我可以|我能).{0,80}(?:浏览器|文件|代码|搜索|任务)", clean))
-
-    @staticmethod
-    def _looks_like_conversational_final(text: str) -> bool:
-        """Backward-compatible alias for older tests/callers."""
-
-        return CompletionGate._looks_like_deliverable_no_tool(text)
 
 
     def _budgeted_retry(
@@ -462,14 +333,29 @@ class CompletionGate:
         )
 
     @staticmethod
-    def _has_text_tool_protocol(text: str) -> bool:
-        """Detect obsolete executable text-tool protocol markers."""
+    def _extract_executable_text_tool_call(text: str) -> bool:
+        """Detect a standalone text-tool command, not quoted protocol documentation."""
 
+        clean = CompletionGate._strip_non_executable_regions(text)
         return bool(re.search(
-            r"<\s*(?:tool_use|tool_call|function_call|file_content)\b",
-            text,
+            r"(?:^|\n)\s*<\s*(?:tool_use|tool_call|function_call|file_content)\b[^>]*>"
+            r"(?:\s*\{[\s\S]*\}|[\s\S]*?)\s*<\s*/\s*(?:tool_use|tool_call|function_call|file_content)\s*>\s*$",
+            clean,
             flags=re.IGNORECASE,
         ))
+
+    @staticmethod
+    def _strip_non_executable_regions(text: str) -> str:
+        clean = re.sub(r"```[\s\S]*?```", "", text or "")
+        clean = re.sub(r"`[^`\n]*`", "", clean)
+        clean = re.sub(r"^\s*>.*$", "", clean, flags=re.MULTILINE)
+        clean = re.sub(
+            r"<\s*(?:thinking|summary)[^>]*>[\s\S]*?<\s*/\s*(?:thinking|summary)\s*>",
+            "",
+            clean,
+            flags=re.IGNORECASE,
+        )
+        return clean.strip()
 
     @staticmethod
     def _looks_like_unexecuted_action(text: str) -> bool:
@@ -480,12 +366,7 @@ class CompletionGate:
         narrative summary or final answer.
         """
 
-        clean = re.sub(
-            r"<\s*(?:thinking|summary)[^>]*>[\s\S]*?<\s*/\s*(?:thinking|summary)\s*>",
-            "",
-            text,
-            flags=re.IGNORECASE,
-        ).strip()
+        clean = CompletionGate._strip_non_executable_regions(text)
         if not clean:
             return False
 

@@ -678,14 +678,11 @@ if _TEXTUAL_AVAILABLE:
             if not _PLAN_STATE_AVAILABLE or self.agent is None:
                 return
 
-            # Get message history for plan state analysis
-            client = getattr(self.agent, "client", None)
-            msgs = getattr(client, "history", None) or []
 
             plan_content.remove_children()
 
             try:
-                active = plan_state.is_active(self.agent, messages=msgs)
+                active = plan_state.is_active(self.agent)
             except Exception:
                 active = False
 
@@ -693,8 +690,8 @@ if _TEXTUAL_AVAILABLE:
                 plan_content.mount(Static("No active plan", classes="error-text"))
                 return
 
-            # Try to get plan text from stashed path or messages
-            plan_path = plan_state.resolve_path(self.agent, messages=msgs)
+            # Read the path from the current PLAN TaskContract.
+            plan_path = plan_state.resolve_path(self.agent)
             plan_text = ""
             if plan_path and os.path.isfile(plan_path):
                 try:
@@ -716,7 +713,7 @@ if _TEXTUAL_AVAILABLE:
             )
 
             # Current step from message history
-            step = plan_state.current_step(msgs) if msgs else ""
+            step = plan_state.current_step(getattr(getattr(self.agent, "client", None), "history", None) or [])
             if step:
                 plan_content.mount(Static(f"Step: {step}"))
 

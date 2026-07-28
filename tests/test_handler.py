@@ -451,12 +451,78 @@ class TestBaseHandlerDispatch:
         assert "global_mem_insight.txt" in result.next_prompt
         assert "# Insight" in result.next_prompt
 
+    def test_complete_task_finishes_open_answer_without_evidence(
+        self,
+        mock_config,
+    ) -> None:
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
 
-def _set_chat_contract(handler: BaseHandler) -> None:
+        result = _exhaust(handler.dispatch(
+            "complete_task",
+            {"answer": "Here is the answer.", "evidence_refs": []},
+            MockResponse(),
+        ))
+
+        assert result.action is StepAction.REQUEST_COMPLETION
+        assert handler.completion_certificate is not None
+        assert handler.completion_certificate.reason == "open_answer_completed"
+        assert handler.task_contract.mode is TaskMode.OPEN
+
+    def test_complete_task_requires_referenced_evidence_after_real_tool(
+        self,
+        mock_config,
+    ) -> None:
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
+        handler._record_evidence(
+            "file_read",
+            {"path": "config.py"},
+            StepOutcome("content", next_prompt="continue"),
+        )
+        handler._mark_executing("file_read")
+
+        rejected = _exhaust(handler.dispatch(
+            "complete_task",
+            {"answer": "Read it.", "evidence_refs": []},
+            MockResponse(),
+        ))
+        accepted = _exhaust(handler.dispatch(
+            "complete_task",
+            {"answer": "Read it.", "evidence_refs": [1]},
+            MockResponse(),
+        ))
+
+        assert rejected.action is StepAction.CONTINUE
+        assert "evidence_refs" in rejected.next_prompt
+        assert accepted.action is StepAction.REQUEST_COMPLETION
+        assert handler.completion_certificate is not None
+        assert handler.task_contract.mode is TaskMode.EXECUTING
+
+    def test_dispatch_real_tool_promotes_open_to_executing(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        assert mock_handler.task_contract.mode is TaskMode.OPEN
+
+        _exhaust(mock_handler.dispatch("echo", {"message": "hello"}, MockResponse()))
+
+        assert mock_handler.task_contract.mode is TaskMode.EXECUTING
+
+    def test_unknown_tool_does_not_promote_open_state(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        _exhaust(mock_handler.dispatch("missing", {}, MockResponse()))
+
+        assert mock_handler.task_contract.mode is TaskMode.OPEN
+
+
+def _set_open_contract(handler: BaseHandler) -> None:
     handler.task_contract = TaskContract(
         task_id=handler.task_contract.task_id,
         user_request=handler.task_contract.user_request,
-        mode=TaskMode.CHAT,
+        mode=TaskMode.OPEN,
         plan_path=handler.task_contract.plan_path,
     )
 
@@ -465,7 +531,7 @@ def _set_execution_contract(handler: BaseHandler) -> None:
     handler.task_contract = TaskContract(
         task_id=handler.task_contract.task_id,
         user_request=handler.task_contract.user_request,
-        mode=TaskMode.EXECUTION,
+        mode=TaskMode.EXECUTING,
         plan_path=handler.task_contract.plan_path,
     )
 
@@ -490,7 +556,7 @@ class TestBaseHandlerDoNoTool:
 
     def test_normal_response_requests_completion(self, mock_handler: BaseHandler) -> None:
         """A deliverable chat response requests typed completion."""
-        _set_chat_contract(mock_handler)
+        _set_open_contract(mock_handler)
         gen = mock_handler.do_no_tool(
             {}, MockResponse(content="Task is done, here is the result."),
         )
@@ -504,7 +570,7 @@ class TestBaseHandlerDoNoTool:
         mock_handler: BaseHandler,
     ) -> None:
         """普通最终回答里的 reading/checking 不应被误判为工具意图."""
-        _set_chat_contract(mock_handler)
+        _set_open_contract(mock_handler)
         gen = mock_handler.do_no_tool(
             {},
             MockResponse(
@@ -657,63 +723,45 @@ class TestBaseHandlerDoNoTool:
         assert result.next_prompt is not None
         assert "不要只重复计划" in result.next_prompt
 
-    def test_action_intent_uses_independent_judge_before_retry(
+    def test_completion_analysis_reply_does_not_trigger_tool_retry(
         self,
         mock_handler: BaseHandler,
     ) -> None:
-        """动作句 no-tool 会先走独立 judge；judge 判 needs_tool 后才注入重试提示."""
-        calls = []
-
-        def fake_judge(packet):
-            calls.append(packet)
-            return {"decision": "needs_tool", "confidence": 0.98, "reason": "promised file read"}
-
-        mock_handler.completion_gate._completion_judge = fake_judge
-        result = _exhaust(mock_handler.do_no_tool(
-            {},
-            MockResponse(content="看后端核心文件 chat_context.py 和 config_registry.py："),
+        """Quoted protocol and action examples in a final answer are not instructions."""
+        _set_open_contract(mock_handler)
+        response = MockResponse(content=(
+            "结论：当前结束逻辑包含以下规则。\n\n"
+            "`CONTINUE` 表示继续下一轮；工具正常执行后进入下一状态。\n"
+            "协议残留检测会拦截 `<tool_use>` 和 `<function_call>`。\n"
+            "动作承诺检测会识别 `我将要查看/读取/执行`。\n"
+            "以上是完整的判断逻辑。"
         ))
 
-        assert calls
-        assert calls[0]["reason_hint"] == "promissory_action"
-        assert calls[0]["tool_calls_emitted"] is False
-        assert result.next_prompt is not None
-        assert "没有任何工具被执行" in result.next_prompt
+        result = _exhaust(mock_handler.do_no_tool({}, response))
 
-    def test_ambiguous_no_tool_uses_independent_judge(
+        assert result.next_prompt is None
+        assert result.action is StepAction.REQUEST_COMPLETION
+        assert result.data is response
+
+    def test_ambiguous_visible_chat_reply_completes_without_judge(
         self,
         mock_handler: BaseHandler,
     ) -> None:
-        """不明显 final 的 no-tool 回复由独立 judge 判定是否应 retry."""
-        calls = []
+        """A visible chat reply ends directly without a second LLM judgment."""
+        _set_open_contract(mock_handler)
+        response = MockResponse(content="我需要进一步判断这个问题。")
 
-        def fake_judge(packet):
-            calls.append(packet)
-            return {"decision": "ambiguous", "confidence": 0.4, "reason": "no conclusion"}
+        result = _exhaust(mock_handler.do_no_tool({}, response))
 
-        mock_handler.completion_gate._completion_judge = fake_judge
-        result = _exhaust(mock_handler.do_no_tool(
-            {},
-            MockResponse(content="我需要进一步判断这个问题。"),
-        ))
+        assert result.next_prompt is None
+        assert result.action is StepAction.REQUEST_COMPLETION
 
-        assert calls
-        assert calls[0]["reason_hint"] == "ambiguous_no_tool"
-        assert result.next_prompt is not None
-        assert "最终结论" in result.next_prompt
-
-    def test_greeting_help_reply_does_not_invoke_judge_or_retry(
+    def test_greeting_help_reply_completes_without_retry(
         self,
         mock_handler: BaseHandler,
     ) -> None:
-        """普通问候/能力介绍是可交付回复，不应被 independent judge 拉成第二轮."""
-        calls = []
-        mock_handler.completion_gate._completion_judge = lambda packet: calls.append(packet) or {
-            "decision": "needs_tool",
-            "confidence": 1.0,
-            "reason": "should not be called",
-        }
-        _set_chat_contract(mock_handler)
+        """普通问候/能力介绍是可交付回复，不应被拉成第二轮."""
+        _set_open_contract(mock_handler)
         response = MockResponse(content=(
             "你好！我是你的物理级全能执行者。\n"
             "我已就绪，可以帮你完成浏览器操控、文件系统操作、代码执行和 Web 搜索。\n"
@@ -722,50 +770,23 @@ class TestBaseHandlerDoNoTool:
 
         result = _exhaust(mock_handler.do_no_tool({}, response))
 
-        assert calls == []
         assert result.next_prompt is None
         assert result.action is StepAction.REQUEST_COMPLETION
         assert result.data is response
 
-    def test_user_clarification_question_does_not_invoke_judge_or_retry(
+    def test_user_clarification_question_completes_without_retry(
         self,
         mock_handler: BaseHandler,
     ) -> None:
-        """向用户澄清/提问本身是可交付 no-tool 回复，不应被判未完成."""
-        calls = []
-        mock_handler.completion_gate._completion_judge = lambda packet: calls.append(packet) or {
-            "decision": "needs_tool",
-            "confidence": 1.0,
-            "reason": "should not be called",
-        }
-        _set_chat_contract(mock_handler)
+        """向用户澄清/提问本身是可交付 no-tool 回复."""
+        _set_open_contract(mock_handler)
         response = MockResponse(content="请问你想让我修改哪个文件？请提供路径或模块名。")
 
         result = _exhaust(mock_handler.do_no_tool({}, response))
 
-        assert calls == []
         assert result.next_prompt is None
         assert result.action is StepAction.REQUEST_COMPLETION
         assert result.data is response
-
-    def test_judge_final_is_advisory_and_does_not_allow_completion(
-        self,
-        mock_handler: BaseHandler,
-    ) -> None:
-        """独立 judge 判 final 也只能作为 metadata，不能签发完成."""
-        mock_handler.completion_gate._completion_judge = lambda packet: {
-            "decision": "final",
-            "confidence": 0.9,
-            "reason": "answers user",
-        }
-        response = MockResponse(content="我需要进一步判断这个问题。")
-        result = _exhaust(mock_handler.do_no_tool({}, response))
-
-        assert result.next_prompt is not None
-        assert result.action is StepAction.CONTINUE
-        assert result.data == {}
-        assert result.next_prompt
-        assert mock_handler.completion_certificate is None
 
     def test_english_future_action_intent_without_native_call_retries(
         self,
@@ -823,10 +844,10 @@ class TestBaseHandlerDoNoTool:
 
         assert result.action is StepAction.CONTINUE
         assert result.next_prompt is not None
-        assert "cannot complete from text alone" in result.next_prompt
+        assert "complete_task" in result.next_prompt
         assert mock_handler.completion_certificate is None
 
-    def test_execution_allow_requests_completion_with_success_evidence(
+    def test_execution_plain_text_requires_explicit_complete_task(
         self,
         mock_handler: BaseHandler,
     ) -> None:
@@ -838,10 +859,10 @@ class TestBaseHandlerDoNoTool:
             MockResponse(content="Config is valid."),
         ))
 
-        assert result.action is StepAction.REQUEST_COMPLETION
-        assert result.next_prompt is None
-        assert mock_handler.completion_certificate is not None
-        assert mock_handler.completion_certificate.evidence_count == 1
+        assert result.action is StepAction.CONTINUE
+        assert result.next_prompt is not None
+        assert "complete_task" in result.next_prompt
+        assert mock_handler.completion_certificate is None
 
     def test_dispatch_records_success_evidence_for_real_tools(
         self,
@@ -881,37 +902,47 @@ class TestBaseHandlerDoNoTool:
         assert mock_handler.task_contract.plan_path == "plan.md"
         assert mock_handler.plan_verify_status == "missing"
 
-    def test_plan_no_tool_loads_verified_artifacts_and_completes(
+    def test_plan_state_uses_contract_as_single_source_of_truth(
         self,
         mock_handler: BaseHandler,
         tmp_path,
     ) -> None:
-        from zero_agent.core.completion import write_evidence_json
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("- [ ] pending\n", encoding="utf-8")
+        mock_handler.enter_plan_mode(str(plan_path))
 
+        assert mock_handler._in_plan_mode() is True
+        assert mock_handler._check_plan_completion() == 1
+        assert mock_handler.task_contract.plan_path == str(plan_path)
+
+    def test_plan_is_terminal_upgrade_without_exit_method(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        mock_handler.enter_plan_mode("plan.md")
+        mock_handler._mark_executing("file_read")
+
+        assert mock_handler.task_contract.mode is TaskMode.PLAN
+        assert not hasattr(mock_handler, "_exit_plan_mode")
+
+    def test_plan_plain_text_requires_explicit_complete_task(
+        self,
+        mock_handler: BaseHandler,
+        tmp_path,
+    ) -> None:
         plan_path = tmp_path / "plan.md"
         plan_path.write_text("- [x] implemented\n", encoding="utf-8")
-        (tmp_path / "verify_context.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "result.md").write_text("VERDICT: PASS\n", encoding="utf-8")
         mock_handler.enter_plan_mode(str(plan_path))
-        ledger = EvidenceLedger(records=[
-            EvidenceRecord(1, "code_run", "success", "execute", "tests passed"),
-        ])
-        mock_handler.evidence_ledger = ledger
-        write_evidence_json(
-            tmp_path / "evidence.json",
-            mock_handler.task_contract.task_id,
-            ledger,
-        )
 
         result = _exhaust(mock_handler.do_no_tool(
             {},
             MockResponse(content="Plan verified and complete."),
         ))
 
-        assert result.action is StepAction.REQUEST_COMPLETION
-        assert mock_handler.completion_certificate is not None
-        assert mock_handler.completion_certificate.verify_status == "pass"
-        assert mock_handler._in_plan_mode() is True
+        assert result.action is StepAction.CONTINUE
+        assert result.next_prompt is not None
+        assert "complete_task" in result.next_prompt
+        assert mock_handler.completion_certificate is None
 
     def test_anchor_prompt_includes_contract_and_recent_evidence(
         self,
@@ -923,7 +954,7 @@ class TestBaseHandlerDoNoTool:
         prompt = mock_handler._build_anchor_prompt()
 
         assert "<task_contract>" in prompt
-        assert "mode: TaskMode.EXECUTION" in prompt
+        assert "state: TaskMode.EXECUTING" in prompt
         assert "recent_evidence:" in prompt
         assert "tool=file_read" in prompt
 
@@ -959,7 +990,7 @@ class TestBaseHandlerDoNoTool:
         mock_handler: BaseHandler,
     ) -> None:
         """叙述性回复含动作短语但后续有大段正文 → 不应被误判为未执行动作."""
-        _set_chat_contract(mock_handler)
+        _set_open_contract(mock_handler)
         gen = mock_handler.do_no_tool(
             {},
             MockResponse(

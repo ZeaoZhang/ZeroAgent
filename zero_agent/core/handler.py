@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Dict, Generator, Optional
 
 from zero_agent.core.completion import evaluate_completion
@@ -75,7 +74,7 @@ class BaseHandler:
         self.task_contract = TaskContract(
             task_id="handler-default",
             user_request="",
-            mode=TaskMode.EXECUTION,
+            mode=TaskMode.OPEN,
         )
         self.evidence_ledger = EvidenceLedger()
         self.plan_verify_status = "missing"
@@ -85,76 +84,8 @@ class BaseHandler:
             plan_verification_prompt_factory=self._plan_verification_retry_prompt,
             in_plan_mode=self._in_plan_mode,
             check_plan_completion=self._check_plan_completion,
-            exit_plan_mode=self._exit_plan_mode,
-            completion_judge=self._judge_no_tool_completion,
         )
 
-    def _judge_no_tool_completion(self, packet: dict[str, Any]) -> Optional[dict[str, Any]]:
-        """Classify an ambiguous no-tool turn using a fresh, history-free LLM session."""
-
-        parent = self.parent
-        if parent is None:
-            return None
-        client = getattr(parent, "client", None)
-        config = getattr(client, "config", None)
-        if config is None:
-            return None
-        try:
-            from zero_agent.llm.factory import LLMFactory
-        except Exception:
-            return None
-
-        last_user = getattr(self, "last_user_request", "") or ""
-        recent_summaries = list(getattr(self, "history_info", []) or [])[-4:]
-        assistant_text = str(packet.get("assistant_no_tool_text") or "")
-        reason_hint = str(packet.get("reason_hint") or "")
-        judge_payload = {
-            "last_user_request": last_user,
-            "assistant_no_tool_text": assistant_text,
-            "recent_tool_or_turn_summaries": recent_summaries,
-            "reason_hint": reason_hint,
-            "tool_calls_emitted": False,
-        }
-        system = (
-            "You are ZeroAgent's independent completion-gate judge. "
-            "Use no tools. Do not solve the task. Only classify whether the "
-            "assistant_no_tool_text is a deliverable final response to the user. "
-            "Return strict JSON only: {\"decision\":\"final|needs_tool|ambiguous\","
-            "\"confidence\":0.0," 
-            "\"reason\":\"short reason\"}. "
-            "Choose needs_tool when the text promises or implies inspecting, reading, "
-            "searching, running, opening, writing, or modifying something but no tool "
-            "call was emitted. Choose final only when it directly answers the user's "
-            "request with conclusion/evidence/verification or a clear blocking reason."
-        )
-        user = json.dumps(judge_payload, ensure_ascii=False)
-        try:
-            judge_config = replace(
-                config,
-                name=f"{getattr(config, 'name', 'default')}-completion-judge",
-                max_tokens=128,
-                temperature=0,
-                tool_protocol="native",
-            )
-            judge = LLMFactory.create_session(judge_config)
-            judge.system = system
-            gen = judge.chat([{"role": "user", "content": user}], tools=None)
-            response = None
-            try:
-                while True:
-                    next(gen)
-            except StopIteration as stop:
-                response = stop.value
-            raw = (getattr(response, "content", "") or "").strip()
-            parsed = json.loads(raw)
-        except Exception:
-            return {"decision": "ambiguous", "confidence": 0.0, "reason": "judge_failed"}
-        if not isinstance(parsed, dict):
-            return {"decision": "ambiguous", "confidence": 0.0, "reason": "judge_not_object"}
-        decision = str(parsed.get("decision") or "").strip().lower()
-        if decision not in {"final", "needs_tool", "ambiguous"}:
-            parsed["decision"] = "ambiguous"
-        return parsed
 
     # ---- Stop Signal ----
 
@@ -181,16 +112,10 @@ class BaseHandler:
     # ---- Plan Mode ----
 
     def _in_plan_mode(self) -> bool:
-        """检查当前是否处于 plan mode.
+        """Return whether the immutable task contract is in PLAN state."""
 
-        Returns:
-            True 如果 plan mode 激活.
-        """
-        return bool(self.working.get("in_plan_mode"))
+        return self.task_contract.mode is TaskMode.PLAN
 
-    def _exit_plan_mode(self) -> None:
-        """退出 plan mode，清除状态标记."""
-        self.working.pop("in_plan_mode", None)
 
     def enter_plan_mode(self, plan_path: str) -> str:
         """进入 plan mode，追踪 plan.md 清单完成进度.
@@ -203,7 +128,6 @@ class BaseHandler:
         Returns:
             plan_path.
         """
-        self.working["in_plan_mode"] = plan_path
         self.task_contract = TaskContract(
             task_id=self.task_contract.task_id,
             user_request=self.task_contract.user_request,
@@ -224,7 +148,7 @@ class BaseHandler:
         import os
         import re
 
-        plan_path = self.working.get("in_plan_mode", "")
+        plan_path = self.task_contract.plan_path or ""
         if not plan_path or not os.path.isfile(plan_path):
             return None
         try:
@@ -309,6 +233,7 @@ class BaseHandler:
         args["_tool_num"] = tool_num
         if tool_name != "no_tool":
             self.completion_gate.reset()
+            self._mark_executing(tool_name)
 
         # tool_before 钩子
         self._trigger_hook("tool_before", {
@@ -370,6 +295,22 @@ class BaseHandler:
             "result": ret.data,
         })
         return ret
+
+    def _mark_executing(self, tool_name: str) -> None:
+        """Promote OPEN to EXECUTING after an observable external operation."""
+
+        if tool_name in {"complete_task", "ask_user", "bad_json"}:
+            return
+        if not hasattr(self, f"do_{tool_name}") and self.registry.get(tool_name) is None:
+            return
+        if self.task_contract.mode is not TaskMode.OPEN:
+            return
+        self.task_contract = TaskContract(
+            task_id=self.task_contract.task_id,
+            user_request=self.task_contract.user_request,
+            mode=TaskMode.EXECUTING,
+            plan_path=self.task_contract.plan_path,
+        )
 
     @staticmethod
     def _try_call_generator(
@@ -444,49 +385,29 @@ class BaseHandler:
     def do_bad_json(
         self, args: Dict[str, Any], response: Any
     ) -> Generator[str, None, StepOutcome]:
-        """处理 LLM 工具调用 JSON 格式错误.
-
-        当 LLM 输出的工具调用参数无法解析为有效 JSON 时触发，
-        将错误信息作为 next_prompt 反馈给 LLM 供其修正.
-
-        Args:
-            args: 包含 msg 等错误描述的字典.
-            response: LLM 响应对象.
-
-        Yields:
-            状态信息字符串.
-
-        Returns:
-            StepOutcome 附带错误提示.
-        """
-        msg = args.get("msg", "bad_json")
+        """Return a corrective prompt after malformed native tool arguments."""
+        msg = str(args.get("msg") or "Invalid tool arguments")
         yield self._tl(
-            f"[Warn] 工具调用 JSON 格式错误: {msg}\n",
-            f"[Warn] Tool call JSON format error: {msg}\n",
+            "[Warn] 工具参数 JSON 无效，要求重新生成。\n",
+            "[Warn] Invalid tool argument JSON; requesting regeneration.\n",
         )
         return StepOutcome(
-            None,
+            {},
             next_prompt=self._bad_json_retry_prompt(msg),
             action=StepAction.CONTINUE,
         )
 
     def _native_tool_retry_prompt(self) -> str:
-        """Prompt the model to use provider-native tool calls or finish clearly."""
+        """Prompt the model to emit an explicit provider-native control action."""
         return self._tl(
-            "[System] 上一轮回复看起来只是下一步动作说明或需要工具操作，"
-            "但没有发出 provider-native tool_calls，因此没有任何工具被执行。"
-            "请重新生成本轮输出：如果需要查看、读取、搜索、运行、执行、打开、写入或修改，"
-            "现在发出 provider-native tool_call；不要在正文中写 <tool_use>、<tool_call>、"
-            "<function_call>、<file_content> 或 JSON 工具协议；不要只重复计划。"
-            "如果任务已经完成，请直接给出最终结论、证据和验证结果。",
-            "[System] The previous reply looked like a next-step action or required "
-            "tool work, but it emitted no provider-native tool_calls, so no tool "
-            "was executed. Regenerate this turn: if you need to inspect, read, "
-            "search, run, execute, open, write, or modify anything, emit a "
-            "provider-native tool_call now; do not write <tool_use>, <tool_call>, "
-            "<function_call>, <file_content>, or JSON tool protocol in text; do "
-            "not repeat a plan. If the task is complete, provide the final "
-            "conclusion, evidence, and verification result directly.",
+            "[System] 上一轮没有产生有效的控制动作，没有任何工具被执行。"
+            "需要操作时调用 provider-native tool_call；不要只重复计划，也不要在正文中写 "
+            "<tool_use>、<tool_call>、<function_call>、<file_content>。"
+            "任务完成时调用 complete_task；需要用户输入时调用 ask_user。",
+            "[System] The previous reply produced no valid control action, so no tool was executed. "
+            "Call a provider-native tool_call when work is needed; do not repeat a plan or write "
+            "<tool_use>, <tool_call>, <function_call>, or <file_content> in prose. "
+            "Call complete_task when finished, or ask_user when user input is required.",
         )
 
     def _bad_json_retry_prompt(self, msg: str) -> str:
@@ -528,32 +449,65 @@ class BaseHandler:
         """Prompt after a large bare code block is emitted without tool calls."""
         return self._tl(
             "[System] 检测到你在上一轮回复中主要内容是较大代码块，"
-            "且本轮未调用任何工具。\n"
-            "如果这些代码需要执行、写入文件或进一步分析，请重新组织回复并显式调用相应工具"
-            "（例如：code_run、file_write、file_patch 等）；\n"
-            "如果只是向用户展示或讲解代码片段，请在回复中补充自然语言说明，"
-            "并明确是否还需要额外的实际操作。",
-            "[System] Your last reply consisted mainly of a large code block "
-            "without calling any tools.\n"
-            "If this code needs to be executed, written to a file, or further "
-            "analyzed, please reorganize your reply and explicitly call the "
-            "appropriate tool (e.g., code_run, file_write, file_patch);\n"
-            "If you are only showing or explaining the code to the user, "
-            "please add natural language explanation and clarify whether "
-            "any additional actions are needed.",
+            "且本轮未调用任何工具。若代码需要执行或写入，请调用实际工具；"
+            "若任务已经完成，请调用 complete_task。",
+            "[System] Your last reply was mainly a large code block without a tool call. "
+            "Call a real tool if it must be executed or written; call complete_task if finished.",
         )
 
-    # ---- do_no_tool ----
+    # ---- completion control ----
+
+    def do_complete_task(
+        self, args: Dict[str, Any], response: Any
+    ) -> Generator[str, None, StepOutcome]:
+        """Validate and apply the explicit task-completion transition."""
+
+        from zero_agent.core.completion import load_plan_verify_status
+
+        answer = str(args.get("answer") or "").strip()
+        evidence_refs = args.get("evidence_refs")
+        if evidence_refs is None:
+            evidence_refs = []
+        if not isinstance(evidence_refs, list):
+            return StepOutcome(
+                {},
+                next_prompt="[System] complete_task.evidence_refs must be an array of record numbers.",
+                action=StepAction.CONTINUE,
+            )
+
+        contract = self.task_contract
+        plan_remaining = self._check_plan_completion() if contract.mode is TaskMode.PLAN else None
+        if contract.mode is TaskMode.PLAN and self.plan_verify_status != "partial_accepted":
+            self.plan_verify_status = load_plan_verify_status(contract)
+        certificate, continuation_prompt = evaluate_completion(
+            contract,
+            self.evidence_ledger,
+            response,
+            final_text=answer,
+            evidence_refs=evidence_refs,
+            plan_remaining=plan_remaining,
+            plan_verify_status=self.plan_verify_status,
+        )
+        if certificate is None:
+            self.completion_certificate = None
+            return StepOutcome(
+                {},
+                next_prompt=continuation_prompt,
+                action=StepAction.CONTINUE,
+            )
+
+        self.completion_certificate = certificate
+        yield answer + "\n"
+        return StepOutcome(
+            {"answer": answer},
+            action=StepAction.REQUEST_COMPLETION,
+        )
 
     def do_no_tool(
         self, args: Dict[str, Any], response: Any
     ) -> Generator[str, None, StepOutcome]:
-        """Handle an LLM turn that emitted no tool call.
+        """Handle safe plain text only while the observed state is OPEN."""
 
-        CompletionGate remains the Phase-1 recovery policy. A permitted final
-        response requests completion explicitly; the loop alone emits a
-        ``TerminalEvent``.
-        """
         decision = self.completion_gate.evaluate(response)
         if decision.action != CompletionGateAction.ALLOW:
             self._annotate_completion_gate(args, decision)
@@ -588,30 +542,35 @@ class BaseHandler:
                 action=StepAction.CONTINUE,
             )
 
-        contract = self.task_contract
-        ledger = self.evidence_ledger
-        plan_remaining = self._check_plan_completion() if contract.mode is TaskMode.PLAN else None
-        if contract.mode is TaskMode.PLAN and self.plan_verify_status != "partial_accepted":
-            from zero_agent.core.completion import load_plan_verify_status
+        if self.task_contract.mode is not TaskMode.OPEN:
+            self.completion_certificate = None
+            return StepOutcome(
+                {},
+                next_prompt=(
+                    "[System] This task has executed real tools or entered plan mode. "
+                    "Finish with provider-native complete_task and cite successful evidence_refs."
+                ),
+                action=StepAction.CONTINUE,
+            )
 
-            self.plan_verify_status = load_plan_verify_status(contract)
         certificate, continuation_prompt = evaluate_completion(
-            contract,
-            ledger,
+            self.task_contract,
+            self.evidence_ledger,
             response,
-            plan_remaining=plan_remaining,
+            plan_remaining=None,
             plan_verify_status=self.plan_verify_status,
         )
         if certificate is None:
             self.completion_certificate = None
-            prompt = continuation_prompt or self._native_tool_retry_prompt()
-            return StepOutcome({}, next_prompt=prompt, action=StepAction.CONTINUE)
+            return StepOutcome(
+                {},
+                next_prompt=continuation_prompt or self._native_tool_retry_prompt(),
+                action=StepAction.CONTINUE,
+            )
 
         self.completion_certificate = certificate
-
         for zh, en in decision.allow_messages:
             yield self._tl(zh, en)
-
         yield self._tl(
             "[Info] Final response to user.\n",
             "[Info] Final response to user.\n",
@@ -657,7 +616,7 @@ class BaseHandler:
     ) -> None:
         """Append one compact evidence record for real tool dispatches."""
 
-        if tool_name in {"no_tool", "bad_json", "unknown", "judge"}:
+        if tool_name in {"no_tool", "bad_json", "unknown", "judge", "complete_task"}:
             return
         if tool_name.startswith("judge") or tool_name.endswith("_judge"):
             return
@@ -762,7 +721,7 @@ class BaseHandler:
         lines = [
             "<task_contract>",
             f"objective: {getattr(contract, 'user_request', '')}",
-            f"mode: {getattr(contract, 'mode', '')}",
+            f"state: {getattr(contract, 'mode', '')}",
         ]
         plan_path = getattr(contract, "plan_path", None)
         if plan_path:
@@ -957,7 +916,7 @@ class BaseHandler:
 
         # ─── 3.5 Plan Mode 提示 ───
         if plan_active:
-            _plan = self.working.get("in_plan_mode", "")
+            _plan = self.task_contract.plan_path or ""
             remaining = self._check_plan_completion()
             if remaining is not None and remaining > 0:
                 # 每 5 轮（从第 10 轮起）注入计划文件路径，强制 agent 重读

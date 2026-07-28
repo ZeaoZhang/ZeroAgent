@@ -78,6 +78,42 @@ def test_plan_state_is_complete_when_all_done():
     assert is_complete([("a", "done"), ("b", "open")]) is False
 
 
+def test_plan_state_reads_only_current_task_contract(tmp_path):
+    from types import SimpleNamespace
+
+    from zero_agent.core.types import TaskContract, TaskMode
+    from zero_agent.frontends.plan_state import is_active, resolve_path
+
+    plan_path = tmp_path / "plan.md"
+    plan_path.write_text("- [ ] Task\n", encoding="utf-8")
+    handler = SimpleNamespace(
+        task_contract=TaskContract("task", "finish", TaskMode.PLAN, str(plan_path)),
+        working={"in_plan_mode": "legacy-plan.md"},
+    )
+    agent = SimpleNamespace(handler=handler, working={"in_plan_mode": "legacy-agent.md"})
+
+    assert is_active(agent) is True
+    assert resolve_path(agent) == str(plan_path)
+
+
+def test_plan_state_ignores_legacy_paths_and_transcript_mentions(tmp_path):
+    from types import SimpleNamespace
+
+    from zero_agent.core.types import TaskContract, TaskMode
+    from zero_agent.frontends.plan_state import is_active, resolve_path
+
+    legacy_path = tmp_path / "plan.md"
+    legacy_path.write_text("- [ ] Legacy\n", encoding="utf-8")
+    handler = SimpleNamespace(
+        task_contract=TaskContract("task", "answer", TaskMode.OPEN),
+        working={"in_plan_mode": str(legacy_path)},
+    )
+    agent = SimpleNamespace(handler=handler, working={"in_plan_mode": str(legacy_path)})
+
+    assert is_active(agent) is False
+    assert resolve_path(agent) is None
+
+
 def test_worldline_import():
     """worldline module imports without error regardless of platform."""
     try:

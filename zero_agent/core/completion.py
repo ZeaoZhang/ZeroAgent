@@ -25,18 +25,6 @@ _ACCEPT_PARTIAL_LITERALS = {
     "接受 PARTIAL 并完成",
 }
 
-_ACTION_PROMISE_RE = re.compile(
-    r"("
-    r"\b(?:i\s*(?:will|'ll|am going to)|i need to|let me|next i will|i can now)\b"
-    r"|(?:接下来|下一步|现在|稍后|继续|先).{0,16}(?:查看|读取|检查|运行|执行|打开|写入|修改|搜索|验证|调用)"
-    r"|(?:我(?:会|将|要|需要|可以)).{0,16}(?:查看|读取|检查|运行|执行|打开|写入|修改|搜索|验证|调用)"
-    r")",
-    re.IGNORECASE,
-)
-_PROTOCOL_TEXT_RE = re.compile(
-    r"<\s*(?:tool_use|tool_call|function_call|file_content)\b",
-    re.IGNORECASE,
-)
 _SUMMARY_RE = re.compile(r"<\s*summary\b[^>]*>[\s\S]*?<\s*/\s*summary\s*>", re.IGNORECASE)
 _THINKING_RE = re.compile(r"<\s*thinking\b[^>]*>[\s\S]*?<\s*/\s*thinking\s*>", re.IGNORECASE)
 _VERDICT_RE = re.compile(r"^\s*VERDICT\s*:\s*(PASS|FAIL|PARTIAL)\s*$", re.IGNORECASE | re.MULTILINE)
@@ -47,30 +35,36 @@ def evaluate_completion(
     ledger: EvidenceLedger,
     response: Any,
     *,
+    final_text: Optional[str] = None,
+    evidence_refs: Optional[list[int]] = None,
     plan_remaining: Optional[int],
     plan_verify_status: str,
 ) -> tuple[Optional[CompletionCertificate], Optional[str]]:
     """Return ``(certificate, continuation_prompt)`` for one no-tool response."""
 
     mode = _task_mode(contract.mode)
-    final_text = _visible_text(response)
+    final_text = _visible_text(response) if final_text is None else final_text.strip()
     blocker = _completion_blocker(response, final_text)
 
-    if mode is TaskMode.CHAT:
+    if mode is TaskMode.OPEN:
         if blocker:
             return None, blocker
         if not final_text:
-            return None, "[System] The chat answer is empty. Provide a visible final answer."
+            return None, "[System] complete_task requires a visible final answer."
         return _certificate(
             contract,
             ledger,
-            reason="chat_final_answer",
+            reason="open_answer_completed",
             verify_status="not_required",
             plan_remaining=plan_remaining,
             final_text=final_text,
         ), None
 
     if mode is TaskMode.PLAN:
+        if blocker:
+            return None, blocker
+        if not final_text:
+            return None, "[System] complete_task requires a visible final answer."
         status = (plan_verify_status or "missing").strip().lower()
         if plan_remaining == 0 and status in {"pass", "partial_accepted"}:
             return _certificate(
@@ -90,17 +84,20 @@ def evaluate_completion(
     if not final_text:
         return None, "[System] Execution tasks need a visible final response after tool evidence."
 
-    relevant = [record for record in _records(ledger) if _record_kind(record) in _RELEVANT_EVIDENCE_KINDS]
-    if relevant and _record_status(relevant[-1]) == "error":
-        return None, "[System] The latest relevant tool evidence is an error. Fix or explain the blocker with evidence."
+    selected, ref_error = _select_evidence(_records(ledger), evidence_refs)
+    if ref_error:
+        return None, ref_error
+    if any(_record_status(record) == "error" for record in selected):
+        return None, "[System] Referenced tool evidence contains an error. Fix it before completing."
 
-    successful = [record for record in relevant if _record_status(record) == "success"]
+    successful = [record for record in selected if _record_status(record) == "success"]
+    if len(successful) != len(selected):
+        return None, "[System] Every complete_task evidence reference must be successful."
     if not successful:
         return None, (
-            "[System] Execution tasks cannot complete from text alone. "
-            "Use an appropriate tool and collect successful read/write/execute/web/verify evidence."
+            "[System] EXECUTING tasks require complete_task.evidence_refs pointing to "
+            "successful read/write/execute/web/verify evidence from this task."
         )
-
     verify_status = "pass" if any(_record_kind(record) == "verify" for record in successful) else "not_required"
     return _certificate(
         contract,
@@ -186,10 +183,6 @@ def _completion_blocker(response: Any, final_text: str) -> Optional[str]:
     stop_reason = str(getattr(response, "stop_reason", "") or "")
     if stop_reason.startswith("unknown:") or stop_reason in {"error", "content_filter", "cancelled", "interrupted", "stream_interrupted"}:
         return f"[System] The provider stop_reason `{stop_reason}` is not a trusted completion signal. Retry or collect evidence."
-    if _PROTOCOL_TEXT_RE.search(final_text):
-        return "[System] The response contains tool protocol text instead of a final deliverable. Regenerate or use tools correctly."
-    if _ACTION_PROMISE_RE.search(final_text):
-        return "[System] The response promises future tool/action work. Perform the work or report a real blocker; do not complete yet."
     return None
 
 
@@ -206,7 +199,33 @@ def _task_mode(mode: Any) -> TaskMode:
     try:
         return TaskMode(str(mode))
     except ValueError:
-        return TaskMode.EXECUTION
+        return TaskMode.OPEN
+
+
+def _select_evidence(
+    relevant: list[Any],
+    evidence_refs: Optional[list[int]],
+) -> tuple[list[Any], Optional[str]]:
+    """Resolve one-based references against this task's complete ledger."""
+
+    if not evidence_refs:
+        return [], None
+    if any(not isinstance(ref, int) or isinstance(ref, bool) for ref in evidence_refs):
+        return [], "[System] complete_task.evidence_refs must contain integer record numbers."
+    if len(set(evidence_refs)) != len(evidence_refs):
+        return [], "[System] complete_task.evidence_refs must not contain duplicates."
+    if any(ref < 1 or ref > len(relevant) for ref in evidence_refs):
+        return [], (
+            "[System] complete_task.evidence_refs contains an unknown record number. "
+            f"Valid evidence records are 1..{len(relevant)}."
+        )
+    selected = [relevant[ref - 1] for ref in evidence_refs]
+    if any(_record_kind(record) not in _RELEVANT_EVIDENCE_KINDS for record in selected):
+        return [], (
+            "[System] complete_task.evidence_refs may only reference "
+            "read/write/execute/web/verify records."
+        )
+    return selected, None
 
 
 def _records(ledger: EvidenceLedger) -> list[Any]:

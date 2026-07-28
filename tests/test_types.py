@@ -21,7 +21,7 @@ class TestTaskEvidenceModels:
         contract = TaskContract(
             task_id="task-1",
             user_request="write a file",
-            mode=TaskMode.EXECUTION,
+            mode=TaskMode.EXECUTING,
         )
         record = EvidenceRecord(
             turn=1,
@@ -40,7 +40,7 @@ class TestTaskEvidenceModels:
             waiting_data={"question": "continue?"},
         )
 
-        assert pending.contract.mode is TaskMode.EXECUTION
+        assert pending.contract.mode is TaskMode.EXECUTING
         assert pending.ledger.records[0].status == "success"
         assert pending.waiting_data == {"question": "continue?"}
 
