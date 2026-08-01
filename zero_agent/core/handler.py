@@ -368,13 +368,13 @@ class BaseHandler:
 
         # 优先匹配指定语言的代码块
         if lang:
-            pattern = rf"```{lang}\s*\n(.*?)```"
+            pattern = rf"```[ \t]*{_re.escape(lang)}[ \t]*\r?\n(.*?)```"
             match = _re.search(pattern, combined, _re.DOTALL)
             if match:
                 return match.group(1).strip()
 
         # 回退到任意代码块
-        match = _re.search(r"```(?:\w+)?\s*\n(.*?)```", combined, _re.DOTALL)
+        match = _re.search(r"```[ \t]*(?:\w+)?[ \t]*\r?\n(.*?)```", combined, _re.DOTALL)
         if match:
             return match.group(1).strip()
 

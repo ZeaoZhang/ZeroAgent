@@ -272,6 +272,30 @@ class TestBaseHandlerDispatch:
         )
         assert result.next_prompt == "\n"
 
+    @pytest.mark.parametrize("fence", [
+        "```python\nprint('canonical fence')\n```",
+        "``` python\nprint('space after fence')\n```",
+    ])
+    def test_real_registry_code_run_executes_common_reply_fences(
+        self,
+        mock_config,
+        tmp_path,
+        fence: str,
+    ) -> None:
+        """无 script 的常见 Markdown 围栏必须执行正文代码。"""
+        mock_config.workspace_dir = str(tmp_path)
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=str(tmp_path))
+
+        result = _exhaust(handler.dispatch(
+            "code_run",
+            {"type": "python"},
+            MockResponse(content=fence),
+        ))
+
+        assert result.data["status"] == "success"
+        assert "fence" in result.data["stdout"]
+
     def test_real_registry_code_run_does_not_accept_code_alias(
         self,
         mock_config,
