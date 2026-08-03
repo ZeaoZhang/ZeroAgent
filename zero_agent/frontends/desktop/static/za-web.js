@@ -118,6 +118,11 @@
         if (!sid) throw new Error('session/delete missing sessionId');
         return http(`/session/${encodeURIComponent(sid)}`, { method: 'DELETE' });
       }
+      case 'session/replace': {
+        const sid = params.sessionId || params.id || params.bridgeSessionId;
+        if (!sid) throw new Error('session/replace missing sessionId');
+        return http(`/session/${encodeURIComponent(sid)}/replace`, { method: 'POST' });
+      }
       case 'session/prompt': {
         const sid = params.sessionId || params.id || params.bridgeSessionId;
         if (!sid) throw new Error('session/prompt missing sessionId');

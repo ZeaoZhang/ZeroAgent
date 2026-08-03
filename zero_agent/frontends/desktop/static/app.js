@@ -20,6 +20,7 @@ const state = {
   leftDrawerCollapsed: localStorage.getItem('leftDrawerCollapsed') === 'true',
   rightDrawerCollapsed: localStorage.getItem('rightDrawerCollapsed') !== 'false',
 };
+const sessionDeletionPromises = new Map();
 
 // Helper: get config/diagnostics for the active session (or defaults)
 function getActiveConfig() {
@@ -439,12 +440,99 @@ function getSessionRuntime(sess) {
       lastMessageType: null,
       taskStartedAt: 0,
       taskTimerId: null,
-      assistantDraft: null,
-
+      pendingAssistantMessages: [],
+      pendingFormalAssistantMessages: [],
+      seenBridgeMessageIds: new Set(),
+      turnSequence: 0,
+      activeTurnToken: 0,
+      activePromptUserId: 0,
     };
     state.runtimeBySessionId.set(sessionId, runtime);
   }
   return runtime;
+}
+
+function beginAssistantTurn(runtime) {
+  runtime.turnSequence = Number(runtime.turnSequence || 0) + 1;
+  runtime.activeTurnToken = runtime.turnSequence;
+  runtime.activePromptUserId = 0;
+  return runtime.activeTurnToken;
+
+}
+
+function ensureActiveTurn(runtime) {
+  if (!runtime.activeTurnToken) beginAssistantTurn(runtime);
+  return runtime.activeTurnToken;
+}
+
+function pendingEntryMatches(entry, messageId, runtime) {
+  const message = entry?.message;
+  if (!message || message.role !== 'assistant' || Number(message.id || 0)) return false;
+  const id = Number(messageId || 0);
+  const entryToken = Number(entry.turnToken || 0);
+  const activeToken = Number(runtime.activeTurnToken || 0);
+  const entryUserId = Number(entry.userMessageId || 0);
+  const nextUserId = Number(entry.nextUserMessageId || 0);
+  const activeUserId = Number(runtime.activePromptUserId || 0);
+  if (!id || (entryUserId && id <= entryUserId) || (nextUserId && id >= nextUserId)) return false;
+  if (entryToken && activeToken && entryToken !== activeToken) {
+    return !!entryUserId || !!nextUserId;
+  }
+  if (entryUserId && activeUserId && entryUserId !== activeUserId && id >= activeUserId) return false;
+  return true;
+}
+
+function formalEntryMatchesDraft(entry, draft, draftToken, runtime, allowAdditional = false) {
+  const candidate = entry?.message || entry;
+  if (!candidate || candidate.role !== 'assistant') return false;
+  if (Number(entry.turnToken || draftToken) !== Number(draftToken)) return false;
+  const candidateId = Number(candidate.id || 0);
+  const draftBridgeId = Number(draft.bridgeMessageId || 0);
+  if (!candidateId) return false;
+  const draftUserId = Number(draft.userMessageId || runtime.activePromptUserId || 0);
+  const entryUserId = Number(entry.userMessageId || 0);
+  const nextUserId = Number(entry.nextUserMessageId || 0);
+  if (draftBridgeId && candidateId !== draftBridgeId) {
+    if (!allowAdditional || !draft.primaryFormalId || candidateId < draftBridgeId) return false;
+    const hasOlderPending = runtime.pendingAssistantMessages.some((pendingEntry) => (
+      Number(pendingEntry.turnToken || 0) !== Number(draftToken)
+    ));
+    if (hasOlderPending || (draftUserId && entryUserId && entryUserId !== draftUserId)) return false;
+    return !nextUserId || candidateId < nextUserId;
+  }
+  if (!draftUserId) {
+    const hasOlderPending = runtime.pendingAssistantMessages.some((pendingEntry) => (
+      Number(pendingEntry.turnToken || 0) !== Number(draftToken)
+    ));
+    return !hasOlderPending;
+  }
+  if (entryUserId && entryUserId !== draftUserId) return false;
+  return candidateId > draftUserId && (!nextUserId || candidateId < nextUserId);
+}
+
+function reconcilePendingFormalMessages(sess) {
+  const runtime = getSessionRuntime(sess);
+  const remaining = [];
+  let reconciled = false;
+  for (const entry of runtime.pendingFormalAssistantMessages || []) {
+    const candidate = entry.message || entry;
+    const pendingIndex = runtime.pendingAssistantMessages.findIndex((pendingEntry) => (
+      pendingEntryMatches(pendingEntry, candidate.id, runtime)
+    ));
+    if (pendingIndex === -1) {
+      remaining.push(entry);
+      continue;
+    }
+    const pending = runtime.pendingAssistantMessages.splice(pendingIndex, 1)[0].message;
+    pending.id = Number(candidate.id || 0);
+    if (candidate.content) pending.content = candidate.content;
+    if (candidate.segments) pending.segments = candidate.segments;
+    runtime.seenBridgeMessageIds.add(pending.id);
+    runtime.lastPolledMessageId = Math.max(Number(runtime.lastPolledMessageId || 0), pending.id);
+    reconciled = true;
+  }
+  runtime.pendingFormalAssistantMessages = remaining;
+  if (reconciled && isActiveSession(sess)) renderMessages();
 }
 
 function getActiveSessionRuntime() {
@@ -886,13 +974,20 @@ function createSessionItem(sess) {
   label.textContent = sess.title;
   item.appendChild(label);
 
-  const deleteBtn = document.createElement('span');
+  const deleteBtn = document.createElement('button');
+  deleteBtn.type = 'button';
   deleteBtn.className = 'session-delete';
-  deleteBtn.innerHTML = '×';
-  deleteBtn.addEventListener('click', (e) => {
+  deleteBtn.textContent = '×';
+  deleteBtn.title = `Delete session "${sess.title}"`;
+  deleteBtn.setAttribute('aria-label', `Delete session "${sess.title}"`);
+  deleteBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
-    if (confirm(`Delete session "${sess.title}"?`)) {
-      closeSession(sess.id);
+    if (deleteBtn.disabled || !confirm(`Delete session "${sess.title}"?`)) return;
+    deleteBtn.disabled = true;
+    try {
+      await closeSession(sess.id);
+    } finally {
+      deleteBtn.disabled = false;
     }
   });
   item.appendChild(deleteBtn);
@@ -961,27 +1056,78 @@ function escapeHtml(text) {
 }
 
 
-function closeSession(id) {
-  if (state.sessions.size <= 1) return; // Don't close the last session
-  // Notify bridge to delete this session
-  const sess = state.sessions.get(id);
-  if (sess && sess.bridgeSessionId) {
-    window.zeroAgent.rpc('session/delete', { sessionId: sess.bridgeSessionId }).catch(() => {});
+function resetReplacedSession(sess, replacement) {
+  sess.bridgeSessionId = replacement.id || replacement.sessionId;
+  sess.title = replacement.title || 'New chat';
+  sess.cwd = replacement.cwd || sess.cwd;
+  sess.messages = [];
+  sess.untitled = true;
+  sess.lastError = '';
+  sess.modelOverride = replacement.modelOverride ?? null;
+  sess.tokenUsage = replacement.tokenUsage || sess.tokenUsage;
+  state.runtimeBySessionId.delete(sess.id);
+  state.activeAgents.delete(sess.id);
+  setActiveSession(sess.id);
+}
+
+async function replaceFinalSession(bridgeSessionId) {
+  try {
+    return await window.zeroAgent.rpc('session/replace', { sessionId: bridgeSessionId });
+  } catch (firstError) {
+    try {
+      return await window.zeroAgent.rpc('session/replace', { sessionId: bridgeSessionId });
+    } catch (_) {
+      throw firstError;
+    }
   }
+}
+
+async function deleteSession(id) {
+  const sess = state.sessions.get(id);
+  if (!sess) return;
+
+  if (state.sessions.size === 1) {
+    const result = await replaceFinalSession(sess.bridgeSessionId);
+    const replacement = result.session || result;
+    if (!replacement.id && !replacement.sessionId) throw new Error('Bridge did not return a replacement session');
+    resetReplacedSession(sess, replacement);
+    return;
+  }
+
+  if (sess.bridgeSessionId) {
+    await window.zeroAgent.rpc('session/delete', { sessionId: sess.bridgeSessionId });
+  }
+
   const keys = [...state.sessions.keys()];
   const idx = keys.indexOf(id);
-  state.sessions.delete(id);
-  state.runtimeBySessionId.delete(id);
-  state.activeAgents.delete(id);
+  await discardSession(sess);
 
   if (state.activeId === id) {
-    // Switch to adjacent session
     const remaining = [...state.sessions.keys()];
     const newIdx = Math.max(0, Math.min(idx, remaining.length - 1));
     setActiveSession(remaining[newIdx]);
   } else {
     renderSessionList();
   }
+}
+
+function closeSession(id) {
+  const pending = sessionDeletionPromises.get(id);
+  if (pending) return pending;
+
+  const deletion = deleteSession(id)
+    .catch((err) => {
+      showError('Failed to delete session: ' + (err.message || err));
+    })
+    .finally(() => sessionDeletionPromises.delete(id));
+  sessionDeletionPromises.set(id, deletion);
+  return deletion;
+}
+
+async function discardSession(sess) {
+  state.sessions.delete(sess.id);
+  state.runtimeBySessionId.delete(sess.id);
+  state.activeAgents.delete(sess.id);
 }
 
 async function newSession() {
@@ -1007,8 +1153,9 @@ async function newSession() {
   } catch (e) {
     showError('Failed to create session: ' + e.message);
   } finally {
-    setBusy(false, null, createdSess || previousSess);
+    if (statusEl) statusEl.textContent = '';
   }
+  return createdSess;
 }
 
 async function getCwd() {
@@ -1128,18 +1275,25 @@ function renderMessage(msg, append = true) {
     // Final full message (when reloading from state)
     const wrap = document.createElement('div');
     wrap.className = 'msg msg-assistant';
-    if (msg.segments) {
-      ensureAssistantTaskElapsed(wrap, msg.taskStartedAt, msg.taskEndedAt);
-      for (const seg of msg.segments) {
-        wrap.appendChild(buildTurn(seg.kind, seg.text, seg.collapsed, nextTurnIndexForWrap(wrap)));
-      }
-    } else {
+    if (msg.content) {
       const body = document.createElement('div');
       body.className = 'assistant-response md';
       ensureAssistantTaskElapsed(wrap, msg.taskStartedAt, msg.taskEndedAt);
       const cleanContent = (msg.content || '').replace(/\n*`{5}\n*\[Info\] Final response to user\.\n*`{5}\s*$/, '');
       renderStructuredMarkdownInto(body, cleanContent);
       injectCopyButtons(body);
+      wrap.appendChild(body);
+    }
+    if (msg.segments) {
+      ensureAssistantTaskElapsed(wrap, msg.taskStartedAt, msg.taskEndedAt);
+      for (const seg of msg.segments) {
+        wrap.appendChild(buildTurn(seg.kind, seg.text, seg.collapsed, nextTurnIndexForWrap(wrap)));
+      }
+    }
+    if (!msg.content && !msg.segments) {
+      const body = document.createElement('div');
+      body.className = 'assistant-response md';
+      ensureAssistantTaskElapsed(wrap, msg.taskStartedAt, msg.taskEndedAt);
       wrap.appendChild(body);
     }
     injectCopyButtons(wrap);
@@ -1329,6 +1483,7 @@ function getLiveAssistantWrap(sess) {
 function getAssistantDraft(sess) {
   const runtime = getSessionRuntime(sess);
   if (!runtime.assistantDraft || runtime.assistantDraft.finalized) {
+    const turnToken = ensureActiveTurn(runtime);
     runtime.assistantDraft = {
       text: '',
       segments: [],
@@ -1336,7 +1491,9 @@ function getAssistantDraft(sess) {
       taskStartedAt: runtime.taskStartedAt || 0,
       taskEndedAt: 0,
       finalized: false,
-      bridgeMessageId: 0
+      bridgeMessageId: 0,
+      turnToken,
+      userMessageId: Number(runtime.activePromptUserId || 0),
     };
   }
   if (!runtime.assistantDraft.taskStartedAt && runtime.taskStartedAt) runtime.assistantDraft.taskStartedAt = runtime.taskStartedAt;
@@ -1531,10 +1688,26 @@ function finalizeAssistantReply(sess) {
   const runtime = getSessionRuntime(sess);
   const draft = runtime.assistantDraft;
   const wrap = getCurrentAssistantWrap(sess);
+  let renderedMessageCount = 0;
+
+  let completedTurnToken = 0;
   if (draft && sess && !draft.finalized) {
+    const draftToken = Number(draft.turnToken || ensureActiveTurn(runtime));
+    completedTurnToken = draftToken;
+    const formalMessages = runtime.pendingFormalAssistantMessages || [];
+    const formalIndex = formalMessages.findIndex((entry) => (
+      formalEntryMatchesDraft(entry, draft, draftToken, runtime)
+    ));
+    if (formalIndex !== -1) {
+      const entry = formalMessages.splice(formalIndex, 1)[0];
+      const formal = entry.message || entry;
+      draft.primaryFormalId = Number(formal.id || 0);
+      draft.bridgeMessageId = formal.id;
+      if (formal.content) draft.text = formal.content;
+    }
+
     draft.finalized = true;
     draft.taskEndedAt = endedAt;
-    // Strip trailing [Info] Final response to user. marker (wrapped in 5 backticks)
     if (draft.text) {
       draft.text = draft.text.replace(/\n*`{5}\n*\[Info\] Final response to user\.\n*`{5}\s*$/, '');
     }
@@ -1544,7 +1717,12 @@ function finalizeAssistantReply(sess) {
         last.text = last.text.replace(/\n*`{5}\n*\[Info\] Final response to user\.\n*`{5}\s*$/, '');
       }
     }
-    const msg = { role: 'assistant', finalized: true, taskEndedAt: endedAt };
+    const msg = {
+      role: 'assistant',
+      finalized: true,
+      taskEndedAt: endedAt,
+      turnToken: draftToken,
+    };
     if (draft.bridgeMessageId) msg.id = Number(draft.bridgeMessageId);
     if (draft.taskStartedAt) msg.taskStartedAt = Number(draft.taskStartedAt);
     if (draft.text) msg.content = draft.text;
@@ -1553,13 +1731,50 @@ function finalizeAssistantReply(sess) {
       text: seg.text || '',
       collapsed: !!seg.collapsed
     }));
-    if (msg.content || msg.segments?.length) sess.messages.push(msg);
+    if (msg.content || msg.segments?.length) {
+      sess.messages.push(msg);
+      renderedMessageCount += 1;
+      const finalizedBridgeMessageId = Number(msg.id || 0);
+      if (Number.isInteger(finalizedBridgeMessageId) && finalizedBridgeMessageId > 0) {
+        runtime.seenBridgeMessageIds.add(finalizedBridgeMessageId);
+      } else {
+        runtime.pendingAssistantMessages.push({
+          message: msg,
+          turnToken: draftToken,
+          userMessageId: Number(draft.userMessageId || runtime.activePromptUserId || 0),
+        });
+      }
+    }
     runtime.assistantDraft = null;
+    runtime.activeTurnToken = 0;
   }
+
+  const formalTurnToken = completedTurnToken || Number(runtime.activeTurnToken || 0);
+  const remainingFormal = [];
+  for (const entry of runtime.pendingFormalAssistantMessages || []) {
+    const candidate = entry.message || entry;
+    const entryTurnToken = Number(entry.turnToken || formalTurnToken);
+    const matchesCompletedDraft = !draft || formalEntryMatchesDraft(entry, draft, formalTurnToken, runtime, true);
+    if (formalTurnToken && entryTurnToken === formalTurnToken && matchesCompletedDraft) {
+      if (!sess.messages.some((message) => Number(message.id || 0) === Number(candidate.id || 0))) {
+        candidate.finalized = true;
+        sess.messages.push(candidate);
+        runtime.seenBridgeMessageIds.add(Number(candidate.id || 0));
+        renderedMessageCount += 1;
+      }
+    } else {
+      remainingFormal.push(entry);
+    }
+  }
+  runtime.pendingFormalAssistantMessages = remainingFormal;
+  if (!completedTurnToken && renderedMessageCount) runtime.activeTurnToken = 0;
+
   if (wrap) {
     wrap.dataset.finalized = '1';
     wrap.dataset.taskEndedAt = String(endedAt);
     ensureAssistantTaskElapsed(wrap, wrap.dataset.taskStartedAt || runtime.taskStartedAt || draft?.taskStartedAt, endedAt);
+    renderMessages();
+  } else if (renderedMessageCount && isActiveSession(sess)) {
     renderMessages();
   } else if (!isActiveSession(sess)) {
     // Session finished in background — its DOM cache is stale, discard it
@@ -1575,7 +1790,8 @@ function normalizeBridgeMessage(msg) {
     id: Number(msg.id || 0),
     role: msg.role || 'system',
     content: msg.content || '',
-    image_ids: msg.image_ids || []
+    image_ids: msg.image_ids || [],
+    segments: msg.segments,
   };
 }
 
@@ -1585,6 +1801,8 @@ function upsertPolledMessage(sess, raw, { partial = false } = {}) {
   if (!msg.id) return;
   const runtime = getSessionRuntime(sess);
   if (!runtime.seenBridgeMessageIds) runtime.seenBridgeMessageIds = new Set();
+  if (!runtime.pendingAssistantMessages) runtime.pendingAssistantMessages = [];
+  if (!runtime.pendingFormalAssistantMessages) runtime.pendingFormalAssistantMessages = [];
 
   if (partial && msg.role === 'assistant') {
     const draft = getAssistantDraft(sess);
@@ -1593,29 +1811,95 @@ function upsertPolledMessage(sess, raw, { partial = false } = {}) {
     draft.text = msg.content || '';
     draft.currentSegmentIndex = -1;
     draft.finalized = false;
-    // Polling partial updates used to call renderMessages(), which rebuilt the
-    // whole message list every 500ms. That destroys user fold/collapse DOM
-    // state and can make the live answer appear to jump/duplicate. Update only
-    // the live assistant draft in-place; final messages are still reconciled by
-    // id in the non-partial branch below.
     if (changed && isActiveSession(sess)) renderAssistantDraftInPlace(sess, draft);
     return;
   }
 
-  if (runtime.seenBridgeMessageIds.has(msg.id)) return;
-  runtime.seenBridgeMessageIds.add(msg.id);
-  runtime.lastPolledMessageId = Math.max(Number(runtime.lastPolledMessageId || 0), msg.id);
-
   const draft = runtime.assistantDraft;
-  if (msg.role === 'assistant' && draft && !draft.finalized && Number(draft.bridgeMessageId || 0) === msg.id) {
-    draft.text = msg.content || draft.text || '';
+  if (
+    msg.role === 'assistant'
+    && draft
+    && !draft.finalized
+    && Number(draft.bridgeMessageId || 0) === msg.id
+  ) {
+    draft.bridgeMessageId = msg.id;
+    runtime.lastPolledMessageId = Math.max(Number(runtime.lastPolledMessageId || 0), msg.id);
+    if (msg.content) draft.text = msg.content;
     finalizeAssistantReply(sess);
     return;
   }
+
+  const pendingIndex = runtime.pendingAssistantMessages.findIndex((entry) => (
+    msg.role === 'assistant' && pendingEntryMatches(entry, msg.id, runtime)
+  ));
+  if (pendingIndex !== -1) {
+    const entry = runtime.pendingAssistantMessages.splice(pendingIndex, 1)[0];
+    const pending = entry.message;
+    pending.id = msg.id;
+    if (msg.content) pending.content = msg.content;
+    if (msg.segments) pending.segments = msg.segments;
+    runtime.seenBridgeMessageIds.add(msg.id);
+    runtime.lastPolledMessageId = Math.max(Number(runtime.lastPolledMessageId || 0), msg.id);
+    if (isActiveSession(sess)) renderMessages();
+    return;
+  }
+
+  if (
+    msg.role === 'assistant'
+    && draft
+    && !draft.finalized
+    && !Number(draft.bridgeMessageId || 0)
+    && !runtime.busy
+    && !runtime.pendingAssistantMessages.some((entry) => pendingEntryMatches(entry, msg.id, runtime))
+  ) {
+    draft.bridgeMessageId = msg.id;
+    runtime.lastPolledMessageId = Math.max(Number(runtime.lastPolledMessageId || 0), msg.id);
+    if (msg.content) draft.text = msg.content;
+    finalizeAssistantReply(sess);
+    return;
+  }
+
+  const activeToken = ensureActiveTurn(runtime);
+  const queuedIndex = runtime.pendingFormalAssistantMessages.findIndex((entry) => {
+    const candidate = entry.message || entry;
+    return Number(candidate.id || 0) === msg.id && Number(entry.turnToken || activeToken) === activeToken;
+  });
+  if (queuedIndex !== -1) {
+    const queued = runtime.pendingFormalAssistantMessages[queuedIndex].message || runtime.pendingFormalAssistantMessages[queuedIndex];
+    if (msg.content) queued.content = msg.content;
+    if (msg.segments) queued.segments = msg.segments;
+    return;
+  }
+
+  if (msg.role === 'assistant' && runtime.busy && !runtime.seenBridgeMessageIds.has(msg.id)) {
+    runtime.pendingFormalAssistantMessages.push({
+      message: msg,
+      turnToken: activeToken,
+      userMessageId: Number(runtime.activePromptUserId || 0),
+    });
+    runtime.seenBridgeMessageIds.add(msg.id);
+    runtime.lastPolledMessageId = Math.max(Number(runtime.lastPolledMessageId || 0), msg.id);
+    return;
+  }
+
+  if (runtime.seenBridgeMessageIds.has(msg.id)) {
+    runtime.lastPolledMessageId = Math.max(Number(runtime.lastPolledMessageId || 0), msg.id);
+    const finalized = msg.role === 'assistant' && [...sess.messages].reverse().find((candidate) => (
+      candidate.role === 'assistant' && candidate.finalized && Number(candidate.id || 0) === msg.id
+    ));
+    if (finalized && msg.content && finalized.content !== msg.content) {
+      finalized.content = msg.content;
+      if (msg.segments) finalized.segments = msg.segments;
+      if (isActiveSession(sess)) renderMessages();
+    }
+    return;
+  }
+
+  runtime.seenBridgeMessageIds.add(msg.id);
+  runtime.lastPolledMessageId = Math.max(Number(runtime.lastPolledMessageId || 0), msg.id);
   sess.messages.push(msg);
   if (isActiveSession(sess)) renderMessage(msg);
 }
-
 async function pollSessionMessages(sess) {
   if (!sess) return;
   const runtime = getSessionRuntime(sess);
@@ -1658,6 +1942,8 @@ async function sendPrompt(text, images = [], options = {}) {
   const sess = state.sessions.get(state.activeId);
   const runtime = getSessionRuntime(sess);
   if (runtime.busy) return;
+  beginAssistantTurn(runtime);
+  const promptTurnToken = runtime.activeTurnToken;
 
   // Store images in sessionStorage and collect ids
   const imageIds = images.map(img => {
@@ -1685,9 +1971,25 @@ async function sendPrompt(text, images = [], options = {}) {
       images: images.map(img => ({id: img.id, dataUrl: img.dataUrl})),
       llmNo: sess.config.llmNo
     });
-    if (res?.error) throw new Error(res.error.message || res.error);
     const acceptedUserId = Number(res.userMessageId || res.result?.userMessageId || 0);
     if (acceptedUserId) {
+      for (const entry of runtime.pendingAssistantMessages) {
+        const entryTurnToken = Number(entry.turnToken || 0);
+        if (entryTurnToken === Number(promptTurnToken) && !entry.userMessageId) {
+          entry.userMessageId = acceptedUserId;
+        } else if (entryTurnToken < Number(promptTurnToken) && !entry.nextUserMessageId) {
+          entry.nextUserMessageId = acceptedUserId;
+        }
+      }
+      const promptIsCurrent = Number(runtime.activeTurnToken || 0) === Number(promptTurnToken)
+        || (!Number(runtime.activeTurnToken || 0) && Number(runtime.turnSequence || 0) === Number(promptTurnToken));
+      if (promptIsCurrent) {
+        runtime.activePromptUserId = acceptedUserId;
+        if (runtime.assistantDraft?.turnToken === promptTurnToken) {
+          runtime.assistantDraft.userMessageId = acceptedUserId;
+        }
+      }
+      reconcilePendingFormalMessages(sess);
       if (!runtime.seenBridgeMessageIds) runtime.seenBridgeMessageIds = new Set();
       runtime.seenBridgeMessageIds.add(acceptedUserId);
       runtime.lastPolledMessageId = Math.max(Number(runtime.lastPolledMessageId || 0), acceptedUserId);

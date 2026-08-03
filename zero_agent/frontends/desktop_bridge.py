@@ -30,8 +30,9 @@ WS API:
 """
 from __future__ import annotations
 
-import asyncio, contextlib, copy, hmac, importlib, ipaddress, json, os, secrets, sys, urllib.parse, webbrowser
+import asyncio, contextlib, copy, hmac, importlib, ipaddress, json, os, secrets, signal, sys, urllib.parse, webbrowser
 import threading, time, traceback, uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -57,6 +58,16 @@ def find_default_project_root() -> Path:
 
 
 DEFAULT_PROJECT_ROOT = find_default_project_root()
+
+MAX_SESSION_IDEMPOTENCY_RESULTS = 256
+
+
+def remember_session_result(results: OrderedDict[tuple[str, str], dict], operation: str, session_id: str, result: dict) -> None:
+    key = (operation, session_id)
+    results[key] = result
+    results.move_to_end(key)
+    while len(results) > MAX_SESSION_IDEMPOTENCY_RESULTS:
+        results.popitem(last=False)
 
 
 @dataclass(frozen=True)
@@ -122,6 +133,52 @@ def load_bridge_security(host: str, port: int) -> BridgeSecurity:
         allowed_origins=frozenset(allowed_origins),
         allow_remote=allow_remote,
     ))
+
+
+def desktop_parent_is_alive(expected_parent_pid: int, *, current_parent_pid: Optional[int] = None) -> bool:
+    return expected_parent_pid > 1 and (current_parent_pid if current_parent_pid is not None else os.getppid()) == expected_parent_pid
+
+
+def _windows_parent_handle(parent_pid: int):
+    import ctypes
+
+    return ctypes.windll.kernel32.OpenProcess(0x00100000, False, parent_pid)
+
+
+def _windows_parent_is_alive(handle) -> bool:
+    import ctypes
+
+    return ctypes.windll.kernel32.WaitForSingleObject(handle, 0) == 258
+
+
+def _close_windows_parent_handle(handle) -> None:
+    import ctypes
+
+    ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def desktop_parent_pid() -> Optional[int]:
+    value = os.environ.get("ZA_DESKTOP_PARENT_PID", "").strip()
+    try:
+        parent_pid = int(value)
+    except ValueError:
+        return None
+    return parent_pid if parent_pid > 1 else None
+
+
+async def monitor_desktop_parent(parent_pid: int) -> None:
+    if os.name == "nt":
+        handle = _windows_parent_handle(parent_pid)
+        try:
+            while handle and _windows_parent_is_alive(handle):
+                await asyncio.sleep(0.1)
+        finally:
+            if handle:
+                _close_windows_parent_handle(handle)
+    else:
+        while desktop_parent_is_alive(parent_pid):
+            await asyncio.sleep(0.1)
+    os.kill(os.getpid(), signal.SIGTERM)
 
 for _s in (sys.stdout, sys.stderr):
     with contextlib.suppress(Exception):
@@ -195,6 +252,7 @@ class AgentManager:
         self.config: Dict[str, Any] = _public_config_snapshot(base_config)
         self.sessions: Dict[str, Session] = {}
         self.active_session_id: Optional[str] = None
+        self.session_idempotency_results: OrderedDict[tuple[str, str], dict] = OrderedDict()
 
     def _load_base_config(self) -> AgentConfig:
         try:
@@ -288,16 +346,57 @@ class AgentManager:
 
     def delete_session(self, sid: str) -> dict:
         with self.lock:
+            key = ("delete", sid)
+            prior_result = self.session_idempotency_results.get(key)
+            if prior_result is not None:
+                self.session_idempotency_results.move_to_end(key)
+                return prior_result
+
             sess = self.sessions.pop(sid, None)
             if not sess:
                 raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
             if self.active_session_id == sid:
                 self.active_session_id = next(iter(self.sessions), None)
+            result = {"ok": True, "sessionId": sid}
+            remember_session_result(self.session_idempotency_results, "delete", sid, result)
             if sess.agent and hasattr(sess.agent, "abort"):
                 with contextlib.suppress(Exception):
                     sess.agent.abort()
         emit_session_state(sess, "closed")
-        return {"ok": True, "sessionId": sid}
+        return result
+
+    def replace_session(self, sid: str) -> dict:
+        with self.lock:
+            key = ("replace", sid)
+            prior_result = self.session_idempotency_results.get(key)
+            if prior_result is not None:
+                self.session_idempotency_results.move_to_end(key)
+                return prior_result
+
+            sess = self.sessions.pop(sid, None)
+            if not sess:
+                raise web.HTTPNotFound(
+                    text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False),
+                    content_type="application/json",
+                )
+
+            replacement = Session(id="sess-" + uuid.uuid4().hex[:12], cwd=sess.cwd)
+            self.sessions[replacement.id] = replacement
+            result = {
+                "ok": True,
+                "replacedSessionId": sid,
+                "sessionId": replacement.id,
+                "session": self.snapshot(replacement),
+            }
+            remember_session_result(self.session_idempotency_results, "replace", sid, result)
+
+            if sess.agent and hasattr(sess.agent, "abort"):
+                with contextlib.suppress(Exception):
+                    sess.agent.abort()
+
+        emit_session_state(sess, "closed")
+        emit_session_state(replacement, "created")
+        return result
 
     def list_resume_sessions(self, limit: int = 10) -> list[dict]:
         self.ensure_project_import_path()
@@ -924,6 +1023,11 @@ async def delete_session_handler(request):
     return json_ok(manager.delete_session(sid))
 
 
+async def replace_session_handler(request):
+    sid = request.match_info["sid"]
+    return json_ok(manager.replace_session(sid))
+
+
 async def prompt_handler(request):
     sid = request.match_info["sid"]
     data = await read_json(request)
@@ -1113,6 +1217,7 @@ def create_app(*, security: Optional[BridgeSecurity] = None, host: str = "127.0.
     app.router.add_get("/sessions", list_sessions_handler)
     app.router.add_post("/session/new", new_session_handler)
     app.router.add_get("/session/{sid}", get_session_handler)
+    app.router.add_post("/session/{sid}/replace", replace_session_handler)
     app.router.add_delete("/session/{sid}", delete_session_handler)
     app.router.add_post("/session/{sid}/prompt", prompt_handler)
     app.router.add_get("/session/{sid}/messages", messages_handler)
@@ -1138,8 +1243,17 @@ def create_app(*, security: Optional[BridgeSecurity] = None, host: str = "127.0.
 
     async def on_startup(app):
         hub.loop = asyncio.get_running_loop()
+        parent_pid = desktop_parent_pid()
+        if parent_pid is not None:
+            app["desktop_parent_monitor"] = asyncio.create_task(monitor_desktop_parent(parent_pid))
+
+    async def on_cleanup(app):
+        task = app.get("desktop_parent_monitor")
+        if task is not None:
+            task.cancel()
 
     app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
     return app
 
 

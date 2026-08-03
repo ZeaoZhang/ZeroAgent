@@ -250,6 +250,17 @@ fn wait_for_authenticated_bridge(token: &str, timeout: Duration) -> bool {
     false
 }
 
+fn wait_for_bridge_port_to_clear(timeout: Duration) -> bool {
+    let start = Instant::now();
+    while is_bridge_running() {
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
 fn start_bridge_process(python_path: &str, project_dir: &PathBuf, token: &str) -> Result<(), String> {
     let py = PathBuf::from(python_path);
     let script = bridge_script_for_project(project_dir);
@@ -261,7 +272,8 @@ fn start_bridge_process(python_path: &str, project_dir: &PathBuf, token: &str) -
     cmd.arg(&script)
         .current_dir(script.parent().unwrap_or(project_dir))
         .env("ZA_DESKTOP_BRIDGE_NO_BROWSER", "1")
-        .env("ZA_DESKTOP_BRIDGE_TOKEN", token);
+        .env("ZA_DESKTOP_BRIDGE_TOKEN", token)
+        .env("ZA_DESKTOP_PARENT_PID", std::process::id().to_string());
     #[cfg(windows)]
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     let child = cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?;
@@ -292,7 +304,9 @@ fn ensure_bridge_ready(python_path: &str, project_dir: &str, timeout: Duration) 
         if token_explicit && bridge_config_accepts_token(&token) {
             return Ok(());
         }
-        return Err(OCCUPIED_UNAUTHENTICATED_ERROR.into());
+        if !wait_for_bridge_port_to_clear(Duration::from_secs(2)) {
+            return Err(OCCUPIED_UNAUTHENTICATED_ERROR.into());
+        }
     }
 
     let dir = PathBuf::from(project_dir);
@@ -359,15 +373,18 @@ pub fn run() {
     let mut startup_error: Option<String> = None;
 
     if !no_autostart {
-        if is_bridge_running() {
-            if !(token_explicit && bridge_config_accepts_token(&bridge_token)) {
-                startup_error = Some(OCCUPIED_UNAUTHENTICATED_ERROR.to_string());
+        let (py_str, dir_str) = get_or_discover_config();
+        let dir = PathBuf::from(&dir_str);
+        let script = bridge_script_for_project(&dir);
+        if script.exists() {
+            if is_bridge_running() {
+                if !(token_explicit && bridge_config_accepts_token(&bridge_token))
+                    && !wait_for_bridge_port_to_clear(Duration::from_secs(2))
+                {
+                    startup_error = Some(OCCUPIED_UNAUTHENTICATED_ERROR.to_string());
+                }
             }
-        } else {
-            let (py_str, dir_str) = get_or_discover_config();
-            let dir = PathBuf::from(&dir_str);
-            let script = bridge_script_for_project(&dir);
-            if script.exists() {
+            if startup_error.is_none() && !is_bridge_running() {
                 match start_bridge_process(&py_str, &dir, &bridge_token) {
                     Ok(()) => spawned_bridge = true,
                     Err(err) => startup_error = Some(err),

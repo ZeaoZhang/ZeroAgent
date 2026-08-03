@@ -319,21 +319,31 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
   flex-shrink: 0;
   width: 20px;
   height: 20px;
+  border: 0;
   border-radius: 50%;
-  display: none;
+  display: flex;
   align-items: center;
   justify-content: center;
+  background: transparent;
   color: var(--text-faint);
-  transition: background 0.15s, color 0.15s;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: background 0.15s, color 0.15s, opacity 0.15s;
 }
 
-.session-item:hover .session-delete {
-  display: flex;
+.session-item:hover .session-delete,
+.session-item:focus-within .session-delete {
+  opacity: 1;
+  pointer-events: auto;
 }
 
-.session-item .session-delete:hover {
+.session-item .session-delete:hover,
+.session-item .session-delete:focus-visible {
   background: var(--bg-active);
   color: var(--err);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* Agent List */

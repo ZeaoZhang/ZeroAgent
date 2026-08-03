@@ -211,62 +211,51 @@ function buildCdpScript(code) {
 
 // --- WebSocket Client for TMWebDriver ---
 let ws = null;
+let keepaliveTimer = null;
 const WS_URL = 'ws://127.0.0.1:18765';
+const WATCHDOG_ALARM = 'tmwd-ws-watchdog';
 
-function scheduleProbe() {
-  // Use chrome.alarms to survive MV3 service worker suspension
-  chrome.alarms.create('tmwd-ws-probe', { delayInMinutes: 0.083 }); // ~5s
+function installWatchdog() {
+  // A periodic alarm wakes a suspended MV3 worker so it can restore the socket.
+  chrome.alarms.create(WATCHDOG_ALARM, { periodInMinutes: 1 });
 }
 
-function scheduleKeepalive() {
-  // Keep SW alive while WS is connected (~25s, under 30s SW timeout)
-  chrome.alarms.create('tmwd-ws-keepalive', { delayInMinutes: 0.4 }); // ~24s
+function startKeepalive() {
+  stopKeepalive();
+  // WebSocket traffic within 30 seconds keeps extension workers alive in Chrome 116+.
+  keepaliveTimer = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send('{"type":"ping"}'); } catch (_) {}
+    }
+  }, 20000);
 }
 
-async function isServerAlive() {
-  try {
-    const ctrl = new AbortController();
-    setTimeout(() => ctrl.abort(), 2000);
-    await fetch('http://127.0.0.1:18765', { signal: ctrl.signal });
-    return true; // Got HTTP response → port is listening
-  } catch (e) {
-    return false; // Network error (connection refused) or timeout → server not alive
+function stopKeepalive() {
+  if (keepaliveTimer !== null) {
+    clearInterval(keepaliveTimer);
+    keepaliveTimer = null;
   }
 }
 
-chrome.alarms.onAlarm.addListener(async (alarm) => {
+chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'tmwd-self-reload') {
     chrome.runtime.reload();
     return;
   }
-  if (alarm.name === 'tmwd-ws-keepalive') {
-    // Keepalive: ping to keep SW alive + detect dead connections
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send('{"type":"ping"}'); } catch (_) {}
-      scheduleKeepalive();
-    } else {
-      // Connection lost, switch to probe mode
-      ws = null;
-      scheduleProbe();
-    }
+  if (alarm.name !== WATCHDOG_ALARM) return;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try { ws.send('{"type":"ping"}'); } catch (_) {}
+    return;
   }
-  if (alarm.name === 'tmwd-ws-probe') {
-    if (ws && ws.readyState <= 1) return; // Already connected/connecting
-    if (await isServerAlive()) {
-      console.log('[TMWD-WS] Server detected, connecting...');
-      connectWS();
-    } else {
-      scheduleProbe(); // Server not up, keep probing
-    }
-  }
+  connectWS();
 });
 
-async function handleWsExec(data) {
+async function handleWsExec(data, socket = ws) {
   const tabId = data.tabId;
   console.log('[TMWD-WS] Exec request', data.id, 'on tab', tabId);
-  ws.send(JSON.stringify({ type: 'ack', id: data.id }));
+  socket.send(JSON.stringify({ type: 'ack', id: data.id }));
   if (!tabId) {
-    ws.send(JSON.stringify({ type: 'error', id: data.id, error: 'No tabId provided' }));
+    socket.send(JSON.stringify({ type: 'error', id: data.id, error: 'No tabId provided' }));
     return;
   }
   // Use onCreated listener to reliably capture new tabs (avoids race condition with query-diff)
@@ -321,13 +310,13 @@ async function handleWsExec(data) {
       try { const t = await chrome.tabs.get(id); newTabs.push({id: t.id, url: t.url, title: t.title}); } catch (_) {}
     }
     if (res?.ok) {
-      ws.send(JSON.stringify({ type: 'result', id: data.id, result: res.data, newTabs }));
+      socket.send(JSON.stringify({ type: 'result', id: data.id, result: res.data, newTabs }));
     } else {
       console.log(res);
-      ws.send(JSON.stringify({ type: 'error', id: data.id, error: res?.error || 'Unknown error', newTabs }));
+      socket.send(JSON.stringify({ type: 'error', id: data.id, error: res?.error || 'Unknown error', newTabs }));
     }
   } catch (e) {
-    ws.send(JSON.stringify({ type: 'error', id: data.id, error: { name: e.name || 'Error', message: e.message || String(e), stack: e.stack || '' } }));
+    socket.send(JSON.stringify({ type: 'error', id: data.id, error: { name: e.name || 'Error', message: e.message || String(e), stack: e.stack || '' } }));
   } finally {
     chrome.tabs.onCreated.removeListener(onCreated);
   }
@@ -335,27 +324,29 @@ async function handleWsExec(data) {
 
 function connectWS() {
   if (ws && ws.readyState <= 1) return; // CONNECTING or OPEN
-  ws = null;
   console.log('[TMWD-WS] Connecting to', WS_URL);
+  let socket;
   try {
-    ws = new WebSocket(WS_URL);
+    socket = new WebSocket(WS_URL);
   } catch (e) {
     console.error('[TMWD-WS] Constructor error:', e);
-    ws = null;
-    scheduleProbe();
     return;
   }
-  ws.onopen = async () => {
+  ws = socket;
+  socket.onopen = async () => {
+    if (ws !== socket) return;
     console.log('[TMWD-WS] Connected!');
-    scheduleKeepalive(); // Keep SW alive while connected
+    startKeepalive();
     const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url));
-    ws.send(JSON.stringify({
+    if (ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({
       type: 'ext_ready',
       tabs: tabs.map(t => ({ id: t.id, url: t.url, title: t.title }))
     }));
     console.log('[TMWD-WS] Sent ext_ready with', tabs.length, 'tabs');
   };
-  ws.onmessage = async (event) => {
+  socket.onmessage = async (event) => {
+    if (ws !== socket) return;
     try {
       const data = JSON.parse(event.data);
       if (data.id && data.code) {
@@ -368,42 +359,49 @@ function connectWS() {
           // Custom protocol message → route to handleExtMessage
           if (code.tabId === undefined && data.tabId !== undefined) code.tabId = data.tabId;
           const res = await handleExtMessage(code, {});
-          ws.send(JSON.stringify({ type: res.ok ? 'result' : 'error', id: data.id, result: res.data ?? res.results ?? res, error: res.error }));
+          socket.send(JSON.stringify({ type: res.ok ? 'result' : 'error', id: data.id, result: res.data ?? res.results ?? res, error: res.error }));
         } else if (typeof code === 'string') {
           // Plain JS code
-          await handleWsExec(data);
+          await handleWsExec(data, socket);
         } else if (typeof code === 'object' && code !== null) {
           // Object without cmd -> extension message
           const msg = code.tabId === undefined && data.tabId !== undefined ? { ...code, tabId: data.tabId } : code;
           const res = await handleExtMessage(msg, {});
-          ws.send(JSON.stringify({ type: res.ok ? 'result' : 'error', id: data.id, result: res.data ?? res.results ?? res, error: res.error }));
+          socket.send(JSON.stringify({ type: res.ok ? 'result' : 'error', id: data.id, result: res.data ?? res.results ?? res, error: res.error }));
         }
       }
     } catch (e) {
       console.error('[TMWD-WS] message parse error', e);
     }
   };
-  ws.onclose = () => {
+  socket.onclose = () => {
     console.log('[TMWD-WS] Disconnected');
+    if (ws !== socket) return;
+    stopKeepalive();
     ws = null;
-    scheduleProbe();
   };
-  ws.onerror = (e) => {
+  socket.onerror = (e) => {
     console.error('[TMWD-WS] Error:', e);
-    // onclose will fire after this, which triggers reconnect
+    // onclose will fire after this; the watchdog or a browser event reconnects.
   };
 }
 
 // Initial connect + wake-up hooks
+installWatchdog();
 connectWS();
 chrome.runtime.onStartup.addListener(() => connectWS());
 chrome.runtime.onInstalled.addListener(() => connectWS());
 
 // Sync tab list on changes
 async function sendTabsUpdate() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const socket = ws;
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    connectWS();
+    return;
+  }
   const tabs = (await chrome.tabs.query({})).filter(t => isScriptable(t.url) && !/streamlit/i.test(t.title));
-  ws.send(JSON.stringify({
+  if (ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify({
     type: 'tabs_update',
     tabs: tabs.map(t => ({ id: t.id, url: t.url, title: t.title }))
   }));

@@ -6,10 +6,12 @@ import inspect
 import asyncio
 import json
 import queue
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
-from aiohttp import WSServerHandshakeError
+from aiohttp import WSServerHandshakeError, web
 from aiohttp.test_utils import TestClient, TestServer
 
 from zero_agent.core.config import AgentConfig, LLMBackendConfig
@@ -31,6 +33,62 @@ def test_web_frontend_folds_tool_markers() -> None:
     assert "return kind !== 'agent_message_chunk';" in app_source
     assert "stripVisibleToolProtocol" in app_source
 
+def test_frontend_message_reconciliation_regression() -> None:
+    root = Path(__file__).resolve().parents[1]
+    node = shutil.which("node")
+    assert node, "Node.js is required for the frontend reconciliation regression"
+    script = root / "tests" / "frontend_message_reconciliation.test.js"
+    result = subprocess.run(
+        [node, str(script)],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"Node regression failed:\n{result.stdout}\n{result.stderr}"
+
+
+def test_desktop_session_deletion_uses_atomic_replacement() -> None:
+    root = Path(__file__).resolve().parents[1] / "zero_agent" / "frontends" / "desktop" / "static"
+    app_source = (root / "app.js").read_text(encoding="utf-8")
+    adapter_source = (root / "za-web.js").read_text(encoding="utf-8")
+
+    assert "window.zeroAgent.rpc('session/replace'" in app_source
+    assert "const sessionDeletionPromises = new Map();" in app_source
+    assert "const pending = sessionDeletionPromises.get(id);" in app_source
+    assert "sessionDeletionPromises.set(id, deletion);" in app_source
+    assert "case 'session/replace'" in adapter_source
+    assert "/replace`, { method: 'POST' }" in adapter_source
+
+
+def test_desktop_session_deletion_is_keyboard_accessible() -> None:
+    root = Path(__file__).resolve().parents[1] / "zero_agent" / "frontends" / "desktop" / "static"
+    stylesheet = (root / "styles.css").read_text(encoding="utf-8")
+
+    assert ".session-item:focus-within .session-delete" in stylesheet
+    assert ".session-item .session-delete:focus-visible" in stylesheet
+
+
+def test_desktop_session_delete_button_has_an_accessible_name() -> None:
+    root = Path(__file__).resolve().parents[1] / "zero_agent" / "frontends" / "desktop" / "static"
+    app_source = (root / "app.js").read_text(encoding="utf-8")
+
+    assert "deleteBtn.setAttribute('aria-label'" in app_source
+
+
+def test_agent_manager_replaces_session_atomically_and_idempotently() -> None:
+    session_manager = desktop_bridge.AgentManager()
+    original = session_manager.create_session(cwd="/tmp/original")
+
+    first = session_manager.replace_session(original.id)
+    retried = session_manager.replace_session(original.id)
+
+    assert first["replacedSessionId"] == original.id
+    assert first["session"]["id"] != original.id
+    assert retried == first
+    assert original.id not in session_manager.sessions
+    assert list(session_manager.sessions) == [first["session"]["id"]]
+
 
 def test_status_payload_exposes_zeroagent_fields() -> None:
     manager = desktop_bridge.AgentManager()
@@ -38,6 +96,70 @@ def test_status_payload_exposes_zeroagent_fields() -> None:
     assert manager.config_path
 
 
+
+
+def test_session_replacement_http_endpoint_is_idempotent() -> None:
+    async def run() -> None:
+        client = await _open_test_client()
+        try:
+            headers = {"Authorization": "Bearer secret"}
+            created = await client.post("/session/new", json={}, headers=headers)
+            created_payload = await created.json()
+            session_id = created_payload["sessionId"]
+
+            first = await client.post(f"/session/{session_id}/replace", headers=headers)
+            first_payload = await first.json()
+            retry = await client.post(f"/session/{session_id}/replace", headers=headers)
+            retry_payload = await retry.json()
+
+            assert first.status == 200
+            assert retry.status == 200
+            assert retry_payload == first_payload
+            assert first_payload["sessionId"] != session_id
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_session_deletion_http_endpoint_is_idempotent() -> None:
+    async def run() -> None:
+        client = await _open_test_client()
+        try:
+            headers = {"Authorization": "Bearer secret"}
+            created = await client.post("/session/new", json={}, headers=headers)
+            session_id = (await created.json())["sessionId"]
+
+            first = await client.delete(f"/session/{session_id}", headers=headers)
+            first_payload = await first.json()
+            retry = await client.delete(f"/session/{session_id}", headers=headers)
+            retry_payload = await retry.json()
+
+            assert first.status == 200
+            assert retry.status == 200
+            assert retry_payload == first_payload
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_session_idempotency_records_share_one_lru_window(monkeypatch) -> None:
+    monkeypatch.setattr(desktop_bridge, "MAX_SESSION_IDEMPOTENCY_RESULTS", 2)
+    session_manager = desktop_bridge.AgentManager()
+    first, second, third = (session_manager.create_session() for _ in range(3))
+
+    session_manager.delete_session(first.id)
+    session_manager.replace_session(second.id)
+    assert session_manager.delete_session(first.id)["sessionId"] == first.id
+    session_manager.delete_session(third.id)
+
+    assert list(session_manager.session_idempotency_results) == [
+        ("delete", first.id),
+        ("delete", third.id),
+    ]
+    with pytest.raises(web.HTTPNotFound):
+        session_manager.replace_session(second.id)
 def test_agent_manager_uses_configured_workspace_and_sessions(monkeypatch, tmp_path) -> None:
     config = AgentConfig(
         llm_backends={
@@ -107,6 +229,7 @@ def test_create_app_exposes_desktop_http_contract() -> None:
     assert ("POST", "/session/new") in routes
     assert ("GET", "/session/{sid}") in routes
     assert ("DELETE", "/session/{sid}") in routes
+    assert ("POST", "/session/{sid}/replace") in routes
     assert ("POST", "/session/{sid}/prompt") in routes
     assert ("GET", "/session/{sid}/messages") in routes
     assert ("POST", "/session/{sid}/cancel") in routes
@@ -147,6 +270,64 @@ def test_load_bridge_security_generates_token_when_absent(monkeypatch) -> None:
     assert "http://127.0.0.1:14168" in security.allowed_origins
     assert "http://localhost:14168" in security.allowed_origins
     assert "https://desktop.example" in security.allowed_origins
+
+
+def test_desktop_bridge_detects_orphaned_desktop_process() -> None:
+    root = Path(__file__).resolve().parents[1]
+    tauri_source = (
+        root / "zero_agent" / "frontends" / "desktop" / "src-tauri" / "src" / "lib.rs"
+    ).read_text(encoding="utf-8")
+
+    assert desktop_bridge.desktop_parent_is_alive(123, current_parent_pid=123)
+    assert not desktop_bridge.desktop_parent_is_alive(123, current_parent_pid=1)
+    assert '.env("ZA_DESKTOP_PARENT_PID", std::process::id().to_string())' in tauri_source
+
+
+def test_desktop_bridge_parent_monitor_stops_after_reparent(monkeypatch) -> None:
+    parent_pid_samples = iter((123, 1))
+    signals: list[tuple[int, int]] = []
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(desktop_bridge.os, "getppid", lambda: next(parent_pid_samples))
+    monkeypatch.setattr(desktop_bridge.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(desktop_bridge.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(desktop_bridge.os, "getpid", lambda: 456)
+
+    asyncio.run(desktop_bridge.monitor_desktop_parent(123))
+
+    assert signals == [(456, desktop_bridge.signal.SIGTERM)]
+
+
+def test_desktop_bridge_parent_monitor_uses_windows_process_handle(monkeypatch) -> None:
+    parent_states = iter((True, False))
+    closed_handles: list[object] = []
+    signals: list[tuple[int, int]] = []
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(desktop_bridge.os, "name", "nt")
+    monkeypatch.setattr(desktop_bridge, "_windows_parent_handle", lambda _pid: "handle")
+    monkeypatch.setattr(
+        desktop_bridge,
+        "_windows_parent_is_alive",
+        lambda _handle: next(parent_states),
+    )
+    monkeypatch.setattr(
+        desktop_bridge,
+        "_close_windows_parent_handle",
+        lambda handle: closed_handles.append(handle),
+    )
+    monkeypatch.setattr(desktop_bridge.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(desktop_bridge.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(desktop_bridge.os, "getpid", lambda: 456)
+
+    asyncio.run(desktop_bridge.monitor_desktop_parent(123))
+
+    assert closed_handles == ["handle"]
+    assert signals == [(456, desktop_bridge.signal.SIGTERM)]
 
 
 def test_load_bridge_security_remote_host_requires_allow_flag_and_explicit_token(monkeypatch) -> None:

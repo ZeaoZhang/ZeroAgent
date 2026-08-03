@@ -88,18 +88,59 @@ resolve_executable() {
   printf '%s\n' "${resolved}"
 }
 
+supports_project_python() {
+  local python_bin="$1"
+  local version
+
+  version="$("${python_bin}" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null)" || return 1
+  [[ "${version}" =~ ^3\.(1[0-3])$ ]]
+}
+
+supports_editable_pip() {
+  local python_bin="$1"
+  local version
+  local major
+  local minor
+
+  version="$("${python_bin}" -m pip --version 2>/dev/null)" || return 1
+  version="${version#pip }"
+  version="${version%% *}"
+  [[ "${version}" =~ ^([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]] || return 1
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  (( major > 21 || (major == 21 && minor >= 3) ))
+}
+
 select_python() {
   local candidate=""
+  local resolved=""
 
   if [[ -n "${PYTHON_BIN}" ]]; then
-    candidate="${PYTHON_BIN}"
-  elif [[ -x "${REPO_ROOT}/.venv/bin/python" ]]; then
-    candidate="${REPO_ROOT}/.venv/bin/python"
-  else
-    candidate="python3"
+    resolved="$(resolve_executable "${PYTHON_BIN}")" || die "Python executable not found: ${PYTHON_BIN}"
+    supports_project_python "${resolved}" || die "Python executable must satisfy the project's Python requirement (>=3.10,<3.14): ${resolved}"
+    supports_editable_pip "${resolved}" || die "pip must support PEP 660 editable installs (>=21.3): ${resolved}"
+    PYTHON_BIN="${resolved}"
+    return
   fi
 
-  PYTHON_BIN="$(resolve_executable "${candidate}")" || die "Python executable not found: ${candidate}"
+  if [[ -x "${REPO_ROOT}/.venv/bin/python" ]]; then
+    resolved="$(resolve_executable "${REPO_ROOT}/.venv/bin/python")"
+    if supports_project_python "${resolved}" && supports_editable_pip "${resolved}"; then
+      PYTHON_BIN="${resolved}"
+      return
+    fi
+    log "ignoring incompatible virtualenv Python: ${resolved}"
+  fi
+
+  for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
+    resolved="$(resolve_executable "${candidate}" 2>/dev/null || true)"
+    if [[ -n "${resolved}" ]] && supports_project_python "${resolved}" && supports_editable_pip "${resolved}"; then
+      PYTHON_BIN="${resolved}"
+      return
+    fi
+  done
+
+  die "No Python interpreter with pip support for PEP 660 editable installs (Python >=3.10,<3.14; pip >=21.3) was found. Set PYTHON to a compatible interpreter."
 }
 
 json_string() {
@@ -260,20 +301,24 @@ build_python_package() {
   [[ "${SKIP_PYTHON_BUILD}" -eq 1 ]] && { log "skipping Python package build"; return 0; }
   run "${PYTHON_BIN}" -m pip install -e ".[ui]"
 }
-
 build_desktop_app() {
   [[ "${SKIP_DESKTOP_BUILD}" -eq 1 ]] && { log "skipping Tauri desktop build"; return 0; }
   command -v npm >/dev/null 2>&1 || die "npm not found"
 
   if [[ ! -d "${DESKTOP_DIR}/node_modules" ]]; then
-    log "desktop node_modules missing; installing from lockfile"
-    (cd "${DESKTOP_DIR}" && run npm ci)
+    if [[ -f "${DESKTOP_DIR}/package-lock.json" || -f "${DESKTOP_DIR}/npm-shrinkwrap.json" ]]; then
+      log "desktop node_modules missing; installing from lockfile"
+      (cd "${DESKTOP_DIR}" && run npm ci)
+    else
+      log "desktop node_modules missing; installing declared dependencies"
+      (cd "${DESKTOP_DIR}" && run npm install)
+    fi
   fi
 
   log "cleaning Tauri build cache"
   run rm -rf "${DESKTOP_DIR}/src-tauri/target/release/bundle"
 
-  (cd "${DESKTOP_DIR}" && run npm run tauri -- build)
+  (cd "${DESKTOP_DIR}" && CI=true run npm run tauri -- build)
 }
 
 latest_dmg() {
