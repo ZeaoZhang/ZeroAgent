@@ -773,6 +773,11 @@ function extractAndRenderSummary(container, text) {
 function stripVisibleToolProtocol(text) {
   return String(text || '')
     .replace(/^\s*TURN\s+\d+\s*:\s*TOOL:\s*`?[^`\s]+`?\s*ARGS?:\s*$/gim, '')
+    // Strip verbose runner output "Tool: `name`  args:" plus its text code block.
+    // The same tool call is already rendered as a folded TOOL_CALL segment,
+    // so showing it again in the final assistant text would duplicate it
+    // (e.g. the last-turn complete_task args were printed twice).
+    .replace(/^\s*Tool:\s*`[^`\s]+`\s+args:\s*\n```text\s*\n[\s\S]*?```\s*\n?/gim, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
@@ -1095,7 +1100,16 @@ async function deleteSession(id) {
   }
 
   if (sess.bridgeSessionId) {
-    await window.zeroAgent.rpc('session/delete', { sessionId: sess.bridgeSessionId });
+    try {
+      await window.zeroAgent.rpc('session/delete', { sessionId: sess.bridgeSessionId });
+    } catch (err) {
+      // If the bridge no longer knows this session (e.g. the backend was
+      // restarted and its in-memory map was reset), drop the local session
+      // instead of blocking deletion with a 404.
+      if (!(err && (err.status === 404 || /not found/i.test(err.message || '')))) {
+        throw err;
+      }
+    }
   }
 
   const keys = [...state.sessions.keys()];
