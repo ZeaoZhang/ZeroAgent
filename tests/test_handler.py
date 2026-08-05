@@ -901,7 +901,7 @@ class TestBaseHandlerDoNoTool:
         assert len(mock_handler.evidence_ledger.records) == 1
         record = mock_handler.evidence_ledger.records[0]
         assert record.tool_name == "echo"
-        assert record.status == "success"
+        assert record.status == "unknown"
         assert record.kind == "system"
 
     def test_bad_json_does_not_record_evidence(
@@ -981,6 +981,146 @@ class TestBaseHandlerDoNoTool:
         assert "state: TaskMode.EXECUTING" in prompt
         assert "recent_evidence:" in prompt
         assert "tool=file_read" in prompt
+        assert "ref=1" in prompt
+
+    def test_completion_evidence_catalog_formats_global_refs(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        mock_handler.evidence_ledger = EvidenceLedger(records=[
+            EvidenceRecord(1, "file_read", "success", "read", "read config"),
+            EvidenceRecord(2, "code_run", "error", "execute", "failed tests"),
+            EvidenceRecord(3, "file_write", "success", "write", "write output"),
+            EvidenceRecord(4, "echo", "success", "system", "ignored system"),
+        ])
+
+        assert mock_handler._completion_evidence_catalog() == (
+            "Available successful evidence_refs:\n"
+            "ref=1 turn=1 tool=file_read kind=read summary=read config\n"
+            "ref=3 turn=3 tool=file_write kind=write summary=write output"
+        )
+
+        mock_handler.evidence_ledger = EvidenceLedger(records=[{
+            "turn": 5,
+            "tool_name": "web_scan",
+            "status": "success",
+            "kind": "web",
+            "summary": "dict result",
+        }])
+        assert mock_handler._completion_evidence_catalog() == (
+            "Available successful evidence_refs:\n"
+            "ref=1 turn=5 tool=web_scan kind=web summary=dict result"
+        )
+        checkpoint = mock_handler._contract_checkpoint()
+        assert (
+            "ref=1 turn=5 tool=web_scan status=success kind=web "
+            "summary=dict result"
+        ) in checkpoint
+
+        mock_handler.evidence_ledger = EvidenceLedger()
+        assert mock_handler._completion_evidence_catalog() == (
+            "Available successful evidence_refs: none. Collect successful "
+            "read/write/execute/web/verify evidence before retrying."
+        )
+
+    def test_complete_task_rejection_budget_exits_and_successful_tool_resets(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        _set_execution_contract(mock_handler)
+        _add_success_evidence(mock_handler)
+
+        first = _exhaust(mock_handler.dispatch(
+            "complete_task", {"answer": "Done", "evidence_refs": [99]}, MockResponse(),
+        ))
+        second = _exhaust(mock_handler.dispatch(
+            "complete_task", {"answer": "Done", "evidence_refs": [99]}, MockResponse(),
+        ))
+        third = _exhaust(mock_handler.dispatch(
+            "complete_task", {"answer": "Done", "evidence_refs": [99]}, MockResponse(),
+        ))
+
+        assert first.action is StepAction.CONTINUE
+        assert second.action is StepAction.CONTINUE
+        assert third.action is StepAction.FAIL
+        assert third.terminal_status is TerminalStatus.PROTOCOL_ERROR
+        assert third.reason == "complete_task_retry_limit"
+
+        def failed_correction(_args, _response, _handler):
+            if False:
+                yield None
+            return {"status": "error"}
+
+        mock_handler.registry.register(ToolDefinition(
+            name="failed_correction",
+            description="",
+            parameters={"type": "object", "properties": {}},
+            handler=failed_correction,
+        ))
+        _exhaust(mock_handler.dispatch("failed_correction", {}, MockResponse()))
+        after_failed = _exhaust(mock_handler.dispatch(
+            "complete_task", {"answer": "Done", "evidence_refs": [99]}, MockResponse(),
+        ))
+        assert after_failed.action is StepAction.FAIL
+
+        def successful_correction(_args, _response, _handler):
+            if False:
+                yield None
+            return {"status": "success"}
+
+        mock_handler.registry.register(ToolDefinition(
+            name="successful_correction",
+            description="",
+            parameters={"type": "object", "properties": {}},
+            handler=successful_correction,
+        ))
+        _exhaust(mock_handler.dispatch("successful_correction", {}, MockResponse()))
+        after_success = _exhaust(mock_handler.dispatch(
+            "complete_task", {"answer": "Done", "evidence_refs": [99]}, MockResponse(),
+        ))
+        assert after_success.action is StepAction.CONTINUE
+
+    def test_echo_does_not_reset_completion_rejection_budget(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        _set_execution_contract(mock_handler)
+        _add_success_evidence(mock_handler)
+        for _ in range(2):
+            outcome = _exhaust(mock_handler.dispatch(
+                "complete_task", {"answer": "Done", "evidence_refs": [99]}, MockResponse(),
+            ))
+            assert outcome.action is StepAction.CONTINUE
+
+        _exhaust(mock_handler.dispatch("echo", {"message": "retry"}, MockResponse()))
+        third = _exhaust(mock_handler.dispatch(
+            "complete_task", {"answer": "Done", "evidence_refs": [99]}, MockResponse(),
+        ))
+
+        assert third.action is StepAction.FAIL
+        assert third.terminal_status is TerminalStatus.PROTOCOL_ERROR
+        assert third.reason == "complete_task_retry_limit"
+
+    def test_non_array_completion_refs_use_rejection_budget(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        _set_execution_contract(mock_handler)
+        _add_success_evidence(mock_handler)
+
+        outcomes = [
+            _exhaust(mock_handler.dispatch(
+                "complete_task", {"answer": "Done", "evidence_refs": value}, MockResponse(),
+            ))
+            for value in (99, {"ref": 1}, "1")
+        ]
+
+        assert outcomes[0].action is StepAction.CONTINUE
+        assert "Available successful evidence_refs:" in outcomes[0].next_prompt
+        assert outcomes[1].action is StepAction.CONTINUE
+        assert outcomes[2].action is StepAction.FAIL
+        assert outcomes[2].terminal_status is TerminalStatus.PROTOCOL_ERROR
+        assert outcomes[2].reason == "complete_task_retry_limit"
 
     def test_action_intent_retry_budget_exits(
         self,

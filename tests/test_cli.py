@@ -23,6 +23,7 @@ def test_load_config_writes_max_turns_override(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("ZA_LLM_API_BASE", "https://api.openai.com/v1")
     monkeypatch.setenv("ZA_LLM_MODEL", "test-model")
     monkeypatch.setenv("ZA_MAX_TURNS", "80")
+    monkeypatch.setenv("ZA_CONFIG_PATH", str(tmp_path / "missing-config.yaml"))
 
     config = _load_config(argparse.Namespace(
         config=None,

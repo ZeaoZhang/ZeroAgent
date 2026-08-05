@@ -11,11 +11,14 @@ AgentConfig: 顶层 agent 配置.
 """
 
 from __future__ import annotations
+import re
 
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+from zero_agent.core.exceptions import ConfigError
 
 # 配置文件 mtime 缓存，用于热加载检测
 _config_mtime: dict[str, int] = {}
@@ -207,8 +210,26 @@ class AgentConfig:
                 for k in ("glm", "minimax", "kimi", "qwen", "deepseek")
             ):
                 return "zh"
-
         return "en"
+
+    def validate(self) -> None:
+        """Reject invalid backend selection before creating LLM sessions."""
+        if not self.llm_backends:
+            raise ConfigError("no LLM backends configured")
+        if self.default_backend == "":
+            self.default_backend = next(iter(self.llm_backends))
+        elif self.default_backend not in self.llm_backends:
+            available = ", ".join(sorted(self.llm_backends))
+            raise ConfigError(
+                f"invalid default backend '{self.default_backend}'; available: {available}"
+            )
+        for name in self.failover_backends:
+            if name not in self.llm_backends:
+                available = ", ".join(sorted(self.llm_backends))
+                raise ConfigError(
+                    f"invalid failover backend '{name}'; available: {available}"
+                )
+
 
     @classmethod
     def from_yaml(
@@ -342,18 +363,22 @@ class AgentConfig:
 
     @classmethod
     def _from_dict(cls, data: dict) -> "AgentConfig":
-        """从已解析的字典构建 AgentConfig（内部方法）.
-
-        Args:
-            data: 配置字典，格式与 YAML 文件一致.
-
-        Returns:
-            AgentConfig 实例.
-        """
+        """Build AgentConfig from parsed YAML data."""
         data = data or {}
         backends: dict[str, LLMBackendConfig] = {}
+        env_pattern = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
         for name, cfg in data.get("llm_backends", {}).items():
-            backends[name] = LLMBackendConfig(name=name, **cfg)
+            backend_data = dict(cfg or {})
+            api_key = backend_data.get("api_key")
+            if isinstance(api_key, str):
+                match = env_pattern.fullmatch(api_key)
+                if match:
+                    env_name = match.group(1)
+                    resolved = os.environ.get(env_name, "")
+                    if not resolved:
+                        raise ConfigError(f"missing environment variable: {env_name}")
+                    backend_data["api_key"] = resolved
+            backends[name] = LLMBackendConfig(name=name, **backend_data)
 
         return cls(
             llm_backends=backends,

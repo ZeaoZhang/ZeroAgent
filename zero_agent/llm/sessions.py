@@ -20,7 +20,12 @@ from zero_agent.core.interruption import (
     append_interruption_marker,
     classify_interruption,
 )
-from zero_agent.llm.base import MockResponse, normalize_stop_reason
+from zero_agent.llm.base import (
+    MockResponse,
+    extract_usage_metrics,
+    normalize_stop_reason,
+    usage_has_cache_metrics,
+)
 from zero_agent.llm.converters import msgs_claude_to_openai
 
 
@@ -91,6 +96,7 @@ class LiteLLMSession:
         config: LLMBackendConfig,
         log_dir: Optional[str] = None,
         sessions_dir: Optional[str] = None,
+        session_log_path: Optional[str] = None,
     ) -> None:
         """初始化 LLM 会话.
 
@@ -105,10 +111,11 @@ class LiteLLMSession:
         self.system = ""
         self.name = config.name or config.model
         self._context_window = config.context_window
-        self._cut_msg_interval = 25
-        self._trim_keep_rate = 0.3
         self._log_dir = log_dir
         self._sessions_dir = sessions_dir
+        self._session_log_path = session_log_path
+        self._response_log_closed = False
+        self._response_log_lock = threading.Lock()
         self.temperature = config.temperature
         self.max_tokens = config.max_tokens
         self.tools: Optional[List[Dict[str, Any]]] = None
@@ -117,19 +124,44 @@ class LiteLLMSession:
         # 资源使用追踪
         self._total_input_tokens: int = 0
         self._total_output_tokens: int = 0
+        self._total_cache_read_tokens: int = 0
+        self._total_cache_creation_tokens: int = 0
+        self._total_cache_miss_tokens: int = 0
         self._total_cached_tokens: int = 0
         self._total_requests: int = 0
+        self._cache_metrics_available: bool = False
+        self._cut_msg_interval = 25
+        self._trim_keep_rate = 0.3
 
         # DeepSeek 模型有更大的上下文窗口
         if "deepseek" in config.model.lower():
             self._context_window = max(self._context_window, 70000)
-            self._cut_msg_interval = 25
-            self._trim_keep_rate = 0.3
 
     def reset_tool_protocol_cache(self) -> None:
         """Clear the text-tool protocol marker."""
         self._last_tools_json = ""
 
+    @property
+    def log_path(self) -> str | None:
+        if self._session_log_path:
+            return self._session_log_path
+        if self._sessions_dir:
+            return os.path.join(
+                os.path.abspath(self._sessions_dir),
+                f"model_responses_{os.getpid()}.txt",
+            )
+        return None
+
+    @log_path.setter
+    def log_path(self, value: str | None) -> None:
+        self._session_log_path = value
+
+
+    def close_response_log(self) -> None:
+        """Permanently disable response-log writes for this session."""
+        with self._response_log_lock:
+            self._response_log_closed = True
+            self._session_log_path = None
     @property
     def last_tools(self) -> str:
         """Text-tool protocol marker; native-only mode leaves it empty."""
@@ -1123,76 +1155,54 @@ class LiteLLMSession:
     # ---- LLM 调用日志 ----
 
     def _record_usage(self, usage: Any, streamed_text: str = "") -> None:
-        """记录 LLM 调用的 token 使用和缓存命中统计.
-
-        Args:
-            usage: litellm response 的 usage 对象.
-            streamed_text: 流式调用时收集的文本内容，用于估算 output tokens.
-        """
+        """Record normalized token usage and cache metadata."""
         if usage is None:
             if streamed_text:
-                # 流式调用可能没有 usage 对象，从文本长度估算
-                estimated = max(len(streamed_text) // 3, 1)
-                self._total_output_tokens += estimated
+                self._total_output_tokens += max(len(streamed_text) // 3, 1)
             self._total_requests += 1
             return
 
-        inp = getattr(usage, "prompt_tokens", 0)
-        out = getattr(usage, "completion_tokens", 0)
-
-        # Anthropic 缓存 tokens
-        cache_creation = getattr(usage, "cache_creation_input_tokens", 0)
-        cache_read = getattr(usage, "cache_read_input_tokens", 0)
-
-        # OpenAI 缓存 tokens
-        if not cache_read:
-            details = getattr(usage, "prompt_tokens_details", None) or {}
-            if isinstance(details, dict):
-                cache_read = details.get("cached_tokens", 0)
-        if not cache_read:
-            details = getattr(usage, "input_tokens_details", None) or {}
-            if isinstance(details, dict):
-                cache_read = details.get("cached_tokens", 0)
-
-        self._total_input_tokens += inp
-        self._total_output_tokens += out
-        self._total_cached_tokens += cache_read + cache_creation
+        metrics = extract_usage_metrics(usage)
+        self._total_input_tokens += metrics["input_tokens"]
+        self._total_output_tokens += metrics["output_tokens"]
+        self._total_cache_read_tokens += metrics["cache_read_tokens"]
+        self._total_cache_creation_tokens += metrics["cache_creation_tokens"]
+        self._total_cache_miss_tokens += metrics["cache_miss_tokens"]
+        self._total_cached_tokens = self._total_cache_read_tokens
+        self._cache_metrics_available = (
+            self._cache_metrics_available or usage_has_cache_metrics(usage)
+        )
         self._total_requests += 1
 
-        # 打印资源使用信息
-        parts = [f"[Usage] #{self._total_requests} input={inp}"]
-        if out:
-            parts.append(f"output={out}")
-        if cache_read:
-            parts.append(f"cache_read={cache_read}")
-        if cache_creation:
-            parts.append(f"cache_create={cache_creation}")
-        if self._total_cached_tokens:
-            hit_rate = (
-                self._total_cached_tokens
-                / max(self._total_input_tokens, 1)
-                * 100
-            )
+        parts = [
+            f"[Usage] #{self._total_requests} input={metrics['input_tokens']}"
+        ]
+        if metrics["output_tokens"]:
+            parts.append(f"output={metrics['output_tokens']}")
+        if metrics["cache_read_tokens"]:
+            parts.append(f"cache_read={metrics['cache_read_tokens']}")
+        if metrics["cache_creation_tokens"]:
+            parts.append(f"cache_create={metrics['cache_creation_tokens']}")
+        if self._cache_metrics_available:
+            denominator = self._total_cache_read_tokens + self._total_cache_miss_tokens
+            hit_rate = self._total_cache_read_tokens / denominator * 100 if denominator else 0.0
             parts.append(f"cumulative_cache_hit={hit_rate:.1f}%")
         print(" ".join(parts))
 
     @property
     def usage_stats(self) -> dict:
-        """获取累计资源使用统计.
-
-        Returns:
-            包含 input/output/cached/requests 的统计字典.
-        """
+        """Return cumulative input/output/cache usage statistics."""
+        denominator = self._total_cache_read_tokens + self._total_cache_miss_tokens
         return {
             "total_requests": self._total_requests,
             "total_input_tokens": self._total_input_tokens,
             "total_output_tokens": self._total_output_tokens,
-            "total_cached_tokens": self._total_cached_tokens,
-            "cache_hit_rate": (
-                self._total_cached_tokens
-                / max(self._total_input_tokens, 1)
-                * 100
-            ),
+            "total_cached_tokens": self._total_cache_read_tokens,
+            "total_cache_read_tokens": self._total_cache_read_tokens,
+            "total_cache_creation_tokens": self._total_cache_creation_tokens,
+            "total_cache_miss_tokens": self._total_cache_miss_tokens,
+            "cache_hit_rate": self._total_cache_read_tokens / denominator * 100 if denominator else 0.0,
+            "cache_metrics_available": self._cache_metrics_available,
         }
 
     def _write_llm_log(self, label: str, content: str) -> None:
@@ -1242,39 +1252,41 @@ class LiteLLMSession:
             messages: The message list sent to the LLM for this turn.
             mock: The MockResponse from the LLM.
         """
-        import time as _time
+        with self._response_log_lock:
+            if self._response_log_closed or (
+                not self._sessions_dir and not self._session_log_path
+            ):
+                return
+            if self._session_log_path:
+                log_path = self._session_log_path
+                os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
+            else:
+                os.makedirs(self._sessions_dir, exist_ok=True)
+                log_path = os.path.join(self._sessions_dir, f"model_responses_{os.getpid()}.txt")
 
-        if not self._sessions_dir:
-            return
-        os.makedirs(self._sessions_dir, exist_ok=True)
-        log_path = os.path.join(self._sessions_dir, f"model_responses_{os.getpid()}.txt")
+            prompt_msg = messages[-1] if messages else {}
+            blocks: List[Dict[str, Any]] = []
+            if mock.content:
+                blocks.append({"type": "text", "text": mock.content})
+            for tc in (mock.tool_calls or []):
+                try:
+                    args = json.loads(tc.function.arguments)
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                blocks.append({
+                    "type": "tool_use",
+                    "name": tc.function.name,
+                    "input": args,
+                    "id": getattr(tc, "id", ""),
+                })
+            if mock.thinking:
+                blocks.append({"type": "thinking", "thinking": mock.thinking})
 
-        # Prompt: last message in the list (user or tool continuation)
-        prompt_msg = messages[-1] if messages else {}
-
-        # Response: content blocks in the format continue_cmd expects
-        blocks: List[Dict[str, Any]] = []
-        if mock.content:
-            blocks.append({"type": "text", "text": mock.content})
-        for tc in (mock.tool_calls or []):
+            ts = _time.strftime("%Y-%m-%d %H:%M:%S")
             try:
-                args = json.loads(tc.function.arguments)
-            except (json.JSONDecodeError, TypeError):
-                args = {}
-            blocks.append({
-                "type": "tool_use",
-                "name": tc.function.name,
-                "input": args,
-                "id": getattr(tc, "id", ""),
-            })
-        if mock.thinking:
-            blocks.append({"type": "thinking", "thinking": mock.thinking})
-
-        ts = _time.strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"=== Prompt === {ts}\n"
-                        f"{json.dumps(prompt_msg, ensure_ascii=False)}\n")
-                f.write(f"=== Response === {ts}\n{repr(blocks)}\n")
-        except Exception:
-            pass
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"=== Prompt === {ts}\n"
+                            f"{json.dumps(prompt_msg, ensure_ascii=False)}\n")
+                    f.write(f"=== Response === {ts}\n{repr(blocks)}\n")
+            except Exception:
+                pass

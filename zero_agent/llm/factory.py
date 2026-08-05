@@ -31,6 +31,7 @@ class LLMFactory:
         backend_config: LLMBackendConfig,
         log_dir: str | None = None,
         sessions_dir: str | None = None,
+        session_log_path: str | None = None,
     ) -> LiteLLMSession | TextToolSession:
         """创建 LLM 会话.
 
@@ -49,17 +50,14 @@ class LLMFactory:
             ConfigError: 配置不完整（如缺少 api_key）.
         """
         if not backend_config.api_key:
-            raise ConfigError(
-                f"LLM 后端 '{backend_config.name}' 缺少 api_key"
-            )
+            raise ConfigError(f"LLM 后端 '{backend_config.name}' 缺少 api_key")
         if not backend_config.model:
-            raise ConfigError(
-                f"LLM 后端 '{backend_config.name}' 缺少 model"
-            )
+            raise ConfigError(f"LLM 后端 '{backend_config.name}' 缺少 model")
         session = LiteLLMSession(
             backend_config,
             log_dir=log_dir,
             sessions_dir=sessions_dir,
+            session_log_path=session_log_path,
         )
         if getattr(backend_config, "tool_protocol", "native") == "text":
             session = TextToolSession(session, auto_save_tokens=True)
@@ -68,121 +66,72 @@ class LLMFactory:
     @staticmethod
     def create_from_config(
         config: AgentConfig,
+        session_log_path: str | None = None,
     ) -> Union[LiteLLMSession, TextToolSession, AutoFailoverSession]:
-        """从 AgentConfig 创建 LLM 会话.
-
-        当配置了 failover_backends 时，返回 AutoFailoverSession 包装器.
-
-        Args:
-            config: Agent 顶层配置.
-
-        Returns:
-            LiteLLMSession, TextToolSession, 或 AutoFailoverSession 实例.
-
-        Raises:
-            ConfigError: 没有可用的 LLM 后端配置.
-        """
-        if not config.llm_backends:
-            raise ConfigError("没有配置任何 LLM 后端")
-
+        """Create the primary session from validated configuration."""
+        config.validate()
         register_model_cost_map(config.litellm_model_cost_map)
-        primary_session = LLMFactory._get_primary_session(config)
-
+        primary_session = LLMFactory._get_primary_session(config, session_log_path=session_log_path)
         if config.failover_backends:
-            return LLMFactory._wrap_failover(primary_session, config)
-
+            return LLMFactory._wrap_failover(
+                primary_session, config, session_log_path=session_log_path
+            )
         return primary_session
 
     @staticmethod
     def create_all_sessions(
         config: AgentConfig,
+        session_log_path: str | None = None,
     ) -> Dict[str, Union[LiteLLMSession, TextToolSession, AutoFailoverSession]]:
-        """创建所有已配置后端的独立会话.
-
-        当配置了 failover_backends 时，default 后端会被包装为
-        AutoFailoverSession.
-
-        Args:
-            config: Agent 顶层配置.
-
-        Returns:
-            后端名称 → session 的字典.
-
-        Raises:
-            ConfigError: 没有可用的 LLM 后端配置.
-        """
-        if not config.llm_backends:
-            raise ConfigError("没有配置任何 LLM 后端")
-
+        """Create every configured backend session."""
+        config.validate()
         register_model_cost_map(config.litellm_model_cost_map)
         sessions: Dict[str, Union[LiteLLMSession, TextToolSession, AutoFailoverSession]] = {}
         for name, backend_cfg in config.llm_backends.items():
-            session = LLMFactory.create_session(
+            sessions[name] = LLMFactory.create_session(
                 backend_cfg,
                 log_dir=config.log_dir,
                 sessions_dir=config.sessions_dir,
+                session_log_path=session_log_path,
             )
-            sessions[name] = session
 
         if config.failover_backends:
-            primary_name = config.default_backend or next(
-                iter(config.llm_backends.keys())
-            )
-            primary = sessions.get(primary_name)
-            if primary is not None and not isinstance(primary, AutoFailoverSession):
+            primary_name = config.default_backend
+            primary = sessions[primary_name]
+            if not isinstance(primary, AutoFailoverSession):
                 backups = [
                     sessions[name]
                     for name in config.failover_backends
-                    if name in sessions
-                    and name != primary_name
+                    if name != primary_name
                     and isinstance(sessions[name], (LiteLLMSession, TextToolSession))
                 ]
                 if backups:
                     sessions[primary_name] = AutoFailoverSession(
                         primary=primary,
                         backups=backups,
-                        health_check_interval=LLMFactory._get_health_interval(
-                            config, primary_name
-                        ),
+                        health_check_interval=LLMFactory._get_health_interval(config, primary_name),
                     )
-
         return sessions
 
     @staticmethod
     def _get_primary_session(
         config: AgentConfig,
+        session_log_path: str | None = None,
     ) -> Union[LiteLLMSession, TextToolSession]:
-        """获取主 session.
-
-        Args:
-            config: Agent 配置.
-
-        Returns:
-            主 LiteLLMSession 或 TextToolSession.
-        """
-        backend_cfg = config.llm_backends.get(config.default_backend)
-        if backend_cfg is None:
-            backend_cfg = next(iter(config.llm_backends.values()))
+        backend_cfg = config.llm_backends[config.default_backend]
         return LLMFactory.create_session(
             backend_cfg,
             log_dir=config.log_dir,
             sessions_dir=config.sessions_dir,
+            session_log_path=session_log_path,
         )
 
     @staticmethod
     def _wrap_failover(
         primary: Union[LiteLLMSession, TextToolSession],
         config: AgentConfig,
+        session_log_path: str | None = None,
     ) -> AutoFailoverSession:
-        """创建 AutoFailoverSession 包装器.
-
-        Args:
-            primary: 主 session (LiteLLMSession 或 TextToolSession).
-            config: Agent 配置.
-
-        Returns:
-            AutoFailoverSession 实例.
-        """
         backups: list[LiteLLMSession | TextToolSession] = []
         for name in config.failover_backends:
             if name == primary.name:
@@ -194,14 +143,12 @@ class LLMFactory:
                 backend_cfg,
                 log_dir=config.log_dir,
                 sessions_dir=config.sessions_dir,
+                session_log_path=session_log_path,
             ))
-
-        health_interval = LLMFactory._get_health_interval(config, primary.name)
-
         return AutoFailoverSession(
             primary=primary,
             backups=backups,
-            health_check_interval=health_interval,
+            health_check_interval=LLMFactory._get_health_interval(config, primary.name),
         )
 
     @staticmethod

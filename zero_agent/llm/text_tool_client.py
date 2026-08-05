@@ -115,6 +115,11 @@ class TextToolSession:
         self.last_tools = ""
         self._last_tools_json = ""
 
+
+    def close_response_log(self) -> None:
+        close = getattr(self.backend, "close_response_log", None)
+        if callable(close):
+            close()
     # ---- chat: text-protocol emulation ----
     def chat(
         self,

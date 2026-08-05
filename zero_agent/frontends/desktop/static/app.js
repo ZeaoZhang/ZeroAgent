@@ -838,6 +838,11 @@ function escapeHtml(s) {
 }
 
 // ─── Session management ──────────────────────────────────────────────────
+function mergeTokenUsage(current, incoming) {
+  if (!incoming || typeof incoming !== 'object') return current;
+  return { ...(current || {}), ...incoming };
+}
+
 function isUntitledSessionTitle(title) {
   return !title || /^new\s+chat$/i.test(String(title).trim());
 }
@@ -849,7 +854,11 @@ function createLocalSession(id, title, bridgeSessionId = id) {
     config: { ...state.defaultConfig },
     diagnostics: [],
     modelOverride: null,
-    tokenUsage: { input: 0, output: 0, total: 0, limit: 200000 },
+    tokenUsage: {
+      input: 0, output: 0, total: 0, limit: 200000,
+      cacheRead: 0, cacheCreation: 0, cacheMiss: 0,
+      cacheHitRate: 0.0, cacheMetricsAvailable: false,
+    },
     groupId: null,
   };
   getSessionRuntime(sess);
@@ -1065,11 +1074,11 @@ function resetReplacedSession(sess, replacement) {
   sess.bridgeSessionId = replacement.id || replacement.sessionId;
   sess.title = replacement.title || 'New chat';
   sess.cwd = replacement.cwd || sess.cwd;
+  sess.modelOverride = replacement.modelOverride ?? null;
   sess.messages = [];
   sess.untitled = true;
   sess.lastError = '';
-  sess.modelOverride = replacement.modelOverride ?? null;
-  sess.tokenUsage = replacement.tokenUsage || sess.tokenUsage;
+  sess.tokenUsage = mergeTokenUsage(sess.tokenUsage, replacement.tokenUsage);
   state.runtimeBySessionId.delete(sess.id);
   state.activeAgents.delete(sess.id);
   setActiveSession(sess.id);
@@ -1365,7 +1374,7 @@ function handleNotification(msg) {
 
     // Update token usage and model override if provided
     if (msg.tokenUsage) {
-      sess.tokenUsage = msg.tokenUsage;
+      sess.tokenUsage = mergeTokenUsage(sess.tokenUsage, msg.tokenUsage);
       if (isActiveSession(sess)) updateModelStatus();
     }
     if (msg.modelOverride !== undefined) {
@@ -2965,10 +2974,13 @@ function updateModelStatus() {
   const modelName = sess.modelOverride || 'Default';
   currentModelEl.textContent = modelName;
 
-  const usage = sess.tokenUsage || { total: 0, limit: 200000 };
+  const usage = sess.tokenUsage || { total: 0, limit: 200000, cacheMetricsAvailable: false, cacheHitRate: 0 };
   const totalK = Math.round(usage.total / 100) / 10;
   const limitK = Math.round(usage.limit / 1000);
-  tokenUsageEl.textContent = `${totalK}K / ${limitK}K`;
+  const cacheStatus = usage.cacheMetricsAvailable
+    ? `${Number(usage.cacheHitRate || 0).toFixed(1)}%`
+    : 'n/a';
+  tokenUsageEl.textContent = `${totalK}K / ${limitK}K · Cache: ${cacheStatus}`;
 
   const percent = usage.limit > 0 ? (usage.total / usage.limit) * 100 : 0;
   tokenUsageEl.className = 'token-info';

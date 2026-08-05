@@ -22,7 +22,7 @@ def _get_reg_path() -> str:
     return os.path.join(_get_log_dir(), "session_names.json")
 
 
-_LOG_RE = re.compile(r"^model_responses_(\d+)\.txt$")
+_LOG_RE = re.compile(r"^model_responses_(?:(\d+)|session_(sess-[0-9a-f]{12}))\.txt$")
 _lock = threading.Lock()
 
 
@@ -51,12 +51,15 @@ def _resolve_basename(basename: str):
     if os.path.isfile(p) and os.path.getsize(p) > 0:
         return p
     m = _LOG_RE.match(basename)
-    if m:
-        snaps = glob.glob(os.path.join(log_dir, f"model_responses_snapshot_{m.group(1)}_*.txt"))
-        snaps.sort(key=os.path.getmtime, reverse=True)
-        for s in snaps:
-            if os.path.getsize(s) > 0:
-                return s
+    if not m:
+        return None
+    if m.group(2):
+        return p if os.path.isfile(p) and os.path.getsize(p) > 0 else None
+    snaps = glob.glob(os.path.join(log_dir, f"model_responses_snapshot_{m.group(1)}_*.txt"))
+    snaps.sort(key=os.path.getmtime, reverse=True)
+    for s in snaps:
+        if os.path.getsize(s) > 0:
+            return s
     return None
 
 

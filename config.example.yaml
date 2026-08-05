@@ -30,7 +30,7 @@ llm_backends:
   # Claude / Anthropic Messages API through LiteLLM.
   claude:
     provider: anthropic
-    api_key: sk-ant-xxx
+    api_key: ${ANTHROPIC_API_KEY}
     api_base: https://api.anthropic.com
     model: claude-sonnet-4-6
 

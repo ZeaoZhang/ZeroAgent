@@ -12,8 +12,6 @@ Usage:
     print(f"Input: {stats.input}, Output: {stats.output}")
 """
 
-from __future__ import annotations
-
 import glob
 import os
 import re
@@ -21,6 +19,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Dict
+
+from zero_agent.llm.base import extract_usage_metrics, usage_has_cache_metrics
 
 
 @dataclass
@@ -32,10 +32,11 @@ class TokenStats:
     output: int = 0
     cache_create: int = 0
     cache_read: int = 0
+    cache_miss: int = 0
+    metrics_available: bool = False
     last_input: int = 0
     last_output: int = 0
     started_at: float = field(default_factory=time.time)
-
     def total_input_side(self) -> int:
         return self.input + self.cache_create + self.cache_read
 
@@ -43,8 +44,13 @@ class TokenStats:
         return self.input + self.output + self.cache_create + self.cache_read
 
     def cache_hit_rate(self) -> float:
-        side = self.total_input_side()
-        return (self.cache_read / side * 100.0) if side else 0.0
+        if self.metrics_available:
+            denominator = self.cache_read + self.cache_miss
+            return self.cache_read / denominator * 100.0 if denominator else 0.0
+        if self.cache_read:
+            # Legacy records counted input as uncached input.
+            return self.cache_read / (self.input + self.cache_read) * 100.0
+        return 0.0
 
     def elapsed_seconds(self) -> float:
         return max(0.0, time.time() - self.started_at)
@@ -83,37 +89,29 @@ class CostTracker:
             return dict(self._trackers)
 
     def on_llm_after(self, event: str, context: dict) -> None:
-        """HookSystem llm_after 回调.
-
-        Args:
-            event: 事件名 ("llm_after").
-            context: hook context, 包含 "usage" 字典.
-        """
         usage = context.get("usage", {})
         if not usage:
             return
 
         tname = threading.current_thread().name
         stats = self.get(tname)
-
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
-        cache_create_tokens = (
-            usage.get("cache_creation_input_tokens", 0)
-            or usage.get("cache_creation", 0)
-        )
-        cache_read_tokens = (
-            usage.get("cache_read_input_tokens", 0)
-            or usage.get("cache_read", 0)
+        metrics = extract_usage_metrics(usage)
+        canonical_available = usage.get("cache_metrics_available") if isinstance(usage, dict) else None
+        available = (
+            bool(canonical_available)
+            if canonical_available is not None
+            else usage_has_cache_metrics(usage)
         )
 
         stats.requests += 1
-        stats.input += input_tokens
-        stats.output += output_tokens
-        stats.cache_create += cache_create_tokens
-        stats.cache_read += cache_read_tokens
-        stats.last_input = input_tokens
-        stats.last_output = output_tokens
+        stats.input += metrics["input_tokens"]
+        stats.output += metrics["output_tokens"]
+        stats.cache_create += metrics["cache_creation_tokens"]
+        stats.cache_read += metrics["cache_read_tokens"]
+        stats.cache_miss += metrics["cache_miss_tokens"]
+        stats.metrics_available = stats.metrics_available or available
+        stats.last_input = metrics["input_tokens"]
+        stats.last_output = metrics["output_tokens"]
 
 
 # 匹配 litellm 日志中的 token 信息

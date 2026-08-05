@@ -10,7 +10,7 @@ import json
 import re
 from typing import TYPE_CHECKING, Any, Dict, Generator, Optional
 
-from zero_agent.core.completion import evaluate_completion
+from zero_agent.core.completion import evaluate_completion, successful_evidence_refs
 from zero_agent.core.completion_gate import CompletionGate, CompletionGateAction
 from zero_agent.core.types import (
     EvidenceLedger,
@@ -69,6 +69,7 @@ class BaseHandler:
         self.current_turn: int = 0
         self._done_hooks: list = []
         self._empty_ct: int = 0
+        self._completion_rejection_count: int = 0
         self.history_info: list = []  # 每轮摘要历史，用于上下文压缩
         self.completion_certificate = None
         self.task_contract = TaskContract(
@@ -106,6 +107,7 @@ class BaseHandler:
         也避免被误判的 retry 把可用余量用尽.
         """
         self._empty_ct = 0
+        self._completion_rejection_count = 0
         self.completion_certificate = None
         self.completion_gate.reset()
 
@@ -245,6 +247,8 @@ class BaseHandler:
         if hasattr(self, method_name):
             method = getattr(self, method_name)
             ret = yield from self._try_call_generator(method, args, response)
+            if self._successful_completion_correction(tool_name, ret):
+                self._completion_rejection_count = 0
             self._record_evidence(tool_name, args, ret)
             self._trigger_hook("tool_after", {
                 "tool_name": tool_name,
@@ -269,6 +273,8 @@ class BaseHandler:
                 if next_prompt is None:
                     next_prompt = self._default_next_prompt(args)
                 ret = StepOutcome(data, next_prompt=next_prompt, action=StepAction.CONTINUE)
+            if self._successful_completion_correction(tool_name, ret):
+                self._completion_rejection_count = 0
             self._record_evidence(tool_name, args, ret)
             self._trigger_hook("tool_after", {
                 "tool_name": tool_name,
@@ -468,14 +474,13 @@ class BaseHandler:
         evidence_refs = args.get("evidence_refs")
         if evidence_refs is None:
             evidence_refs = []
+        contract = self.task_contract
         if not isinstance(evidence_refs, list):
-            return StepOutcome(
-                {},
-                next_prompt="[System] complete_task.evidence_refs must be an array of record numbers.",
-                action=StepAction.CONTINUE,
+            self.completion_certificate = None
+            return self._rejected_completion_outcome(
+                "[System] complete_task.evidence_refs must be an array of record numbers."
             )
 
-        contract = self.task_contract
         plan_remaining = self._check_plan_completion() if contract.mode is TaskMode.PLAN else None
         if contract.mode is TaskMode.PLAN and self.plan_verify_status != "partial_accepted":
             self.plan_verify_status = load_plan_verify_status(contract)
@@ -490,11 +495,7 @@ class BaseHandler:
         )
         if certificate is None:
             self.completion_certificate = None
-            return StepOutcome(
-                {},
-                next_prompt=continuation_prompt,
-                action=StepAction.CONTINUE,
-            )
+            return self._rejected_completion_outcome(continuation_prompt)
 
         self.completion_certificate = certificate
         yield answer + "\n"
@@ -684,7 +685,7 @@ class BaseHandler:
             status = str(data.get("status") or "").lower()
             if status in {"success", "error", "interrupt"}:
                 return status
-        return "unknown" if data is None else "success"
+        return "unknown"
 
     @staticmethod
     def _summarize_evidence_args(args: Dict[str, Any]) -> str:
@@ -710,6 +711,56 @@ class BaseHandler:
             return "\n"
         return self._build_anchor_prompt()
 
+    def _rejected_completion_outcome(self, continuation_prompt: Optional[str]) -> StepOutcome:
+        if self.task_contract.mode is TaskMode.EXECUTING:
+            self._completion_rejection_count += 1
+            if self._completion_rejection_count >= 3:
+                return StepOutcome(
+                    {},
+                    action=StepAction.FAIL,
+                    reason="complete_task_retry_limit",
+                    terminal_status=TerminalStatus.PROTOCOL_ERROR,
+                )
+            next_prompt = continuation_prompt or "[System] complete_task was rejected."
+            next_prompt += "\n\n" + self._completion_evidence_catalog()
+        else:
+            next_prompt = continuation_prompt
+        return StepOutcome(
+            {},
+            next_prompt=next_prompt,
+            action=StepAction.CONTINUE,
+        )
+
+    @staticmethod
+    def _record_field(record: Any, field: str, default: Any) -> Any:
+        if isinstance(record, dict):
+            return record.get(field, default)
+        return getattr(record, field, default)
+
+    @staticmethod
+    def _successful_completion_correction(tool_name: str, outcome: StepOutcome) -> bool:
+        if tool_name in {"complete_task", "ask_user", "bad_json", "no_tool"}:
+            return False
+        return BaseHandler._evidence_status(tool_name, outcome.data) == "success"
+
+    def _completion_evidence_catalog(self, limit: int = 8) -> str:
+        evidence = successful_evidence_refs(self.evidence_ledger, limit=limit)
+        if not evidence:
+            return (
+                "Available successful evidence_refs: none. Collect successful "
+                "read/write/execute/web/verify evidence before retrying."
+            )
+        lines = ["Available successful evidence_refs:"]
+        for position, record in evidence:
+            lines.append(
+                f"ref={position} "
+                f"turn={self._record_field(record, 'turn', '?')} "
+                f"tool={self._record_field(record, 'tool_name', '?')} "
+                f"kind={self._record_field(record, 'kind', '?')} "
+                f"summary={self._record_field(record, 'summary', '')}"
+            )
+        return "\n".join(lines)
+
     def _contract_checkpoint(self) -> str:
         """Return compact task contract and recent evidence for anchor prompts."""
 
@@ -717,7 +768,10 @@ class BaseHandler:
         ledger = getattr(self, "evidence_ledger", None)
         if contract is None or ledger is None:
             return ""
-        records = list(getattr(ledger, "records", []) or [])[-8:]
+        positioned_records = list(enumerate(
+            list(getattr(ledger, "records", []) or []),
+            start=1,
+        ))[-8:]
         lines = [
             "<task_contract>",
             f"objective: {getattr(contract, 'user_request', '')}",
@@ -727,16 +781,17 @@ class BaseHandler:
         if plan_path:
             lines.append(f"plan_path: {plan_path}")
         lines.append(f"plan_verify_status: {getattr(self, 'plan_verify_status', 'missing')}")
-        if records:
+        if positioned_records:
             lines.append("recent_evidence:")
-            for record in records:
+            for position, record in positioned_records:
                 lines.append(
                     "- "
-                    f"turn={getattr(record, 'turn', '?')} "
-                    f"tool={getattr(record, 'tool_name', '?')} "
-                    f"status={getattr(record, 'status', '?')} "
-                    f"kind={getattr(record, 'kind', '?')} "
-                    f"summary={getattr(record, 'summary', '')}"
+                    f"ref={position} "
+                    f"turn={self._record_field(record, 'turn', '?')} "
+                    f"tool={self._record_field(record, 'tool_name', '?')} "
+                    f"status={self._record_field(record, 'status', '?')} "
+                    f"kind={self._record_field(record, 'kind', '?')} "
+                    f"summary={self._record_field(record, 'summary', '')}"
                 )
         else:
             lines.append("recent_evidence: none")

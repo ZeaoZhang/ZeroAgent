@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 from zero_agent.core.config import LLMBackendConfig
+from zero_agent.llm.base import extract_usage_metrics, usage_has_cache_metrics
 from zero_agent.llm.sessions import LiteLLMSession
 
 
@@ -533,3 +534,145 @@ def test_stream_chat_picks_last_non_empty_usage_and_normalizes_tool_stop(monkeyp
     assert mock.usage is usage
     assert mock.tool_protocol == "native"
     assert mock.stop_reason == "tool_use"
+
+
+def test_extract_usage_metrics_supports_anthropic_and_deepseek_aliases() -> None:
+    assert extract_usage_metrics({
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "cache_read_input_tokens": 80,
+        "cache_creation_input_tokens": 5,
+    }) == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cache_read_tokens": 80,
+        "cache_creation_tokens": 5,
+        "cache_miss_tokens": 20,
+    }
+    assert extract_usage_metrics(SimpleNamespace(
+        prompt_tokens=100,
+        completion_tokens=20,
+        prompt_cache_hit_tokens=80,
+        prompt_cache_miss_tokens=20,
+    ))["cache_read_tokens"] == 80
+
+
+def test_extract_usage_metrics_reads_nested_object_cache_details() -> None:
+    usage = SimpleNamespace(
+        input_tokens=100,
+        output_tokens=20,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=80),
+    )
+    assert usage_has_cache_metrics(usage)
+    assert extract_usage_metrics(usage)["cache_miss_tokens"] == 20
+
+
+def test_extract_usage_metrics_uses_anthropic_input_as_cache_misses() -> None:
+    usage = {
+        "input_tokens": 20,
+        "output_tokens": 5,
+        "cache_read_input_tokens": 80,
+    }
+
+    assert extract_usage_metrics(usage)["cache_miss_tokens"] == 20
+
+
+def test_close_response_log_prevents_late_worker_write(tmp_path) -> None:
+    session = LiteLLMSession(
+        LLMBackendConfig(
+            name="default",
+            provider="openai",
+            api_key="sk-test",
+            api_base="https://api.openai.com/v1",
+            model="gpt-test",
+        ),
+        session_log_path=str(tmp_path / "owned.log"),
+    )
+
+    session.close_response_log()
+    session._write_model_response_log(
+        [{"role": "user", "content": "private"}],
+        SimpleNamespace(content="private", tool_calls=[], thinking=""),
+    )
+
+    assert not (tmp_path / "owned.log").exists()
+
+
+
+def test_non_deepseek_session_uses_standard_history_trim_policy() -> None:
+    session = _make_session()
+
+    assert session._cut_msg_interval == 25
+    assert session._trim_keep_rate == 0.3
+
+
+def test_malformed_cache_metrics_remain_unavailable() -> None:
+    usage = {"prompt_tokens": 100, "cache_read": "bad"}
+
+    assert not usage_has_cache_metrics(usage)
+
+
+def test_fractional_cache_metrics_remain_unavailable() -> None:
+    usage = {"prompt_tokens": 100, "cache_read": 0.5}
+
+    assert not usage_has_cache_metrics(usage)
+    assert extract_usage_metrics(usage)["cache_read_tokens"] == 0
+
+
+def test_close_response_log_serializes_with_late_write(tmp_path) -> None:
+    session = LiteLLMSession(
+        LLMBackendConfig(
+            name="default", provider="openai", api_key="sk-test",
+            api_base="https://api.openai.com/v1", model="gpt-test",
+        ),
+        session_log_path=str(tmp_path / "owned.log"),
+    )
+    session.close_response_log()
+
+    session._write_model_response_log(
+        [{"role": "user", "content": "private"}],
+        SimpleNamespace(content="private", tool_calls=[], thinking=""),
+    )
+
+    assert not (tmp_path / "owned.log").exists()
+
+def test_extract_usage_metrics_rejects_malformed_and_negative_values() -> None:
+    assert not usage_has_cache_metrics(None)
+    assert not usage_has_cache_metrics(SimpleNamespace(prompt_tokens_details=SimpleNamespace()))
+    assert extract_usage_metrics(None) == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+        "cache_miss_tokens": 0,
+    }
+    assert extract_usage_metrics({
+        "prompt_tokens": "bad",
+        "completion_tokens": -1,
+        "cache_read": -4,
+        "cache_creation": object(),
+    }) == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+        "cache_miss_tokens": 0,
+    }
+
+
+def test_session_usage_stats_separates_cache_creation_and_miss() -> None:
+    session = _make_session()
+    session._record_usage(SimpleNamespace(
+        prompt_tokens=100,
+        completion_tokens=20,
+        prompt_cache_hit_tokens=80,
+        prompt_cache_miss_tokens=20,
+        cache_creation_input_tokens=10,
+    ))
+    stats = session.usage_stats
+    assert stats["total_cache_read_tokens"] == 80
+    assert stats["total_cache_creation_tokens"] == 10
+    assert stats["total_cache_miss_tokens"] == 20
+    assert stats["total_cached_tokens"] == 80
+    assert stats["cache_hit_rate"] == 80.0
+    assert stats["cache_metrics_available"] is True

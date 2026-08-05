@@ -96,6 +96,22 @@ class AutoFailoverSession:
             session.system = value
 
     @property
+    def log_path(self) -> str | None:
+        return getattr(self._active, "log_path", None)
+
+    @log_path.setter
+    def log_path(self, value: str | None) -> None:
+        for session in [self.primary] + self.backups:
+            if hasattr(session, "log_path"):
+                session.log_path = value
+
+    def close_response_log(self) -> None:
+        for session in [self.primary] + self.backups:
+            close = getattr(session, "close_response_log", None)
+            if callable(close):
+                close()
+
+    @property
     def fallback_count(self) -> int:
         """故障转移次数."""
         return self._fallback_count

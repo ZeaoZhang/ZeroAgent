@@ -6,7 +6,7 @@ Uses mock LLM client to test the loop flow without real API calls.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Generator, List, Optional
+from types import SimpleNamespace
 
 import pytest
 
@@ -150,6 +150,64 @@ class TestAgentLoop:
         gen = loop.run("sp", "task")
         terminal = _exhaust(gen)
         assert terminal.status is TerminalStatus.COMPLETED
+
+    def test_invalid_completion_recovers_without_exposing_control_payload(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        _set_execution_contract(mock_handler)
+        _add_success_evidence(mock_handler)
+        client = _make_recording_client([
+            _complete_response("accepted answer", [99]),
+            _complete_response("accepted answer", [1]),
+        ])
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=10,
+            verbose=True,
+        )
+
+        chunks, terminal = _drain(loop.run("system prompt", "task"))
+        visible = "".join(chunk for chunk in chunks if isinstance(chunk, str))
+
+        assert len(client.calls) == 2
+        assert terminal.status is TerminalStatus.COMPLETED
+        assert terminal.text == "accepted answer"
+        assert "Available successful evidence_refs:" in client.calls[1][0]["content"]
+        assert "ref=1" in client.calls[1][0]["content"]
+        assert client.calls[1][0]["tool_results"] == [
+            {"tool_use_id": "call_complete", "content": "{}"},
+        ]
+        assert visible.count("accepted answer") == 1
+        for hidden in ("Tool:", "complete_task", "evidence_refs", "```"):
+            assert hidden not in visible
+
+    def test_invalid_completion_stops_at_protocol_retry_limit(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        _set_execution_contract(mock_handler)
+        _add_success_evidence(mock_handler)
+        client = _make_recording_client([
+            _complete_response("Done", [99]),
+            _complete_response("Done", [99]),
+            _complete_response("Done", [99]),
+        ])
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=10,
+            verbose=True,
+        )
+
+        _, terminal = _drain(loop.run("system prompt", "task"))
+
+        assert len(client.calls) == 3
+        assert terminal.status is TerminalStatus.PROTOCOL_ERROR
+        assert terminal.reason == "complete_task_retry_limit"
 
     def test_wait_for_user_tool(self, mock_handler: BaseHandler) -> None:
         """WAIT_FOR_USER returns the original payload as a waiting terminal."""
@@ -508,6 +566,41 @@ class TestAgentLoop:
             max_str_len=200,
         )
         assert mock_handler.history_info[0] == f"[USER]: {expected}"
+
+
+    def test_usage_from_response_overlays_canonical_cache_aliases(self) -> None:
+        response = MockResponse(
+            usage={
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "prompt_cache_hit_tokens": 80,
+                "prompt_cache_miss_tokens": 20,
+                "input_tokens": 1,
+            }
+        )
+        usage = AgentLoop._usage_from_response(response)
+        assert usage["input_tokens"] == 100
+        assert usage["output_tokens"] == 20
+        assert usage["cache_read_input_tokens"] == 80
+        assert usage["cache_miss_input_tokens"] == 20
+        assert usage["cache_metrics_available"] is True
+        assert usage["prompt_tokens"] == 100
+
+    def test_usage_from_response_reads_object_shaped_nested_cache_details(self) -> None:
+        response = MockResponse(usage=SimpleNamespace(
+            input_tokens=100,
+            output_tokens=20,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=80),
+        ))
+        usage = AgentLoop._usage_from_response(response)
+        assert usage == {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cache_read_input_tokens": 80,
+            "cache_creation_input_tokens": 0,
+            "cache_miss_input_tokens": 20,
+            "cache_metrics_available": True,
+        }
 
     def test_unknown_tool_prompt_clears_tool_protocol_cache(
         self,
@@ -902,6 +995,15 @@ def _exhaust(gen: Generator) -> Any:
             next(gen)
     except StopIteration as e:
         return e.value
+
+
+def _drain(gen: Generator) -> tuple[list[Any], Any]:
+    chunks: list[Any] = []
+    try:
+        while True:
+            chunks.append(next(gen))
+    except StopIteration as stop:
+        return chunks, stop.value
 
 
 

@@ -58,6 +58,10 @@ globalThis.__testExports = {
   beginAssistantTurn,
   sendPrompt,
   setMessagesElement: (value) => { messagesEl = value; },
+  setStatusElements: (model, usage) => {
+    currentModelEl = model;
+    tokenUsageEl = usage;
+  },
 };
 `;
 vm.runInNewContext(source.slice(0, slashCommandsMarker) + testExports, context, { filename: appPath });
@@ -318,3 +322,8 @@ const deferred = () => {
   console.error(err);
   process.exitCode = 1;
 });
+
+assert.match(source, /Cache: \$\{cacheStatus\}/);
+assert.match(source, /usage\.cacheMetricsAvailable/);
+assert.match(source, /: 'n\/a'/);
+assert.match(source, /sess\.modelOverride = replacement\.modelOverride \?\? null;/)

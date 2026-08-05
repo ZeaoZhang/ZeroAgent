@@ -32,11 +32,10 @@ from zero_agent.tools.registry import ToolRegistry
 
 class _LLMFactoryProxy:
     """Lazy proxy so CLI config is loaded before importing LiteLLM."""
-
-    def create_all_sessions(self, config: AgentConfig):
+    def create_all_sessions(self, config: AgentConfig, session_log_path: str | None = None):
         from zero_agent.llm.factory import LLMFactory as RealLLMFactory
 
-        return RealLLMFactory.create_all_sessions(config)
+        return RealLLMFactory.create_all_sessions(config, session_log_path=session_log_path)
 
 
 LLMFactory = _LLMFactoryProxy()
@@ -44,8 +43,12 @@ LLMFactory = _LLMFactoryProxy()
 _USAGE_COUNTER_ATTRS = (
     "_total_input_tokens",
     "_total_output_tokens",
+    "_total_cache_read_tokens",
+    "_total_cache_creation_tokens",
+    "_total_cache_miss_tokens",
     "_total_cached_tokens",
     "_total_requests",
+    "_cache_metrics_available",
 )
 
 _RUNTIME_CONFIG_FIELDS = (
@@ -158,21 +161,19 @@ def _reset_tool_protocol_cache(client: Any) -> None:
 
 def _copy_usage_counters(old_client: Any, new_client: Any) -> None:
     """Copy token usage counters between concrete active sessions."""
-
     old_owner = _active_usage_owner(old_client)
     new_owner = _active_usage_owner(new_client)
     for attr in _USAGE_COUNTER_ATTRS:
         if hasattr(new_owner, attr):
-            setattr(new_owner, attr, getattr(old_owner, attr, 0))
+            setattr(new_owner, attr, getattr(old_owner, attr, False if attr == "_cache_metrics_available" else 0))
 
 
 def _zero_usage_counters(client: Any) -> None:
     """Reset token usage counters on every concrete session in a wrapper stack."""
-
     for layer in _iter_session_layers(client):
         for attr in _USAGE_COUNTER_ATTRS:
             if hasattr(layer, attr):
-                setattr(layer, attr, 0)
+                setattr(layer, attr, False if attr == "_cache_metrics_available" else 0)
 
 
 def _migrate_client_state(old_client: Any, new_client: Any, *, preserve_usage: bool) -> None:
@@ -230,6 +231,7 @@ class ZeroAgent:
         handler: Optional[BaseHandler] = None,
         registry: Optional[ToolRegistry] = None,
         hooks: Optional[HookSystem] = None,
+        session_log_path: str | None = None,
     ) -> None:
         """初始化 ZeroAgent.
 
@@ -238,16 +240,25 @@ class ZeroAgent:
             handler: 自定义工具分发器，None 时创建 BaseHandler.
             registry: 自定义工具注册中心，None 时自动加载内置工具.
             hooks: 自定义 HookSystem，None 时创建默认 HookSystem.
+            session_log_path: Optional explicit response-log path.
         """
         self.config = config or load_default_config()
+        self._session_log_path = session_log_path
+        self._response_log_retired = False
         self.hooks = hooks or HookSystem()
         self._register_builtin_plugins()
 
         # 1. 工具注册中心
         self.registry = registry or ToolRegistry.with_builtins(self.config)
 
-        # 2. LLM 会话：创建所有独立 session + 当前活跃 client
-        self._sessions = LLMFactory.create_all_sessions(self.config)
+        self._sessions = (
+            LLMFactory.create_all_sessions(
+                self.config,
+                session_log_path=self._session_log_path,
+            )
+            if self._session_log_path is not None
+            else LLMFactory.create_all_sessions(self.config)
+        )
         default_name = self.config.default_backend
         self.client = self._sessions.get(default_name)
         if self.client is None:
@@ -279,6 +290,18 @@ class ZeroAgent:
     def set_config_path(self, path: Optional[str]) -> None:
         """设置配置文件的路径，用于热重载检测."""
         self._config_path = str(path) if path is not None else None
+
+    def close_response_log(self) -> None:
+        """Permanently retire response logging across future config reloads."""
+        self._response_log_retired = True
+        self._session_log_path = None
+        for client in self._sessions.values():
+            close = getattr(client, "close_response_log", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
     def reload_config(self) -> bool:
         """若配置文件已变更则原子热重载配置并重建 LLM session.
@@ -319,7 +342,19 @@ class ZeroAgent:
         old_active_name = self._get_active_backend_name()
 
         try:
-            new_sessions = LLMFactory.create_all_sessions(new_config)
+            new_sessions = (
+                LLMFactory.create_all_sessions(
+                    new_config,
+                    session_log_path=self._session_log_path,
+                )
+                if self._session_log_path is not None
+                else LLMFactory.create_all_sessions(new_config)
+            )
+            if self._response_log_retired:
+                for session in new_sessions.values():
+                    close = getattr(session, "close_response_log", None)
+                    if callable(close):
+                        close()
             target_name = self._select_reload_backend(old_active_name, new_config, new_sessions)
             new_client = new_sessions[target_name]
             _migrate_client_state(old_client, new_client, preserve_usage=True)

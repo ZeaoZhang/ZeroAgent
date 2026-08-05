@@ -7,6 +7,7 @@ MockResponse / MockToolCall / MockFunction: 协议无关的响应包装，
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Dict, Generator, List, Literal, Optional
 
@@ -226,6 +227,148 @@ def _is_protected_stop_reason(stop_reason: str) -> bool:
 def _extract_usage(raw: Any) -> Any:
     if raw is None:
         return None
-    if isinstance(raw, dict):
+    if isinstance(raw, Mapping):
         return raw.get("usage")
     return getattr(raw, "usage", None)
+
+_USAGE_MISSING = object()
+_USAGE_ZERO = {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_miss_tokens": 0,
+}
+
+
+def _usage_value(usage: Any, path: tuple[str, ...]) -> Any:
+    """Read one usage field from either mappings or attribute objects."""
+    current = usage
+    for key in path:
+        if isinstance(current, Mapping):
+            current = current.get(key, _USAGE_MISSING)
+        else:
+            current = getattr(current, key, _USAGE_MISSING)
+        if current is _USAGE_MISSING:
+            return _USAGE_MISSING
+    return current
+
+
+def _first_usage_value(usage: Any, aliases: tuple[tuple[str, ...], ...]) -> Any:
+    for path in aliases:
+        value = _usage_value(usage, path)
+        if value is not _USAGE_MISSING and value is not None:
+            return value
+    return None
+
+
+def _first_usage_value_with_path(
+    usage: Any, aliases: tuple[tuple[str, ...], ...]
+) -> tuple[Any, tuple[str, ...] | None]:
+    for path in aliases:
+        value = _usage_value(usage, path)
+        if value is not _USAGE_MISSING and value is not None:
+            return value, path
+    return None, None
+
+
+def _usage_int(value: Any) -> int:
+    """Return a non-negative integral token count, or zero when invalid."""
+    if value is None or isinstance(value, bool):
+        return 0
+    if isinstance(value, str):
+        value = value.strip()
+        if not value.isdecimal():
+            return 0
+        return int(value)
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    try:
+        return number if number >= 0 and value == number else 0
+    except Exception:
+        return 0
+
+
+_INPUT_USAGE_ALIASES = (("prompt_tokens",), ("input_tokens",))
+_OUTPUT_USAGE_ALIASES = (("completion_tokens",), ("output_tokens",))
+_CACHE_READ_USAGE_ALIASES = (
+    ("cache_read_input_tokens",),
+    ("prompt_cache_hit_tokens",),
+    ("cache_read",),
+    ("prompt_tokens_details", "cached_tokens"),
+    ("input_tokens_details", "cached_tokens"),
+)
+_CACHE_CREATION_USAGE_ALIASES = (
+    ("cache_creation_input_tokens",),
+    ("cache_creation",),
+    ("cache_write",),
+    ("prompt_tokens_details", "cache_creation_tokens"),
+    ("prompt_tokens_details", "cache_write_tokens"),
+    ("input_tokens_details", "cache_creation_tokens"),
+    ("input_tokens_details", "cache_write_tokens"),
+)
+_CACHE_MISS_USAGE_ALIASES = (
+    ("prompt_cache_miss_tokens",),
+    ("cache_miss_input_tokens",),
+    ("cache_miss",),
+)
+
+
+def _has_valid_cache_value(
+    usage: Any, aliases: tuple[tuple[str, ...], ...]
+) -> bool:
+    value = _first_usage_value(usage, aliases)
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, str):
+        return value.strip().isdecimal()
+    try:
+        number = int(value)
+        return number >= 0 and value == number
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def usage_has_cache_metrics(usage: Any) -> bool:
+    """Return whether provider usage exposed valid cache metadata."""
+    if usage is None:
+        return False
+    return any(
+        _has_valid_cache_value(usage, aliases)
+        for aliases in (
+            _CACHE_READ_USAGE_ALIASES,
+            _CACHE_CREATION_USAGE_ALIASES,
+            _CACHE_MISS_USAGE_ALIASES,
+        )
+    )
+
+
+def extract_usage_metrics(usage: Any) -> dict[str, int]:
+    """Normalize provider/LiteLLM usage into canonical token metrics."""
+    result = dict(_USAGE_ZERO)
+    if usage is None or isinstance(usage, (str, bytes, int, float, bool)):
+        return result
+
+    input_value, input_path = _first_usage_value_with_path(usage, _INPUT_USAGE_ALIASES)
+    output_value = _first_usage_value(usage, _OUTPUT_USAGE_ALIASES)
+    read_value, read_path = _first_usage_value_with_path(usage, _CACHE_READ_USAGE_ALIASES)
+    creation_value = _first_usage_value(usage, _CACHE_CREATION_USAGE_ALIASES)
+    miss_value = _first_usage_value(usage, _CACHE_MISS_USAGE_ALIASES)
+    result["input_tokens"] = _usage_int(input_value)
+    result["output_tokens"] = _usage_int(output_value)
+    result["cache_read_tokens"] = _usage_int(read_value)
+    result["cache_creation_tokens"] = _usage_int(creation_value)
+    if miss_value is None and usage_has_cache_metrics(usage):
+        # Anthropic reports regular input separately from cache reads; OpenAI's
+        # nested cached_tokens sits inside an inclusive input total.
+        result["cache_miss_tokens"] = (
+            result["input_tokens"]
+            if input_path == ("input_tokens",)
+            and read_path == ("cache_read_input_tokens",)
+            else max(result["input_tokens"] - result["cache_read_tokens"], 0)
+        )
+    else:
+        result["cache_miss_tokens"] = _usage_int(miss_value)
+    return result

@@ -30,8 +30,12 @@ class TestTokenStats:
         s = TokenStats(input=100, cache_create=0, cache_read=100)
         assert s.cache_hit_rate() == 50.0
 
-    def test_cache_hit_rate_zero(self) -> None:
-        s = TokenStats(input=0, cache_create=0, cache_read=0)
+    def test_cache_hit_rate_uses_explicit_miss_when_metrics_available(self) -> None:
+        s = TokenStats(input=100, cache_read=80, cache_miss=20, metrics_available=True)
+        assert s.cache_hit_rate() == 80.0
+
+    def test_cache_creation_is_not_a_hit(self) -> None:
+        s = TokenStats(input=100, cache_create=100, metrics_available=True)
         assert s.cache_hit_rate() == 0.0
 
     def test_elapsed_seconds(self) -> None:
@@ -79,6 +83,40 @@ class TestCostTracker:
         assert s.output == 150
         assert s.cache_create == 20
         assert s.cache_read == 30
+
+    def test_on_llm_after_consumes_canonical_cache_aliases(self) -> None:
+        t = CostTracker()
+        t.on_llm_after("llm_after", {
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 80,
+                "cache_creation_input_tokens": 10,
+                "cache_miss_input_tokens": 20,
+                "cache_metrics_available": True,
+            }
+        })
+        stats = t.get(threading.current_thread().name)
+        assert stats.cache_read == 80
+        assert stats.cache_create == 10
+        assert stats.cache_miss == 20
+        assert stats.metrics_available is True
+        assert stats.cache_hit_rate() == 80.0
+
+    def test_on_llm_after_without_cache_metadata_is_unavailable(self) -> None:
+        t = CostTracker()
+        t.on_llm_after("llm_after", {
+            "usage": {"input_tokens": 100, "output_tokens": 20}
+        })
+        stats = t.get(threading.current_thread().name)
+        assert stats.metrics_available is False
+        assert stats.cache_hit_rate() == 0.0
+
+    def test_legacy_token_stats_cache_read_uses_uncached_input_side(self) -> None:
+        stats = TokenStats(input=100, cache_read=100)
+        assert stats.metrics_available is False
+        assert stats.cache_miss == 0
+        assert stats.cache_hit_rate() == 50.0
 
     def test_on_llm_after_empty_usage(self) -> None:
         t = CostTracker()

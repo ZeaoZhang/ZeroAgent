@@ -30,7 +30,7 @@ WS API:
 """
 from __future__ import annotations
 
-import asyncio, contextlib, copy, hmac, importlib, ipaddress, json, os, secrets, signal, sys, urllib.parse, webbrowser
+import asyncio, contextlib, copy, hmac, importlib, ipaddress, json, os, re, secrets, signal, sys, urllib.parse, webbrowser
 import threading, time, traceback, uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -189,6 +189,42 @@ for _s in (sys.stdout, sys.stderr):
 # Agent management layer
 # ---------------------------------------------------------------------------
 
+_DEFAULT_TOKEN_USAGE: Dict[str, Any] = {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "limit": 200000,
+    "cacheRead": 0,
+    "cacheCreation": 0,
+    "cacheMiss": 0,
+    "cacheHitRate": 0.0,
+    "cacheMetricsAvailable": False,
+}
+
+
+def _normalize_token_usage(value: Any) -> Dict[str, Any]:
+    """Return typed desktop token usage, tolerating old or malformed payloads."""
+    raw = value if isinstance(value, dict) else {}
+    result = dict(_DEFAULT_TOKEN_USAGE)
+    integer_fields = ("input", "output", "total", "limit", "cacheRead", "cacheCreation", "cacheMiss")
+    for key in integer_fields:
+        try:
+            parsed = int(raw.get(key, result[key]))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if parsed >= 0:
+            result[key] = parsed
+    try:
+        rate = float(raw.get("cacheHitRate", result["cacheHitRate"]))
+        if rate >= 0:
+            result["cacheHitRate"] = rate
+    except (TypeError, ValueError, OverflowError):
+        pass
+    if isinstance(raw.get("cacheMetricsAvailable"), bool):
+        result["cacheMetricsAvailable"] = raw["cacheMetricsAvailable"]
+    return result
+
+
 @dataclass
 class Session:
     id: str
@@ -207,9 +243,20 @@ class Session:
     terminal_reason: str = ""
     # New fields for frontend redesign
     model_override: Optional[str] = None  # Override model for this session
-    token_usage: Dict[str, int] = field(default_factory=lambda: {"input": 0, "output": 0, "total": 0, "limit": 200000})
+    token_usage: Dict[str, Any] = field(default_factory=lambda: dict(_DEFAULT_TOKEN_USAGE))
     group_id: Optional[str] = None  # Session group ID
-    sub_agents: List[Dict[str, Any]] = field(default_factory=list)  # Track spawned sub-agents
+    log_path: Optional[str] = None
+    sub_agents: List[Dict[str, Any]] = field(default_factory=list)
+    restore_history: bool = False
+
+_DESKTOP_SESSION_ID_RE = re.compile(r"^sess-[0-9a-f]{12}$")
+
+
+def _desktop_log_path(sessions_dir: str, sid: str) -> str:
+    """Return the owned response-log path for one generated desktop ID."""
+    if not _DESKTOP_SESSION_ID_RE.fullmatch(sid):
+        raise ValueError(f"invalid desktop session id: {sid}")
+    return str(Path(sessions_dir).expanduser().resolve() / f"model_responses_session_{sid}.txt")
 
 
 def _resolve_runtime_path(path: str | os.PathLike[str] | None) -> str:
@@ -218,6 +265,57 @@ def _resolve_runtime_path(path: str | os.PathLike[str] | None) -> str:
     return str(Path(path).expanduser().resolve())
 
 
+# ---------------------------------------------------------------------------
+# Session persistence (sessions.json) so conversations survive app restarts.
+# ---------------------------------------------------------------------------
+
+def _session_to_persistable(sess: Session) -> dict:
+    return {
+        "id": sess.id,
+        "title": sess.title,
+        "cwd": sess.cwd,
+        "created_at": sess.created_at,
+        "updated_at": sess.updated_at,
+        "messages": list(sess.messages),
+        "msg_seq": sess.msg_seq,
+        "log_path": sess.log_path,
+        "status": "idle",
+        "last_error": sess.last_error,
+        "terminal_status": sess.terminal_status,
+        "terminal_reason": sess.terminal_reason,
+        "model_override": sess.model_override,
+        "token_usage": _normalize_token_usage(sess.token_usage),
+        "group_id": sess.group_id,
+        "sub_agents": list(sess.sub_agents),
+    }
+
+
+def _session_from_persisted(
+    data: dict,
+    sessions_dir: str | None = None,
+) -> Session:
+    sid = str(data.get("id") or ("sess-" + uuid.uuid4().hex[:12]))
+    owned_path = _desktop_log_path(sessions_dir, sid) if sessions_dir and _DESKTOP_SESSION_ID_RE.fullmatch(sid) else None
+    sess = Session(
+        id=sid,
+        title=str(data.get("title") or "New chat"),
+        cwd=str(data.get("cwd") or ""),
+        created_at=float(data.get("created_at") or time.time()),
+        updated_at=float(data.get("updated_at") or time.time()),
+        msg_seq=int(data.get("msg_seq") or 0),
+        status="idle",
+        last_error=str(data.get("last_error") or ""),
+        terminal_status=str(data.get("terminal_status") or ""),
+        terminal_reason=str(data.get("terminal_reason") or ""),
+        model_override=data.get("model_override"),
+        log_path=owned_path,
+        group_id=data.get("group_id"),
+        sub_agents=list(data.get("sub_agents") or []),
+        token_usage=_normalize_token_usage(data.get("token_usage")),
+    )
+    sess.messages = list(data.get("messages") or [])
+    sess.restore_history = bool(sess.messages)
+    return sess
 def _public_config_snapshot(config: AgentConfig) -> Dict[str, Any]:
     return {
         "default_backend": config.default_backend,
@@ -253,6 +351,57 @@ class AgentManager:
         self.sessions: Dict[str, Session] = {}
         self.active_session_id: Optional[str] = None
         self.session_idempotency_results: OrderedDict[tuple[str, str], dict] = OrderedDict()
+        self._load_persisted_sessions()
+
+    def _owned_desktop_logs(self) -> set[str]:
+        """Return absolute paths currently owned by persisted desktop sessions."""
+        return {
+            os.path.abspath(sess.log_path)
+            for sess in self.sessions.values()
+            if sess.log_path and _DESKTOP_SESSION_ID_RE.fullmatch(sess.id)
+        }
+
+    def _persist_sessions(self) -> None:
+        """Atomically write all in-memory sessions to sessions.json."""
+        store = os.path.join(self.sessions_dir, "sessions.json")
+        try:
+            os.makedirs(self.sessions_dir, exist_ok=True)
+            with self.lock:
+                payload = {
+                    "version": 1,
+                    "activeSessionId": self.active_session_id,
+                    "sessions": [_session_to_persistable(s) for s in self.sessions.values()],
+                }
+            tmp = store + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, store)
+        except Exception as exc:
+            print(f"persist sessions failed: {exc}", file=sys.stderr)
+
+    def _load_persisted_sessions(self) -> None:
+        """Restore sessions from sessions.json on startup."""
+        store = os.path.join(self.sessions_dir, "sessions.json")
+        if not os.path.isfile(store):
+            return
+        try:
+            with open(store, encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except Exception as exc:
+            print(f"load persisted sessions failed: {exc}", file=sys.stderr)
+            return
+        sessions = payload.get("sessions") or []
+        for data in sessions:
+            try:
+                sess = _session_from_persisted(data, self.sessions_dir)
+                self.sessions[sess.id] = sess
+            except Exception as exc:
+                print(f"skip broken persisted session: {exc}", file=sys.stderr)
+        active = payload.get("activeSessionId")
+        if active and active in self.sessions:
+            self.active_session_id = active
+        elif self.sessions:
+            self.active_session_id = next(iter(self.sessions))
 
     def _load_base_config(self) -> AgentConfig:
         try:
@@ -278,15 +427,30 @@ class AgentManager:
             config = copy.deepcopy(load_default_config())
             config.workspace_dir = _resolve_runtime_path(sess.cwd or config.workspace_dir)
             config.sessions_dir = _resolve_runtime_path(config.sessions_dir)
-            # Apply model override if set
             if sess.model_override:
                 config.default_backend = sess.model_override
-            agent = ZeroAgent(config=config)
+            if not sess.log_path and _DESKTOP_SESSION_ID_RE.fullmatch(sess.id):
+                sess.log_path = _desktop_log_path(self.sessions_dir, sess.id)
+            agent = ZeroAgent(config=config, session_log_path=sess.log_path)
+            if sess.restore_history:
+                history = [
+                    {"role": message["role"], "content": message["content"]}
+                    for message in sess.messages
+                    if message.get("role") in {"user", "assistant", "tool"}
+                    and isinstance(message.get("content"), str)
+                    and message["content"].strip()
+                ]
+                if history:
+                    agent.client.history = history
+                sess.restore_history = False
+            effective_path = getattr(getattr(agent, "client", None), "log_path", None)
+            if effective_path:
+                sess.log_path = effective_path
+            self._persist_sessions()
             return AgentRunner(agent)
         finally:
             with contextlib.suppress(Exception):
                 os.chdir(old_cwd)
-
     def list_model_profiles(self):
         self.ensure_project_import_path()
         try:
@@ -326,14 +490,20 @@ class AgentManager:
         sess.updated_at = time.time()
         if role == "user" and content.strip() and sess.title == "New chat":
             sess.title = content.strip().replace("\n", " ")[:40]
+        self._persist_sessions()
         return msg
 
     def create_session(self, cwd: Optional[str] = None) -> Session:
         sid = "sess-" + uuid.uuid4().hex[:12]
-        sess = Session(id=sid, cwd=str(cwd or self.workspace_dir))
+        sess = Session(
+            id=sid,
+            cwd=str(cwd or self.workspace_dir),
+            log_path=_desktop_log_path(self.sessions_dir, sid),
+        )
         with self.lock:
             self.sessions[sid] = sess
             self.active_session_id = sid
+            self._persist_sessions()
         emit_session_state(sess, "created")
         return sess
 
@@ -344,6 +514,31 @@ class AgentManager:
                 raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
             return sess
 
+    def _detach_response_log(self, sess: Session) -> str | None:
+        """Detach an owned response log before aborting its worker."""
+        if not _DESKTOP_SESSION_ID_RE.fullmatch(sess.id):
+            return None
+        owned_path = _desktop_log_path(self.sessions_dir, sess.id)
+        if not sess.log_path or os.path.abspath(sess.log_path) != owned_path:
+            return None
+        runner = sess.agent
+        agent = getattr(runner, "_agent", None)
+        if agent is not None:
+            close_agent_log = getattr(agent, "close_response_log", None)
+            if callable(close_agent_log):
+                with contextlib.suppress(Exception):
+                    close_agent_log()
+        client = getattr(agent, "client", None)
+        if client is not None:
+            close = getattr(client, "close_response_log", None)
+            if callable(close):
+                with contextlib.suppress(Exception):
+                    close()
+            else:
+                with contextlib.suppress(Exception):
+                    client.log_path = None
+        return owned_path
+
     def delete_session(self, sid: str) -> dict:
         with self.lock:
             key = ("delete", sid)
@@ -351,17 +546,23 @@ class AgentManager:
             if prior_result is not None:
                 self.session_idempotency_results.move_to_end(key)
                 return prior_result
-
-            sess = self.sessions.pop(sid, None)
+            sess = self.sessions.get(sid)
             if not sess:
                 raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
-            if self.active_session_id == sid:
-                self.active_session_id = next(iter(self.sessions), None)
-            result = {"ok": True, "sessionId": sid}
-            remember_session_result(self.session_idempotency_results, "delete", sid, result)
+            owned_path = self._detach_response_log(sess)
             if sess.agent and hasattr(sess.agent, "abort"):
                 with contextlib.suppress(Exception):
                     sess.agent.abort()
+            self.sessions.pop(sid)
+            if self.active_session_id == sid:
+                self.active_session_id = next(iter(self.sessions), None)
+            if owned_path:
+                with contextlib.suppress(OSError):
+                    if os.path.isfile(owned_path):
+                        os.remove(owned_path)
+            result = {"ok": True, "sessionId": sid}
+            remember_session_result(self.session_idempotency_results, "delete", sid, result)
+            self._persist_sessions()
         emit_session_state(sess, "closed")
         return result
 
@@ -380,8 +581,23 @@ class AgentManager:
                     content_type="application/json",
                 )
 
-            replacement = Session(id="sess-" + uuid.uuid4().hex[:12], cwd=sess.cwd)
+            owned_path = self._detach_response_log(sess)
+            if sess.agent and hasattr(sess.agent, "abort"):
+                with contextlib.suppress(Exception):
+                    sess.agent.abort()
+            replacement_id = "sess-" + uuid.uuid4().hex[:12]
+            replacement = Session(
+                id=replacement_id,
+                cwd=sess.cwd,
+                log_path=_desktop_log_path(self.sessions_dir, replacement_id),
+            )
             self.sessions[replacement.id] = replacement
+            if self.active_session_id == sid:
+                self.active_session_id = replacement.id
+            if owned_path:
+                with contextlib.suppress(OSError):
+                    if os.path.isfile(owned_path):
+                        os.remove(owned_path)
             result = {
                 "ok": True,
                 "replacedSessionId": sid,
@@ -389,21 +605,21 @@ class AgentManager:
                 "session": self.snapshot(replacement),
             }
             remember_session_result(self.session_idempotency_results, "replace", sid, result)
+            self._persist_sessions()
 
-            if sess.agent and hasattr(sess.agent, "abort"):
-                with contextlib.suppress(Exception):
-                    sess.agent.abort()
 
         emit_session_state(sess, "closed")
         emit_session_state(replacement, "created")
         return result
-
     def list_resume_sessions(self, limit: int = 10) -> list[dict]:
         self.ensure_project_import_path()
         continue_cmd = importlib.import_module("zero_agent.bots.shared.continue_cmd")
-
         continue_cmd.set_sessions_dir(self.sessions_dir)
-        sessions = continue_cmd.list_sessions(exclude_pid=os.getpid())
+        owned = self._owned_desktop_logs()
+        sessions = [
+            row for row in continue_cmd.list_sessions(exclude_pid=os.getpid())
+            if os.path.abspath(row[0]) not in owned
+        ]
         out: list[dict] = []
         for idx, (path, mtime, preview, rounds) in enumerate(sessions[:limit], 1):
             out.append({
@@ -423,20 +639,28 @@ class AgentManager:
                 raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
             if sess.status == "running":
                 raise web.HTTPConflict(text=json.dumps({"error": "session is already running"}, ensure_ascii=False), content_type="application/json")
-            if sess.agent is None:
-                sess.agent = self.make_agent(sess)
-
         self.ensure_project_import_path()
         continue_cmd = importlib.import_module("zero_agent.bots.shared.continue_cmd")
-
         continue_cmd.set_sessions_dir(self.sessions_dir)
-        sessions = continue_cmd.list_sessions(exclude_pid=os.getpid())
+        sessions = [
+            row for row in continue_cmd.list_sessions(exclude_pid=os.getpid())
+            if os.path.abspath(row[0]) not in self._owned_desktop_logs()
+        ]
         target_idx = index - 1
         if not (0 <= target_idx < len(sessions)):
             return {"ok": False, "error": f"索引越界（有效范围 1-{len(sessions)}）"}
-
         path = sessions[target_idx][0]
-        summary, full = continue_cmd.restore(sess.agent, path)
+
+        with self.lock:
+            if self.sessions.get(sess.id) is not sess:
+                raise web.HTTPNotFound(
+                    text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False),
+                    content_type="application/json",
+                )
+            if sess.agent is None:
+                sess.agent = self.make_agent(sess)
+            runner = sess.agent
+        summary, full = continue_cmd.restore(runner, path)
         ui_messages = continue_cmd.extract_ui_messages(path)
 
         with self.lock:
@@ -497,7 +721,6 @@ class AgentManager:
 
     def _sync_token_usage(self, sess: Session) -> None:
         """Refresh session token/context usage from the live runner if available."""
-
         runner = sess.agent
         za = getattr(runner, "_agent", None)
         client = getattr(za, "client", None)
@@ -518,22 +741,31 @@ class AgentManager:
             or getattr(getattr(client, "config", None), "context_window", 200000)
             or 200000
         )
-        sess.token_usage = {
-            "input": int(stats.get("total_input_tokens", 0) or 0),
-            "output": int(stats.get("total_output_tokens", 0) or 0),
+        sess.token_usage = _normalize_token_usage({
+            "input": stats.get("total_input_tokens", 0),
+            "output": stats.get("total_output_tokens", 0),
             "total": current_context,
             "limit": limit,
-        }
+            "cacheRead": stats.get("total_cache_read_tokens", 0),
+            "cacheCreation": stats.get("total_cache_creation_tokens", 0),
+            "cacheMiss": stats.get("total_cache_miss_tokens", 0),
+            "cacheHitRate": stats.get("cache_hit_rate", 0.0),
+            "cacheMetricsAvailable": stats.get("cache_metrics_available", False),
+        })
 
     def run_agent_turn(self, sess: Session, prompt: str, images: Optional[list] = None):
         try:
-            if sess.agent is None:
-                sess.agent = self.make_agent(sess)
-            agent = sess.agent
-            if not hasattr(agent, "put_task"):
-                raise RuntimeError("AgentRunner object has no put_task method")
-
-            display_q = agent.put_task(prompt, images=images or [])
+            with self.lock:
+                if self.sessions.get(sess.id) is not sess:
+                    return
+                if sess.agent is None:
+                    sess.agent = self.make_agent(sess)
+                agent = sess.agent
+                if self.sessions.get(sess.id) is not sess:
+                    return
+                if not hasattr(agent, "put_task"):
+                    raise RuntimeError("AgentRunner object has no put_task method")
+                display_q = agent.put_task(prompt, images=images or [])
             pieces: list[str] = []
             terminal: Optional[dict] = None
             import queue as _queue
@@ -604,6 +836,7 @@ class AgentManager:
                     sess.last_error = error_detail
                     self.add_message(sess, "error", text or error_detail)
                 sess.updated_at = time.time()
+                self._persist_sessions()
             emit_session_state(sess, sess.status)
         except Exception as e:
             tb = traceback.format_exc()
@@ -614,6 +847,7 @@ class AgentManager:
                 sess.terminal_status = "failed"
                 sess.terminal_reason = type(e).__name__
                 self.add_message(sess, "error", str(e))
+                self._persist_sessions()
             print(tb, file=sys.stderr)
             emit_session_state(sess, "error")
 

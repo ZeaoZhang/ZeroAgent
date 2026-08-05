@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, Generator, List, Optional
 from zero_agent.core.hooks import HookSystem
 from zero_agent.core.interfaces import LLMClient, ToolDispatcher
 from zero_agent.core.types import StepAction, StepOutcome, TerminalEvent, TerminalStatus
+from zero_agent.llm.base import extract_usage_metrics, usage_has_cache_metrics
 from zero_agent.utils.text import smart_format
 
 if TYPE_CHECKING:
@@ -221,7 +222,7 @@ class AgentLoop:
                     args: Dict[str, Any] = tc["args"]
                     tid: str = tc.get("id", "")
 
-                    if tool_name != "no_tool":
+                    if tool_name not in {"no_tool", "complete_task"}:
                         if self.verbose:
                             yield (
                                 f"Tool: `{tool_name}`  "
@@ -237,7 +238,10 @@ class AgentLoop:
                         tool_name, args, response,
                         index=ii, tool_num=len(tool_calls),
                     )
-                    outcome = yield from self._consume_dispatch(gen)
+                    outcome = yield from self._consume_dispatch(
+                        gen,
+                        wrap_output=tool_name != "complete_task",
+                    )
 
                     if not self._valid_step_outcome(outcome):
                         turn_terminal = TerminalEvent(
@@ -281,7 +285,7 @@ class AgentLoop:
                             turn_terminal = TerminalEvent(
                                 status=TerminalStatus.COMPLETED,
                                 reason="completion_certificate",
-                                text=str(getattr(response, "content", "") or ""),
+                                text=certificate.final_text,
                                 data=outcome.data,
                                 turn=turn,
                                 certificate=certificate,
@@ -485,35 +489,30 @@ class AgentLoop:
             }
         ]
 
-    def _consume_dispatch(self, gen: Generator) -> Generator[Any, None, StepOutcome]:
-        """消费 dispatch() 返回的 generator，获取 StepOutcome.
+    def _consume_dispatch(
+        self,
+        gen: Generator,
+        *,
+        wrap_output: bool = True,
+    ) -> Generator[Any, None, StepOutcome]:
+        """Consume dispatch output, optionally wrapping verbose tool output."""
 
-        处理两种模式:
-            verbose: 将中间 yield 透传给调用方（包裹在 ``` 代码块中）.
-            非 verbose: 静默消费所有 yield，仅返回最终值.
-
-        Args:
-            gen: handler.dispatch() 返回的 generator.
-
-        Yields:
-            工具执行过程中的状态字符串.
-
-        Returns:
-            StepOutcome 实例.
-        """
         try:
-            v = next(gen)
-        except StopIteration as e:
-            return e.value
+            value = next(gen)
+        except StopIteration as stop:
+            return stop.value
 
-        if self.verbose:
-            yield "```\n"
-            yield v
-            outcome = yield from gen
-            yield "```\n"
-            return outcome
-        else:
+        if not self.verbose:
             return self._exhaust(gen)
+        if not wrap_output:
+            yield value
+            return (yield from gen)
+
+        yield "```\n"
+        yield value
+        outcome = yield from gen
+        yield "```\n"
+        return outcome
 
     # ---- hook 辅助 ----
 
@@ -531,39 +530,28 @@ class AgentLoop:
 
     @staticmethod
     def _usage_from_response(response: Any) -> dict:
-        """从响应对象中提取 token usage(含 cache), 缺失时返回空字典."""
+        """Return canonical token usage for llm_after hooks."""
         raw = getattr(response, "raw", None)
         usage = getattr(raw, "usage", None) if raw is not None else None
         if usage is None:
             usage = getattr(response, "usage", None)
         if usage is None:
             return {}
-        if isinstance(usage, dict):
-            return {
-                "input_tokens": usage.get("input_tokens", usage.get("prompt_tokens", 0)),
-                "output_tokens": usage.get("output_tokens", usage.get("completion_tokens", 0)),
-                "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
-                "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
-                **usage,
-            }
-        input_tokens = getattr(
-            usage,
-            "input_tokens",
-            getattr(usage, "prompt_tokens", 0),
-        )
-        output_tokens = getattr(
-            usage,
-            "output_tokens",
-            getattr(usage, "completion_tokens", 0),
-        )
-        cache_create = getattr(usage, "cache_creation_input_tokens", 0)
-        cache_read = getattr(usage, "cache_read_input_tokens", 0)
-        return {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_creation_input_tokens": cache_create,
-            "cache_read_input_tokens": cache_read,
+
+        metrics = extract_usage_metrics(usage)
+        canonical = {
+            "input_tokens": metrics["input_tokens"],
+            "output_tokens": metrics["output_tokens"],
+            "cache_read_input_tokens": metrics["cache_read_tokens"],
+            "cache_creation_input_tokens": metrics["cache_creation_tokens"],
+            "cache_miss_input_tokens": metrics["cache_miss_tokens"],
+            "cache_metrics_available": usage_has_cache_metrics(usage),
         }
+        if isinstance(usage, dict):
+            result = dict(usage)
+            result.update(canonical)
+            return result
+        return canonical
 
     # ---- 静态工具方法 ----
 

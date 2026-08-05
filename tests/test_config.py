@@ -309,3 +309,82 @@ def test_from_env_api_mode_invalid_raises(monkeypatch) -> None:
     from zero_agent.core.exceptions import ConfigError
     with pytest.raises(ConfigError, match="ZA_LLM_API_MODE"):
         AgentConfig.from_env()
+
+
+def test_validate_normalizes_empty_default_backend() -> None:
+    config = AgentConfig(llm_backends={"z": LLMBackendConfig(
+        name="z", provider="openai", api_key="k", api_base="https://x", model="m"
+    )}, default_backend="")
+    config.validate()
+    assert config.default_backend == "z"
+
+
+def test_validate_rejects_invalid_backend_without_secret() -> None:
+    import pytest
+    from zero_agent.core.exceptions import ConfigError
+    config = AgentConfig(
+        llm_backends={"safe": LLMBackendConfig(
+            name="safe", provider="openai", api_key="secret-value", api_base="https://x", model="m"
+        )},
+        default_backend="missing",
+    )
+    with pytest.raises(ConfigError) as exc:
+        config.validate()
+    assert "missing" in str(exc.value)
+    assert "safe" in str(exc.value)
+    assert "secret-value" not in str(exc.value)
+
+
+def test_validate_rejects_empty_backend_mapping() -> None:
+    import pytest
+    from zero_agent.core.exceptions import ConfigError
+    with pytest.raises(ConfigError, match="no LLM backends configured"):
+        AgentConfig().validate()
+
+
+def test_validate_rejects_unknown_failover_before_session_construction() -> None:
+    import pytest
+    from zero_agent.core.exceptions import ConfigError
+    config = AgentConfig(
+        llm_backends={"primary": LLMBackendConfig(
+            name="primary", provider="openai", api_key="key", api_base="https://x", model="m"
+        )},
+        default_backend="primary",
+        failover_backends=["missing"],
+    )
+
+    with pytest.raises(ConfigError, match="missing"):
+        config.validate()
+
+
+def test_yaml_api_key_placeholder_resolves_without_exposing_secret(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TEST_BACKEND_KEY", "temporary-secret")
+    path = tmp_path / "config.yaml"
+    path.write_text("""
+default_backend: local
+llm_backends:
+  local:
+    provider: openai
+    api_key: ${TEST_BACKEND_KEY}
+    api_base: https://example.invalid/v1
+    model: local-test
+""".lstrip(), encoding="utf-8")
+    config = AgentConfig.from_yaml(path)
+    assert config.llm_backends["local"].api_key == "temporary-secret"
+
+
+def test_yaml_api_key_placeholder_failure_names_only_variable(tmp_path, monkeypatch) -> None:
+    import pytest
+    from zero_agent.core.exceptions import ConfigError
+    monkeypatch.delenv("UNSET_BACKEND_KEY", raising=False)
+    path = tmp_path / "config.yaml"
+    path.write_text("""
+llm_backends:
+  local:
+    provider: openai
+    api_key: ${UNSET_BACKEND_KEY}
+    model: local-test
+""".lstrip(), encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        AgentConfig.from_yaml(path)
+    assert str(exc.value) == "missing environment variable: UNSET_BACKEND_KEY"

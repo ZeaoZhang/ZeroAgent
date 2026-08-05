@@ -478,6 +478,17 @@ class TestSessionNames:
                 removed = sn.gc()
                 assert removed >= 0
 
+    def test_desktop_session_basename_resolves_only_existing_owned_file(self):
+        import zero_agent.bots.shared.session_names as sn
+        with tempfile.TemporaryDirectory() as tmp:
+            basename = "model_responses_session_sess-123456789abc.txt"
+            with patch.object(sn, "_get_log_dir", return_value=tmp):
+                assert sn._resolve_basename(basename) is None
+                path = os.path.join(tmp, basename)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("response")
+                assert sn._resolve_basename(basename) == path
+
 
 # —— export_cmd.py ——
 

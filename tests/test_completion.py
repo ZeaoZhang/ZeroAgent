@@ -4,6 +4,7 @@ from zero_agent.core.completion import (
     accepts_partial_reply,
     evaluate_completion,
     load_plan_verify_status,
+    successful_evidence_refs,
     write_evidence_json,
 )
 from zero_agent.core.types import EvidenceLedger, EvidenceRecord, TaskContract, TaskMode
@@ -163,3 +164,25 @@ def test_plan_partial_requires_user_acceptance() -> None:
     assert "接受 PARTIAL 并完成" in prompt
     assert accepts_partial_reply("accept_partial") is True
     assert accepts_partial_reply("继续修复") is False
+
+
+
+def test_successful_evidence_refs_preserves_global_positions_and_limit() -> None:
+    ledger = EvidenceLedger(records=[
+        EvidenceRecord(1, "file_read", "success", "read", "first read"),
+        EvidenceRecord(2, "code_run", "error", "execute", "failed run"),
+        EvidenceRecord(3, "file_write", "success", "write", "write result"),
+        EvidenceRecord(4, "echo", "success", "system", "system note"),
+        EvidenceRecord(5, "web_scan", "success", "web", "web result"),
+    ])
+
+    assert successful_evidence_refs(ledger) == [
+        (1, ledger.records[0]),
+        (3, ledger.records[2]),
+        (5, ledger.records[4]),
+    ]
+    assert successful_evidence_refs(ledger, limit=2) == [
+        (3, ledger.records[2]),
+        (5, ledger.records[4]),
+    ]
+    assert successful_evidence_refs(ledger, limit=0) == []

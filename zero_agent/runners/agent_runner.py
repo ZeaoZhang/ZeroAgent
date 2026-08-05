@@ -225,7 +225,11 @@ class AgentRunner:
 
     @property
     def log_path(self) -> str | None:
-        """当前进程的 model_responses 日志路径."""
+        """Return the client's explicit path or its PID fallback."""
+        client = getattr(self._agent, "client", None)
+        explicit = getattr(client, "log_path", None)
+        if explicit:
+            return explicit
         sessions_dir = getattr(self._agent.config, "sessions_dir", None)
         if not sessions_dir:
             return None
@@ -700,9 +704,17 @@ class AgentRunner:
                         on_chunk,
                         cancel_event=self._cancel_event,
                     )
+                terminal_text = full_resp or terminal.text
+                if (
+                    terminal.status is TerminalStatus.COMPLETED
+                    and terminal.reason == "completion_certificate"
+                    and terminal.text
+                    and not self.verbose
+                ):
+                    terminal_text = terminal.text
                 terminal = replace(
                     terminal,
-                    text=full_resp,
+                    text=terminal_text,
                     source=source,
                     turn=terminal.turn or curr_turn,
                 )

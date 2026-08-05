@@ -76,7 +76,46 @@ def test_desktop_session_delete_button_has_an_accessible_name() -> None:
     assert "deleteBtn.setAttribute('aria-label'" in app_source
 
 
-def test_agent_manager_replaces_session_atomically_and_idempotently() -> None:
+def test_desktop_sessions_own_distinct_logs_and_delete_only_their_own(monkeypatch, tmp_path) -> None:
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m"
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+    first = manager.create_session()
+    second = manager.create_session()
+    assert first.log_path != second.log_path
+    Path(first.log_path).write_text("first", encoding="utf-8")
+    Path(second.log_path).write_text("second", encoding="utf-8")
+    manager.delete_session(first.id)
+    assert not Path(first.log_path).exists()
+    assert Path(second.log_path).read_text(encoding="utf-8") == "second"
+    assert second.id in manager.sessions
+
+
+def test_persisted_desktop_session_regenerates_owned_log_path(tmp_path) -> None:
+    sid = "sess-123456789abc"
+    sess = desktop_bridge._session_from_persisted({"id": sid}, str(tmp_path))
+    assert sess.log_path == desktop_bridge._desktop_log_path(str(tmp_path), sid)
+    legacy = desktop_bridge._session_from_persisted({"id": "legacy", "log_pid": 123}, str(tmp_path))
+    assert legacy.log_path is None
+
+
+def test_agent_manager_replaces_session_atomically_and_idempotently(monkeypatch, tmp_path) -> None:
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m"
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
     session_manager = desktop_bridge.AgentManager()
     original = session_manager.create_session(cwd="/tmp/original")
 
@@ -89,6 +128,52 @@ def test_agent_manager_replaces_session_atomically_and_idempotently() -> None:
     assert original.id not in session_manager.sessions
     assert list(session_manager.sessions) == [first["session"]["id"]]
 
+
+def test_replacing_active_session_deletes_owned_log_and_updates_active_id(monkeypatch, tmp_path) -> None:
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m"
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+    original = manager.create_session()
+    Path(original.log_path).write_text("private", encoding="utf-8")
+
+    result = manager.replace_session(original.id)
+
+    assert not Path(original.log_path).exists()
+    assert manager.active_session_id == result["sessionId"]
+
+
+
+def test_deleted_session_does_not_start_delayed_agent(monkeypatch, tmp_path) -> None:
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m"
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.delete_session(sess.id)
+    started = False
+
+    def make_agent(_sess):
+        nonlocal started
+        started = True
+        raise AssertionError("deleted session must not create an agent")
+
+    monkeypatch.setattr(manager, "make_agent", make_agent)
+    manager.run_agent_turn(sess, "late")
+
+    assert started is False
 
 def test_status_payload_exposes_zeroagent_fields() -> None:
     manager = desktop_bridge.AgentManager()
@@ -207,6 +292,82 @@ def test_model_profiles_come_from_agent_runner(monkeypatch) -> None:
     monkeypatch.setattr(desktop_bridge, "AgentRunner", DummyRunner)
 
     assert desktop_bridge.AgentManager().list_model_profiles() == expected
+def test_session_token_usage_has_cache_fields_and_typed_persisted_defaults() -> None:
+    defaults = desktop_bridge.Session(id="sess-123456789abc").token_usage
+    assert defaults == {
+        "input": 0,
+        "output": 0,
+        "total": 0,
+        "limit": 200000,
+        "cacheRead": 0,
+        "cacheCreation": 0,
+        "cacheMiss": 0,
+        "cacheHitRate": 0.0,
+        "cacheMetricsAvailable": False,
+    }
+    restored = desktop_bridge._session_from_persisted({
+        "id": "sess-123456789abc",
+        "token_usage": {"input": "bad", "cacheRead": 80, "cacheHitRate": "bad"},
+    })
+    assert restored.token_usage["input"] == 0
+    assert restored.token_usage["cacheRead"] == 80
+    assert restored.token_usage["cacheHitRate"] == 0.0
+    assert restored.token_usage["cacheMetricsAvailable"] is False
+
+
+def test_sync_token_usage_maps_cache_stats_without_losing_context() -> None:
+    class FakeConfig:
+        context_window = 12345
+
+    class FakeClient:
+        config = FakeConfig()
+        _context_window = 12345
+        system = "system prompt"
+        history = [{"role": "user", "content": "hello"}]
+        usage_stats = {
+            "total_input_tokens": 111,
+            "total_output_tokens": 22,
+            "total_cache_read_tokens": 80,
+            "total_cache_creation_tokens": 10,
+            "total_cache_miss_tokens": 20,
+            "cache_hit_rate": 80.0,
+            "cache_metrics_available": True,
+        }
+
+    class FakeAgent:
+        client = FakeClient()
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    sess.agent = type("Runner", (), {"_agent": FakeAgent()})()
+    manager._sync_token_usage(sess)
+    assert sess.token_usage["input"] == 111
+    assert sess.token_usage["output"] == 22
+    assert sess.token_usage["cacheRead"] == 80
+    assert sess.token_usage["cacheCreation"] == 10
+    assert sess.token_usage["cacheMiss"] == 20
+    assert sess.token_usage["cacheHitRate"] == 80.0
+    assert sess.token_usage["cacheMetricsAvailable"] is True
+    assert sess.token_usage["limit"] == 12345
+    assert sess.token_usage["total"] > 0
+
+
+def test_sync_token_usage_marks_cache_metadata_unavailable() -> None:
+    class FakeClient:
+        config = type("Config", (), {"context_window": 200000})()
+        history = []
+        system = ""
+        usage_stats = {"total_input_tokens": 1, "total_output_tokens": 2}
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    sess.agent = type("Runner", (), {"_agent": type("Agent", (), {"client": FakeClient()})()})()
+    manager._sync_token_usage(sess)
+    assert sess.token_usage["cacheRead"] == 0
+    assert sess.token_usage["cacheCreation"] == 0
+    assert sess.token_usage["cacheMiss"] == 0
+    assert sess.token_usage["cacheHitRate"] == 0.0
+    assert sess.token_usage["cacheMetricsAvailable"] is False
 
 
 def test_create_app_exposes_desktop_http_contract() -> None:
@@ -570,6 +731,90 @@ def test_resume_session_listing_defaults_to_ten(monkeypatch, tmp_path) -> None:
     assert sessions[0]["index"] == 1
     assert sessions[-1]["index"] == 10
 
+
+def test_resume_history_creates_runner_for_live_session(monkeypatch, tmp_path) -> None:
+    class DummyContinue:
+        @staticmethod
+        def set_sessions_dir(_path):
+            pass
+
+        @staticmethod
+        def list_sessions(exclude_pid=None):
+            return [(str(tmp_path / "history.txt"), 1, "preview", 1)]
+
+        @staticmethod
+        def restore(runner, _path):
+            assert runner == "runner"
+            return "restored", True
+
+        @staticmethod
+        def extract_ui_messages(_path):
+            return []
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    monkeypatch.setattr(manager, "make_agent", lambda _sess: "runner")
+    monkeypatch.setattr(manager, "ensure_project_import_path", lambda: None)
+    monkeypatch.setitem(__import__("sys").modules, "zero_agent.bots.shared.continue_cmd", DummyContinue)
+
+    result = manager.resume_history(sess.id, 1)
+
+    assert result["ok"] is True
+    assert sess.agent == "runner"
+
+
+def test_legacy_session_keeps_pid_response_log(monkeypatch, tmp_path) -> None:
+    class DummyAgent:
+        client = type("Client", (), {"log_path": None})()
+
+    captured = {}
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m"
+        )},
+        workspace_dir=str(tmp_path), memory_dir=str(tmp_path), sessions_dir=str(tmp_path / "sessions"),
+    ))
+    monkeypatch.setattr(desktop_bridge, "ZeroAgent", lambda **kwargs: captured.setdefault("agent", DummyAgent()))
+    monkeypatch.setattr(desktop_bridge, "AgentRunner", lambda agent: agent)
+    manager = desktop_bridge.AgentManager()
+    sess = desktop_bridge.Session(id="legacy")
+
+    manager.make_agent(sess)
+
+    assert sess.log_path is None
+
+
+
+def test_restarted_desktop_session_rehydrates_llm_history(monkeypatch, tmp_path) -> None:
+    class DummyClient:
+        history = []
+
+    class DummyAgent:
+        client = DummyClient()
+
+    manager = desktop_bridge.AgentManager()
+    sess = desktop_bridge._session_from_persisted({
+        "id": "sess-123456789abc",
+        "messages": [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "answer"},
+            {"role": "system", "content": "status"},
+        ],
+    }, str(tmp_path))
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m"
+        )}, sessions_dir=str(tmp_path), workspace_dir=str(tmp_path), memory_dir=str(tmp_path),
+    ))
+    monkeypatch.setattr(desktop_bridge, "ZeroAgent", lambda **kwargs: DummyAgent())
+    monkeypatch.setattr(desktop_bridge, "AgentRunner", lambda agent: agent)
+
+    manager.make_agent(sess)
+
+    assert DummyAgent.client.history == [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "answer"},
+    ]
 
 def _terminal(status: str, reason: str, text: str = "", data=None) -> dict:
     return {

@@ -533,6 +533,66 @@ class TestAgentRunnerTaskDispatch:
         assert terminal["status"] == status.value
         assert terminal["reason"] == reason
 
+    def test_queue_preserves_terminal_answer_when_quiet_loop_emits_no_chunks(
+        self, mock_agent: ZeroAgent, monkeypatch
+    ) -> None:
+        def fake_run(_prompt):
+            if False:
+                yield ""
+            return TerminalEvent(
+                status=TerminalStatus.COMPLETED,
+                reason="completion_certificate",
+                text="accepted answer",
+            )
+
+        monkeypatch.setattr(mock_agent, "run", fake_run)
+        terminal = AgentRunner(mock_agent).put_task("hello").get(timeout=3)
+
+        assert terminal["status"] == "completed"
+        assert terminal["reason"] == "completion_certificate"
+        assert terminal["text"] == "accepted answer"
+
+    def test_queue_preserves_terminal_answer_after_quiet_progress_chunks(
+        self, mock_agent: ZeroAgent, monkeypatch
+    ) -> None:
+        mock_agent.config.verbose = False
+        def fake_run(_prompt):
+            yield "file_read({\"path\": \"README.md\"})\n\n"
+            return TerminalEvent(
+                status=TerminalStatus.COMPLETED,
+                reason="completion_certificate",
+                text="accepted answer",
+            )
+
+        monkeypatch.setattr(mock_agent, "run", fake_run)
+        queue = AgentRunner(mock_agent).put_task("hello")
+        assert queue.get(timeout=3)["type"] == "chunk"
+        terminal = queue.get(timeout=3)
+
+        assert terminal["status"] == "completed"
+        assert terminal["reason"] == "completion_certificate"
+        assert terminal["text"] == "accepted answer"
+
+    def test_queue_preserves_short_terminal_answer_found_in_quiet_progress(
+        self, mock_agent: ZeroAgent, monkeypatch
+    ) -> None:
+        mock_agent.config.verbose = False
+
+        def fake_run(_prompt):
+            yield "Tool result says Done. but completion is pending.\n"
+            return TerminalEvent(
+                status=TerminalStatus.COMPLETED,
+                reason="completion_certificate",
+                text="Done.",
+            )
+
+        monkeypatch.setattr(mock_agent, "run", fake_run)
+        queue = AgentRunner(mock_agent).put_task("hello")
+        assert queue.get(timeout=3)["type"] == "chunk"
+        terminal = queue.get(timeout=3)
+
+        assert terminal["text"] == "Done."
+
     def test_queue_converts_generator_exception(self, mock_agent: ZeroAgent, monkeypatch) -> None:
         def fake_run(_prompt):
             yield "partial"

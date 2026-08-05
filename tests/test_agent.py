@@ -284,6 +284,35 @@ class TestZeroAgentConfigReload:
         assert agent.handler.client is agent.client
         assert _config_mtime[str(config_path)] == config_path.stat().st_mtime_ns
 
+    def test_close_response_log_survives_config_reload(self, monkeypatch, tmp_path) -> None:
+        config_path = tmp_path / "config.yaml"
+        _write_reload_config(config_path, workspace=tmp_path / "workspace")
+        config = AgentConfig.from_yaml(config_path)
+        created_paths = []
+
+        class ClosableReloadClient(_ReloadClient):
+            def __init__(self, backend):
+                super().__init__(backend)
+                self.closed = False
+
+            def close_response_log(self):
+                self.closed = True
+
+        def make_sessions(current, session_log_path=None):
+            created_paths.append(session_log_path)
+            return {"primary": ClosableReloadClient(current.llm_backends["primary"])}
+
+        monkeypatch.setattr("zero_agent.core.agent.LLMFactory.create_all_sessions", make_sessions)
+        agent = ZeroAgent(config=config, session_log_path=str(tmp_path / "owned.log"))
+        baseline = _config_mtime[str(config_path)]
+        agent.close_response_log()
+        _write_reload_config(config_path, workspace=tmp_path / "workspace", temperature=0.7)
+        _bump_mtime(config_path, baseline)
+
+        assert agent.reload_config() is True
+        assert created_paths == [str(tmp_path / "owned.log"), None]
+        assert agent.client.closed is True
+
     def test_reload_resets_incompatible_cache_and_usage(
         self,
         monkeypatch,

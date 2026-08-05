@@ -228,6 +228,24 @@ def _select_evidence(
     return selected, None
 
 
+def successful_evidence_refs(
+    ledger: EvidenceLedger,
+    *,
+    limit: int = 8,
+) -> list[tuple[int, Any]]:
+    """Return recent eligible successes with complete-ledger positions."""
+
+    if limit <= 0:
+        return []
+    successful = [
+        (position, record)
+        for position, record in enumerate(_records(ledger), start=1)
+        if _record_status(record) == "success"
+        and _record_kind(record) in _RELEVANT_EVIDENCE_KINDS
+    ]
+    return successful[-limit:]
+
+
 def _records(ledger: EvidenceLedger) -> list[Any]:
     records = getattr(ledger, "records", [])
     return list(records) if isinstance(records, list) else []
