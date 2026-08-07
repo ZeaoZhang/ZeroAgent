@@ -438,6 +438,8 @@ def test_create_app_exposes_desktop_http_contract() -> None:
     assert ("POST", "/session/{sid}/model") in routes
     assert ("POST", "/session/{sid}/group") in routes
     assert ("GET", "/groups") in routes
+    assert ("POST", "/groups") in routes
+    assert ("DELETE", "/groups/{gid}") in routes
     assert ("GET", "/session/{sid}/agents") in routes
     assert ("POST", "/session/{sid}/agents/{aid}/cancel") in routes
     assert ("GET", "/ws") in routes
@@ -1114,11 +1116,12 @@ def test_session_group_assignment_persists_and_reloads(monkeypatch, tmp_path) ->
     monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
     first = desktop_bridge.AgentManager()
     session = first.create_session()
+    group = first.create_group("work")
 
-    first.set_session_group(session.id, "work")
+    first.set_session_group(session.id, group["id"])
 
     second = desktop_bridge.AgentManager()
-    assert second.sessions[session.id].group_id == "work"
+    assert second.sessions[session.id].group_id == group["id"]
 def test_session_group_assignment_rolls_back_when_persistence_fails(monkeypatch, tmp_path) -> None:
     config = AgentConfig(
         llm_backends={"default": LLMBackendConfig(
@@ -1132,6 +1135,7 @@ def test_session_group_assignment_rolls_back_when_persistence_fails(monkeypatch,
     monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
     manager = desktop_bridge.AgentManager()
     session = manager.create_session()
+    group = manager.create_group("work")
     original_updated_at = session.updated_at
 
     def fail_persist(*, raise_on_error=False):
@@ -1139,7 +1143,59 @@ def test_session_group_assignment_rolls_back_when_persistence_fails(monkeypatch,
 
     monkeypatch.setattr(manager, "_persist_sessions", fail_persist)
     with pytest.raises(OSError, match="read-only"):
-        manager.set_session_group(session.id, "work")
+        manager.set_session_group(session.id, group["id"])
 
     assert session.group_id is None
     assert session.updated_at == original_updated_at
+
+
+def test_session_groups_persist_empty_groups_and_delete_without_sessions(monkeypatch, tmp_path) -> None:
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test",
+            api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+    session = manager.create_session()
+
+    group = manager.create_group("工作")
+
+    assert group["id"].startswith("group-")
+    assert group["name"] == "工作"
+    assert group["position"] == 0
+    assert group["sessionIds"] == []
+    reloaded = desktop_bridge.AgentManager()
+    assert reloaded.list_groups() == [group]
+
+    manager.set_session_group(session.id, group["id"])
+    result = manager.delete_group(group["id"])
+
+    assert result == {"ok": True, "groupId": group["id"], "sessionIds": [session.id]}
+    assert session.id in manager.sessions
+    assert manager.sessions[session.id].group_id is None
+    assert manager.list_groups() == []
+
+
+def test_session_group_assignment_rejects_unknown_group(monkeypatch, tmp_path) -> None:
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test",
+            api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+    session = manager.create_session()
+
+    with pytest.raises(web.HTTPNotFound):
+        manager.set_session_group(session.id, "group-missing")
+
+    assert session.group_id is None

@@ -957,34 +957,6 @@ function closePromptDialog(result) {
   if (resolve) resolve(result);
 }
 
-// ─── Group persistence (frontend-owned metadata; session->group mapping lives in the bridge) ───
-const GROUP_STORAGE_KEY = 'za.sessionGroups';
-function saveSessionGroups() {
-  try {
-    const data = {};
-    for (const [id, g] of state.sessionGroups.entries()) {
-      data[id] = { name: g.name, collapsed: !!g.collapsed };
-    }
-    localStorage.setItem(GROUP_STORAGE_KEY, JSON.stringify(data));
-  } catch (_) { /* storage quota */ }
-}
-function loadSessionGroups() {
-  try {
-    const raw = localStorage.getItem(GROUP_STORAGE_KEY);
-    if (!raw) return;
-    const data = JSON.parse(raw);
-    for (const [id, meta] of Object.entries(data)) {
-      const existing = state.sessionGroups.get(id);
-      if (existing) {
-        existing.name = meta.name || existing.name;
-        existing.collapsed = !!meta.collapsed;
-      } else {
-        state.sessionGroups.set(id, { id, name: meta.name || id, sessionIds: [], collapsed: !!meta.collapsed });
-      }
-    }
-  } catch (_) { /* ignore corrupt storage */ }
-}
-
 function normalizeSessionTimestamp(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return 0;
@@ -1009,6 +981,18 @@ function getSessionTimeBucket(timestamp, now = Date.now()) {
   return 'older';
 }
 
+function isSameDay(ts, refTs) {
+  const d = new Date(ts);
+  const r = new Date(refTs);
+  return d.getFullYear() === r.getFullYear() && d.getMonth() === r.getMonth() && d.getDate() === r.getDate();
+}
+
+function loadSessionGroups() {
+  // Collapse state now stored by SECTION_COLLAPSE_KEY; group entities from bridge.
+}
+
+
+// ─── Time helpers & render ────────────────────────────────────────────────
 function renderSessionList() {
   sessionListEl.innerHTML = '';
 
@@ -1026,10 +1010,13 @@ function renderSessionList() {
 
   const byRecent = compareSessionsByUpdatedAt;
 
-  // Render user groups (including empty ones so group creation gives feedback)
-  for (const [groupId, group] of state.sessionGroups.entries()) {
+  // Render user groups sorted by position (including empty ones)
+  const sorted = [...state.sessionGroups.entries()]
+    .sort(([,a], [,b]) => (a.position ?? 0) - (b.position ?? 0));
+  for (const [groupId, group] of sorted) {
     const sessions = (grouped.get(groupId) || []).slice().sort(byRecent);
-    sessionListEl.appendChild(buildGroupElement(group, sessions));
+    const g = { ...group, collapsed: isSectionCollapsed(groupId) ? true : !!group.collapsed };
+    sessionListEl.appendChild(buildGroupElement(g, sessions));
   }
 
   // Render ungrouped sessions bucketed by time
@@ -1044,26 +1031,81 @@ function renderSessionList() {
   }
 }
 
-function buildGroupElement(group, sessions) {
-  const groupEl = document.createElement('div');
-  groupEl.className = 'session-group' + (group.collapsed ? ' collapsed' : '');
+function buildSessionSection(section, sessions) {
+  const wrapper = document.createElement('section');
+  wrapper.className = 'session-group' + (section.collapsed ? ' collapsed' : '');
 
-  const headerEl = document.createElement('div');
+  const contentId = 'section-content-' + section.id;
+  const headerEl = document.createElement('button');
+  headerEl.type = 'button';
   headerEl.className = 'session-group-header';
+  headerEl.setAttribute('aria-expanded', section.collapsed ? 'false' : 'true');
+  headerEl.setAttribute('aria-controls', contentId);
   const expandIcon = document.createElement('span');
   expandIcon.className = 'expand-icon';
   expandIcon.textContent = '▼';
+  if (section.collapsed) expandIcon.textContent = '▸';
   const nameEl = document.createElement('span');
   nameEl.className = 'group-name';
-  nameEl.textContent = group.name;
-  const delBtn = document.createElement('button');
-  delBtn.type = 'button';
-  delBtn.className = 'group-delete';
-  delBtn.textContent = '×';
-  delBtn.title = `删除分组「${group.name}」`;
-  delBtn.setAttribute('aria-label', `删除分组 ${group.name}`);
-  delBtn.addEventListener('click', async (e) => {
-    e.stopPropagation();
+  nameEl.textContent = section.label;
+  headerEl.append(expandIcon, nameEl);
+
+  if (section.count !== undefined) {
+    const countEl = document.createElement('span');
+    countEl.className = 'session-time-count';
+    countEl.textContent = String(section.count);
+    headerEl.appendChild(countEl);
+  }
+
+  if (section.onDelete) {
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'group-delete';
+    delBtn.textContent = '×';
+    delBtn.title = `删除分组「${section.label}」`;
+    delBtn.setAttribute('aria-label', `删除分组 ${section.label}`);
+    delBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      section.onDelete(e);
+    });
+    headerEl.appendChild(delBtn);
+  }
+
+  const toggleFn = section.onToggle;
+  headerEl.addEventListener('click', () => { if (toggleFn) toggleFn(); });
+
+  if (section.userGroup) {
+    headerEl.addEventListener('dragover', (e) => { e.preventDefault(); headerEl.classList.add('drag-over'); });
+    headerEl.addEventListener('dragenter', (e) => { e.preventDefault(); headerEl.classList.add('drag-over'); });
+    headerEl.addEventListener('dragleave', () => { headerEl.classList.remove('drag-over'); });
+    headerEl.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      headerEl.classList.remove('drag-over');
+      try {
+        const raw = e.dataTransfer.getData('application/json');
+        if (!raw) return;
+        const payload = JSON.parse(raw);
+        if (payload && payload.localSessionId && section.id) {
+          await assignSessionToGroup(payload.localSessionId, section.id);
+        }
+      } catch (_) { /* invalid payload */ }
+    });
+  }
+  wrapper.appendChild(headerEl);
+
+  const contentEl = document.createElement('div');
+  contentEl.className = 'session-group-sessions';
+  contentEl.setAttribute('id', contentId);
+  if (!section.collapsed) {
+    sessions.forEach(sess => contentEl.appendChild(createSessionItem(sess)));
+  }
+  wrapper.appendChild(contentEl);
+  return wrapper;
+}
+
+function buildGroupElement(group, sessions) {
+  const onToggle = () => toggleGroup(group.id);
+  const onDelete = async () => {
     const confirmed = await showConfirmDialog({
       title: '删除分组',
       message: `删除分组「${group.name}」后,其中的 ${sessions.length} 个会话将移回时间分组。`,
@@ -1076,18 +1118,38 @@ function buildGroupElement(group, sessions) {
     } catch (err) {
       showError('Failed to delete session group: ' + (err.message || err));
     }
-  });
-  headerEl.append(expandIcon, nameEl, delBtn);
-  headerEl.addEventListener('click', () => toggleGroup(group.id));
-  groupEl.appendChild(headerEl);
+  };
+  return buildSessionSection(
+    { id: group.id, label: group.name, collapsed: !!group.collapsed, onToggle, onDelete, userGroup: true },
+    sessions,
+  );
+}
+const SECTION_COLLAPSE_KEY = 'za.sectionCollapsed';
 
-  const sessionsEl = document.createElement('div');
-  sessionsEl.className = 'session-group-sessions';
-  sessions.forEach(sess => {
-    sessionsEl.appendChild(createSessionItem(sess));
-  });
-  groupEl.appendChild(sessionsEl);
-  return groupEl;
+function loadSectionCollapse() {
+  try {
+    const raw = localStorage.getItem(SECTION_COLLAPSE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (_) { return {}; }
+}
+
+function saveSectionCollapse(state) {
+  try {
+    localStorage.setItem(SECTION_COLLAPSE_KEY, JSON.stringify(state));
+  } catch (_) { /* quota */ }
+}
+
+function isSectionCollapsed(sectionId) {
+  const saved = loadSectionCollapse();
+  if (sectionId in saved) return !!saved[sectionId];
+  return sectionId === 'week' || sectionId === 'older';
+}
+
+function toggleSectionCollapse(sectionId) {
+  const saved = loadSectionCollapse();
+  saved[sectionId] = !isSectionCollapsed(sectionId);
+  saveSectionCollapse(saved);
+  return saved[sectionId];
 }
 
 function renderTimeBuckets(sessions, sortFn) {
@@ -1106,35 +1168,24 @@ function renderTimeBuckets(sessions, sortFn) {
   for (const bucket of buckets) {
     const items = byBucket.get(bucket.key);
     if (!items || items.length === 0) continue;
-    const header = document.createElement('div');
-    header.className = 'session-group-header session-time-header';
-    const icon = document.createElement('span');
-    icon.className = 'expand-icon';
-    icon.textContent = '▸';
-    const label = document.createElement('span');
-    label.textContent = bucket.label;
-    const count = document.createElement('span');
-    count.className = 'session-time-count';
-    count.textContent = String(items.length);
-    header.append(icon, label, count);
-    sessionListEl.appendChild(header);
-    const sessionsEl = document.createElement('div');
-    sessionsEl.className = 'session-group-sessions';
-    items.forEach(sess => sessionsEl.appendChild(createSessionItem(sess)));
-    sessionListEl.appendChild(sessionsEl);
+    const collapsed = isSectionCollapsed(bucket.key);
+    sessionListEl.appendChild(buildSessionSection(
+      {
+        id: bucket.key,
+        label: bucket.label,
+        collapsed,
+        count: items.length,
+        onToggle: () => { toggleSectionCollapse(bucket.key); renderSessionList(); },
+      },
+      items,
+    ));
   }
 }
-
-function isSameDay(ts, refTs) {
-  const d = new Date(ts);
-  const r = new Date(refTs);
-  return d.getFullYear() === r.getFullYear() && d.getMonth() === r.getMonth() && d.getDate() === r.getDate();
-}
-
 function createSessionItem(sess) {
   const item = document.createElement('div');
   item.className = 'session-item' + (sess.id === state.activeId ? ' active' : '');
   item.setAttribute('data-session-id', sess.id);
+  item.setAttribute('draggable', 'true');
   item.title = sess.title;
 
   const dot = document.createElement('span');
@@ -1194,6 +1245,18 @@ function createSessionItem(sess) {
   item.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     openSessionMenuAt(e.clientX, e.clientY, sess);
+  });
+
+  item.addEventListener('dragstart', (e) => {
+    e.dataTransfer.setData('application/json', JSON.stringify({
+      sessionId: sess.bridgeSessionId || sess.id,
+      localSessionId: sess.id,
+    }));
+    e.dataTransfer.effectAllowed = 'move';
+    item.classList.add('dragging');
+  });
+  item.addEventListener('dragend', () => {
+    item.classList.remove('dragging');
   });
 
   return item;
@@ -1260,60 +1323,73 @@ function closeSessionMenu() {
 async function createGroup(name) {
   const trimmed = String(name || '').trim();
   if (!trimmed) return null;
-  const existing = state.sessionGroups.get(trimmed);
-  if (existing) return existing;
-  state.sessionGroups.set(trimmed, { id: trimmed, name: trimmed, sessionIds: [], collapsed: false });
-  saveSessionGroups();
-  renderSessionList();
-  return state.sessionGroups.get(trimmed);
+  try {
+    const res = await window.zeroAgent.rpc('groups/create', { name: trimmed });
+    const group = res.group || res;
+    state.sessionGroups.set(group.id, {
+      id: group.id,
+      name: group.name,
+      position: group.position,
+      sessionIds: group.sessionIds || [],
+      collapsed: false,
+    });
+    renderSessionList();
+    return state.sessionGroups.get(group.id);
+  } catch (err) {
+    showError('Failed to create group: ' + (err.message || err));
+    throw err;
+  }
 }
 
 async function deleteGroup(groupId) {
   const group = state.sessionGroups.get(groupId);
   if (!group) return;
-
-  const sessions = [...state.sessions.values()].filter(sess => sess.groupId === groupId);
-  for (const sess of sessions) {
-    try {
-      await assignSessionToGroup(sess.id, null);
-    } catch (_) {
-      // Keep the group when a session could not be ungrouped remotely.
-      return;
+  try {
+    const res = await window.zeroAgent.rpc('groups/delete', { groupId });
+    state.sessionGroups.delete(groupId);
+    for (const sid of (res.sessionIds || [])) {
+      const sess = state.sessions.get(sid);
+      if (sess) sess.groupId = null;
     }
+    renderSessionList();
+  } catch (err) {
+    showError('Failed to delete group: ' + (err.message || err));
+    throw err;
   }
-  state.sessionGroups.delete(groupId);
-  saveSessionGroups();
-  renderSessionList();
 }
 
-async function assignSessionToGroup(sessionId, groupName) {
+async function assignSessionToGroup(sessionId, groupId) {
   const sess = state.sessions.get(sessionId);
   if (!sess) return;
+  if (sess.groupId === (groupId || null)) return;
   const previousGroupId = sess.groupId || null;
-  const trimmed = groupName ? String(groupName).trim() : '';
+  const nextGroupId = groupId ? String(groupId).trim() || null : null;
   let createdGroup = false;
-  if (trimmed && !state.sessionGroups.has(trimmed)) {
-    await createGroup(trimmed);
-    createdGroup = true;
+  let newGroupId = nextGroupId;
+  if (nextGroupId && !state.sessionGroups.has(nextGroupId)) {
+    try {
+      const group = await createGroup(nextGroupId);
+      newGroupId = group.id;
+      createdGroup = true;
+    } catch (_) {
+      newGroupId = nextGroupId;
+    }
   }
 
-  const nextGroupId = trimmed || null;
   try {
     if (sess.bridgeSessionId) {
       await window.zeroAgent.rpc('session/group', {
         sessionId: sess.bridgeSessionId,
-        groupId: nextGroupId,
+        groupId: newGroupId,
       });
     }
-    sess.groupId = nextGroupId;
-    saveSessionGroups();
+    sess.groupId = newGroupId;
     renderSessionList();
   } catch (err) {
     sess.groupId = previousGroupId;
-    if (createdGroup && ![...state.sessions.values()].some(item => item.groupId === trimmed)) {
-      state.sessionGroups.delete(trimmed);
+    if (createdGroup && newGroupId && ![...state.sessions.values()].some(item => item.groupId === newGroupId)) {
+      state.sessionGroups.delete(newGroupId);
     }
-    saveSessionGroups();
     renderSessionList();
     showError('Failed to update session group: ' + (err.message || err));
     throw err;
@@ -1324,15 +1400,9 @@ function toggleGroup(groupId) {
   const group = state.sessionGroups.get(groupId);
   if (group) {
     group.collapsed = !group.collapsed;
-    saveSessionGroups();
+    toggleSectionCollapse(groupId);
     renderSessionList();
   }
-}
-
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
 }
 
 

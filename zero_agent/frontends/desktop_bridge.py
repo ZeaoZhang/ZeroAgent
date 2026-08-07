@@ -250,6 +250,14 @@ class Session:
     sub_agents: List[Dict[str, Any]] = field(default_factory=list)
     restore_history: bool = False
 
+
+@dataclass
+class SessionGroup:
+    id: str
+    name: str
+    created_at: float = field(default_factory=time.time)
+    position: int = 0
+
 _DESKTOP_SESSION_ID_RE = re.compile(r"^sess-[0-9a-f]{12}$")
 
 
@@ -352,7 +360,58 @@ class AgentManager:
         self.sessions: Dict[str, Session] = {}
         self.active_session_id: Optional[str] = None
         self.session_idempotency_results: OrderedDict[tuple[str, str], dict] = OrderedDict()
+        self.groups: OrderedDict[str, SessionGroup] = OrderedDict()
+        self.group_store = os.path.join(self.sessions_dir, "groups.json")
+        self._load_persisted_groups()
         self._load_persisted_sessions()
+
+    def _persist_groups(self, *, raise_on_error: bool = False) -> None:
+        """Atomically write group entities to groups.json."""
+        store = self.group_store
+        tmp = f"{store}.{uuid.uuid4().hex}.tmp"
+        try:
+            with self.lock:
+                os.makedirs(self.sessions_dir, exist_ok=True)
+                payload = {
+                    "version": 1,
+                    "groups": [
+                        {"id": g.id, "name": g.name, "created_at": g.created_at, "position": g.position}
+                        for g in self.groups.values()
+                    ],
+                }
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh, ensure_ascii=False, indent=2)
+                os.replace(tmp, store)
+        except Exception as exc:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
+            print(f"persist groups failed: {exc}", file=sys.stderr)
+            if raise_on_error:
+                raise
+
+    def _load_persisted_groups(self) -> None:
+        store = self.group_store
+        if not os.path.isfile(store):
+            return
+        try:
+            with open(store, encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except Exception as exc:
+            print(f"load persisted groups failed: {exc}", file=sys.stderr)
+            return
+        group_entries = payload.get("groups") or []
+        for entry in group_entries:
+            try:
+                g = SessionGroup(
+                    id=str(entry["id"]),
+                    name=str(entry.get("name", entry["id"])),
+                    created_at=float(entry.get("created_at", time.time())),
+                    position=int(entry.get("position", 0)),
+                )
+                self.groups[g.id] = g
+            except Exception as exc:
+                print(f"skip broken persisted group: {exc}", file=sys.stderr)
+
 
     def _owned_desktop_logs(self) -> set[str]:
         """Return absolute paths currently owned by persisted desktop sessions."""
@@ -552,6 +611,74 @@ class AgentManager:
                     client.log_path = None
         return owned_path
 
+    def list_groups(self) -> List[dict]:
+        with self.lock:
+            result = []
+            for g in sorted(self.groups.values(), key=lambda g: g.position):
+                session_ids = [
+                    sid for sid, sess in self.sessions.items()
+                    if sess.group_id == g.id
+                ]
+                result.append({
+                    "id": g.id,
+                    "name": g.name,
+                    "createdAt": g.created_at,
+                    "position": g.position,
+                    "sessionIds": session_ids,
+                })
+            return result
+
+    def create_group(self, name: str) -> dict:
+        trimmed = str(name or "").strip()
+        if not trimmed:
+            raise web.HTTPBadRequest(
+                text=json.dumps({"error": "group name is required"}, ensure_ascii=False),
+                content_type="application/json",
+            )
+        with self.lock:
+            for existing in self.groups.values():
+                if existing.name == trimmed:
+                    raise web.HTTPBadRequest(
+                        text=json.dumps({"error": f"group '{trimmed}' already exists"}, ensure_ascii=False),
+                        content_type="application/json",
+                    )
+            gid = "group-" + uuid.uuid4().hex[:12]
+            max_pos = max((g.position for g in self.groups.values()), default=-1)
+            group = SessionGroup(id=gid, name=trimmed, position=max_pos + 1)
+            self.groups[gid] = group
+            self._persist_groups(raise_on_error=True)
+        return {
+            "id": gid,
+            "name": trimmed,
+            "createdAt": group.created_at,
+            "position": group.position,
+            "sessionIds": [],
+        }
+
+    def delete_group(self, group_id: str) -> dict:
+        gid = str(group_id or "").strip()
+        with self.lock:
+            group = self.groups.get(gid)
+            if not group:
+                raise web.HTTPNotFound(
+                    text=json.dumps({"error": f"group not found: {gid}"}, ensure_ascii=False),
+                    content_type="application/json",
+                )
+            affected: List[str] = []
+            for sid, sess in list(self.sessions.items()):
+                if sess.group_id == gid:
+                    sess.group_id = None
+                    sess.updated_at = time.time()
+                    affected.append(sid)
+            self.groups.pop(gid)
+            self._persist_sessions(raise_on_error=True)
+            self._persist_groups(raise_on_error=True)
+        for sid in affected:
+            sess = self.sessions.get(sid)
+            if sess:
+                emit_session_state(sess, "group-changed")
+        return {"ok": True, "groupId": gid, "sessionIds": affected}
+
     def set_session_group(self, sid: str, group_id: str | None) -> dict:
         with self.lock:
             sess = self.sessions.get(sid)
@@ -560,9 +687,14 @@ class AgentManager:
                     text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False),
                     content_type="application/json",
                 )
+            normalized = str(group_id).strip() if group_id else None
+            if normalized and normalized not in self.groups:
+                raise web.HTTPNotFound(
+                    text=json.dumps({"error": f"group not found: {normalized}"}, ensure_ascii=False),
+                    content_type="application/json",
+                )
             previous_group_id = sess.group_id
             previous_updated_at = sess.updated_at
-            normalized = str(group_id).strip() if group_id else None
             sess.group_id = normalized or None
             sess.updated_at = time.time()
             try:
@@ -1367,16 +1499,15 @@ async def set_session_group_handler(request):
     data = await read_json(request)
     return json_ok(manager.set_session_group(sid, data.get("groupId")))
 async def list_groups_handler(request):
-    """List all session groups"""
-    with manager.lock:
-        session_groups = [(sess.id, sess.group_id) for sess in manager.sessions.values()]
-    groups = {}
-    for session_id, group_id in session_groups:
-        if group_id:
-            if group_id not in groups:
-                groups[group_id] = {"id": group_id, "name": group_id, "sessionIds": []}
-            groups[group_id]["sessionIds"].append(session_id)
-    return json_ok({"ok": True, "groups": list(groups.values())})
+    return json_ok({"ok": True, "groups": manager.list_groups()})
+
+async def create_group_handler(request):
+    data = await read_json(request)
+    return json_ok(manager.create_group(str(data.get("name") or "")))
+
+async def delete_group_handler(request):
+    gid = request.match_info["gid"]
+    return json_ok(manager.delete_group(gid))
 
 
 async def get_agents_handler(request):
@@ -1493,6 +1624,8 @@ def create_app(*, security: Optional[BridgeSecurity] = None, host: str = "127.0.
     app.router.add_get("/worldline/{sid}", worldline_handler)
     app.router.add_post("/worldline/{sid}/restore", worldline_restore_handler)
     app.router.add_get("/groups", list_groups_handler)
+    app.router.add_post("/groups", create_group_handler)
+    app.router.add_delete("/groups/{gid}", delete_group_handler)
     app.router.add_post("/path/open", path_open_handler)
 
     # Serve static frontend (desktop/static/)

@@ -125,11 +125,14 @@ const testExports = `
     state,
     createLocalSession,
     createSessionItem,
+    buildGroupElement,
     deleteSession,
     closeSession,
     assignSessionToGroup,
     createGroup,
+    deleteGroup,
     renderSessionList,
+    toggleGroup,
     getSessionTimeBucket: typeof getSessionTimeBucket === 'function' ? getSessionTimeBucket : null,
     compareSessionsByUpdatedAt: typeof compareSessionsByUpdatedAt === 'function' ? compareSessionsByUpdatedAt : null,
     setConfirmHook: (fn) => { showConfirmDialog = fn; },
@@ -281,32 +284,36 @@ async function testRenderSessionListBucketsAndGroupActions() {
   const list = new FakeElement('div');
   exported.setSessionListElement(list);
   const now = Date.now();
-  const grouped = { id: 'local-group', bridgeSessionId: 'bridge-group', title: 'Grouped', messages: [], groupId: 'Work', updatedAt: now };
+  const grouped = { id: 'local-group', bridgeSessionId: 'bridge-group', title: 'Grouped', messages: [], groupId: 'group-work', updatedAt: now };
   const todayNewest = { id: 'local-today-new', bridgeSessionId: 'bridge-today-new', title: 'Today newest', messages: [], updatedAt: now - 1000 };
   const todayOld = { id: 'local-today-old', bridgeSessionId: 'bridge-today-old', title: 'Today old', messages: [], updatedAt: now - 2000 };
   const yesterday = { id: 'local-yesterday', bridgeSessionId: 'bridge-yesterday', title: 'Yesterday', messages: [], updatedAt: now - 86400000 };
   const week = { id: 'local-week', bridgeSessionId: 'bridge-week', title: 'Week', messages: [], updatedAt: now - 3 * 86400000 };
   const older = { id: 'local-older', bridgeSessionId: 'bridge-older', title: 'Older', messages: [], updatedAt: now - 8 * 86400000 };
   [grouped, todayOld, todayNewest, yesterday, week, older].forEach(sess => state.sessions.set(sess.id, sess));
+  context.window.zeroAgent = { rpc: async () => ({ ok: true, group: { id: 'group-work', name: 'Work', position: 0, sessionIds: [] } }) };
   await exported.createGroup('Work');
   exported.renderSessionList();
 
   const group = list.children[0];
   assert.equal(group.className, 'session-group');
+  assert.equal(group.children[1].children.length, 1);
   assert.equal(group.children[1].children[0].dataset.sessionId, grouped.id);
-  const timeHeaders = list.children.filter(child => child.className.includes('session-time-header'));
-  assert.deepEqual(timeHeaders.map(header => header.children[1].textContent), ['今天', '昨天', '最近 7 天', '更早']);
-  const todayHeader = timeHeaders[0];
-  const todaySessions = list.children[list.children.indexOf(todayHeader) + 1];
+  const allSections = list.children;
+  const headers = allSections.map(s => s.children[0]).filter(h => h && h.className && h.className.includes('session-group-header'));
+  assert.deepEqual(headers.map(header => header.children[1].textContent), ['Work', '今天', '昨天', '最近 7 天', '更早']);
+  const todaySection = allSections[1];
+  const todaySessions = todaySection.children[1];
   assert.equal(todaySessions.children[0].dataset.sessionId, todayNewest.id);
   assert.equal(todaySessions.children[1].dataset.sessionId, todayOld.id);
 
-  context.window.zeroAgent = { rpc: async () => ({ ok: true, groupId: null }) };
+  context.window.zeroAgent = { rpc: async () => ({ ok: true, sessionIds: [grouped.id] }) };
   exported.setConfirmHook(async () => true);
-  const deleteGroupButton = group.children[0].children[2];
+  const groupHeader = group.children[0];
+  const deleteGroupButton = groupHeader.children[groupHeader.children.length - 1];
   await deleteGroupButton.click();
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(state.sessionGroups.has('Work'), false);
+  assert.equal(state.sessionGroups.has('group-work'), false);
   assert.equal(grouped.groupId, null);
 }
 
@@ -332,7 +339,6 @@ async function testConcurrentDeletesSharePromise() {
   await first;
   assert.equal(calls, 1);
 }
-
 async function testGroupAssignmentAndTimeHelpers() {
   resetState();
   const session = { id: 'local-grouped', bridgeSessionId: 'bridge-grouped', title: 'Grouped', messages: [], groupId: null };
@@ -341,20 +347,24 @@ async function testGroupAssignmentAndTimeHelpers() {
   context.window.zeroAgent = {
     rpc: async (method, params) => {
       calls.push({ method, params });
+      if (method === 'groups/create') return { ok: true, group: { id: 'group-remote', name: params.name, position: 0, createdAt: 1, sessionIds: [] } };
       return { ok: true, groupId: params.groupId };
     },
   };
-  await exported.createGroup('Work');
-  await exported.assignSessionToGroup(session.id, 'Work');
+  const workGroup = await exported.createGroup('Work');
+  assert.equal(workGroup.id, 'group-remote');
+  await exported.assignSessionToGroup(session.id, workGroup.id);
   await exported.assignSessionToGroup(session.id, null);
   assert.equal(session.groupId, null);
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0].method, 'session/group');
-  assert.equal(calls[0].params.sessionId, 'bridge-grouped');
-  assert.equal(calls[0].params.groupId, 'Work');
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].method, 'groups/create');
+  assert.equal(calls[0].params.name, 'Work');
   assert.equal(calls[1].method, 'session/group');
   assert.equal(calls[1].params.sessionId, 'bridge-grouped');
-  assert.equal(calls[1].params.groupId, null);
+  assert.equal(calls[1].params.groupId, 'group-remote');
+  assert.equal(calls[2].method, 'session/group');
+  assert.equal(calls[2].params.sessionId, 'bridge-grouped');
+  assert.equal(calls[2].params.groupId, null);
 
   assert.equal(typeof exported.getSessionTimeBucket, 'function');
   assert.equal(typeof exported.compareSessionsByUpdatedAt, 'function');
@@ -365,6 +375,45 @@ async function testGroupAssignmentAndTimeHelpers() {
   assert.equal(exported.getSessionTimeBucket(now - 8 * 86400000, now), 'older');
   assert.ok(exported.compareSessionsByUpdatedAt({ updatedAt: now }, { updatedAt: now - 1 }) < 0);
 }
+async function testCollapsibleSectionAndDragPayload() {
+  resetState();
+  const group = { id: 'group-work', name: '工作', position: 0, collapsed: true, sessionIds: [] };
+  state.sessionGroups.set(group.id, group);
+  const section = exported.buildGroupElement(group, []);
+  const header = section.children[0];
+  const content = section.children[1];
+  assert.equal(header.tagName, 'BUTTON');
+  assert.equal(header.attributes['aria-expanded'], 'false');
+  assert.equal(header.attributes['aria-controls'], content.attributes.id);
+
+  const item = exported.createSessionItem({
+    id: 'local-drag', bridgeSessionId: 'bridge-drag', title: 'Drag me',
+    groupId: null, updatedAt: Date.now(), messages: [],
+  });
+  assert.equal(item.attributes.draggable, 'true');
+  const transfer = { values: new Map(), effectAllowed: '', setData(type, value) { this.values.set(type, value); } };
+  await item.listeners.get('dragstart')({ dataTransfer: transfer });
+  assert.deepEqual(JSON.parse(transfer.values.get('application/json')), {
+    sessionId: 'bridge-drag', localSessionId: 'local-drag',
+  });
+}
+
+async function testGroupCreationUsesPersistedBridgeEntity() {
+  resetState();
+  const calls = [];
+  context.window.zeroAgent = {
+    rpc: async (method, params) => {
+      calls.push({ method, params });
+      return { ok: true, group: { id: 'group-remote', name: params.name, position: 0, createdAt: 1, sessionIds: [] } };
+    },
+  };
+  const group = await exported.createGroup('工作');
+  assert.equal(group.id, 'group-remote');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, 'groups/create');
+  assert.equal(calls[0].params.name, '工作');
+}
+
 
 (async () => {
   await testDeleteUsesBridgeIdAndSelectsNewestRemaining();
@@ -374,6 +423,8 @@ async function testGroupAssignmentAndTimeHelpers() {
   await testConcurrentDeletesSharePromise();
   await testGroupAssignmentAndTimeHelpers();
   await testRenderSessionListBucketsAndGroupActions();
+  await testCollapsibleSectionAndDragPayload();
+  await testGroupCreationUsesPersistedBridgeEntity();
 })().catch(error => {
   console.error(error.stack || error);
   process.exitCode = 1;
