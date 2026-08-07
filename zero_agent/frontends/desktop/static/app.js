@@ -848,6 +848,7 @@ function isUntitledSessionTitle(title) {
 }
 
 function createLocalSession(id, title, bridgeSessionId = id) {
+  const now = Date.now();
   const sess = {
     id, bridgeSessionId, title: title || 'New chat', messages: [], cwd: null,
     untitled: isUntitledSessionTitle(title),
@@ -860,6 +861,8 @@ function createLocalSession(id, title, bridgeSessionId = id) {
       cacheHitRate: 0.0, cacheMetricsAvailable: false,
     },
     groupId: null,
+    createdAt: now,
+    updatedAt: now,
   };
   getSessionRuntime(sess);
   // Keep freshly-created chats visually quiet: the empty state is enough guidance.
@@ -912,13 +915,106 @@ function setActiveSession(id) {
   }
 }
 
+// ─── In-app dialogs (native confirm()/prompt() are unreliable in the Tauri shell) ───
+let _confirmResolve = null;
+function showConfirmDialog({ title = '确认', message = '', okLabel = '确认', danger = false } = {}) {
+  return new Promise((resolve) => {
+    _confirmResolve = resolve;
+    $('confirm-title').textContent = title;
+    $('confirm-message').textContent = message;
+    const okBtn = $('confirm-ok');
+    okBtn.textContent = okLabel;
+    okBtn.classList.toggle('danger', !!danger);
+    $('confirm-modal').classList.remove('hidden');
+    okBtn.focus();
+  });
+}
+function closeConfirmDialog(result) {
+  $('confirm-modal').classList.add('hidden');
+  const resolve = _confirmResolve;
+  _confirmResolve = null;
+  if (resolve) resolve(result);
+}
+
+let _promptResolve = null;
+function showPromptDialog({ title = '输入', placeholder = '', initial = '', okLabel = '确定' } = {}) {
+  return new Promise((resolve) => {
+    _promptResolve = resolve;
+    $('prompt-title').textContent = title;
+    const input = $('prompt-input');
+    input.placeholder = placeholder;
+    input.value = initial;
+    $('prompt-ok').textContent = okLabel;
+    $('prompt-modal').classList.remove('hidden');
+    input.focus();
+    input.select();
+  });
+}
+function closePromptDialog(result) {
+  $('prompt-modal').classList.add('hidden');
+  const resolve = _promptResolve;
+  _promptResolve = null;
+  if (resolve) resolve(result);
+}
+
+// ─── Group persistence (frontend-owned metadata; session->group mapping lives in the bridge) ───
+const GROUP_STORAGE_KEY = 'za.sessionGroups';
+function saveSessionGroups() {
+  try {
+    const data = {};
+    for (const [id, g] of state.sessionGroups.entries()) {
+      data[id] = { name: g.name, collapsed: !!g.collapsed };
+    }
+    localStorage.setItem(GROUP_STORAGE_KEY, JSON.stringify(data));
+  } catch (_) { /* storage quota */ }
+}
+function loadSessionGroups() {
+  try {
+    const raw = localStorage.getItem(GROUP_STORAGE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    for (const [id, meta] of Object.entries(data)) {
+      const existing = state.sessionGroups.get(id);
+      if (existing) {
+        existing.name = meta.name || existing.name;
+        existing.collapsed = !!meta.collapsed;
+      } else {
+        state.sessionGroups.set(id, { id, name: meta.name || id, sessionIds: [], collapsed: !!meta.collapsed });
+      }
+    }
+  } catch (_) { /* ignore corrupt storage */ }
+}
+
+function normalizeSessionTimestamp(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+  return numeric < 100000000000 ? numeric * 1000 : numeric;
+}
+
+function getSessionTimestamp(sess) {
+  return normalizeSessionTimestamp(sess?.updatedAt) || normalizeSessionTimestamp(sess?.createdAt) || 0;
+}
+
+function compareSessionsByUpdatedAt(a, b) {
+  return getSessionTimestamp(b) - getSessionTimestamp(a);
+}
+
+function getSessionTimeBucket(timestamp, now = Date.now()) {
+  const current = normalizeSessionTimestamp(now) || Date.now();
+  const ts = normalizeSessionTimestamp(timestamp) || current;
+  const age = current - ts;
+  if (isSameDay(ts, current)) return 'today';
+  if (isSameDay(ts, current - 86400000)) return 'yesterday';
+  if (age >= 0 && age < 7 * 86400000) return 'week';
+  return 'older';
+}
+
 function renderSessionList() {
   sessionListEl.innerHTML = '';
 
-  // Group sessions by groupId
+  // Partition sessions: user groups vs ungrouped
   const grouped = new Map();
   const ungrouped = [];
-
   for (const sess of state.sessions.values()) {
     if (sess.groupId && state.sessionGroups.has(sess.groupId)) {
       if (!grouped.has(sess.groupId)) grouped.set(sess.groupId, []);
@@ -928,38 +1024,16 @@ function renderSessionList() {
     }
   }
 
-  // Render groups
+  const byRecent = compareSessionsByUpdatedAt;
+
+  // Render user groups (including empty ones so group creation gives feedback)
   for (const [groupId, group] of state.sessionGroups.entries()) {
-    const sessions = grouped.get(groupId) || [];
-    if (sessions.length === 0) continue;
-
-    const groupEl = document.createElement('div');
-    groupEl.className = 'session-group' + (group.collapsed ? ' collapsed' : '');
-
-    const headerEl = document.createElement('div');
-    headerEl.className = 'session-group-header';
-    headerEl.innerHTML = `
-      <span class="expand-icon">▼</span>
-      <span>${escapeHtml(group.name)}</span>
-    `;
-    headerEl.addEventListener('click', () => toggleGroup(groupId));
-    groupEl.appendChild(headerEl);
-
-    const sessionsEl = document.createElement('div');
-    sessionsEl.className = 'session-group-sessions';
-    sessions.forEach(sess => {
-      sessionsEl.appendChild(createSessionItem(sess));
-    });
-    groupEl.appendChild(sessionsEl);
-    sessionListEl.appendChild(groupEl);
+    const sessions = (grouped.get(groupId) || []).slice().sort(byRecent);
+    sessionListEl.appendChild(buildGroupElement(group, sessions));
   }
 
-  // Render ungrouped sessions
-  if (ungrouped.length > 0) {
-    ungrouped.forEach(sess => {
-      sessionListEl.appendChild(createSessionItem(sess));
-    });
-  }
+  // Render ungrouped sessions bucketed by time
+  renderTimeBuckets(ungrouped, byRecent);
 
   // Initialize drawer collapse state
   if (state.leftDrawerCollapsed) {
@@ -968,6 +1042,93 @@ function renderSessionList() {
   if (state.rightDrawerCollapsed) {
     rightDrawer.classList.add('collapsed');
   }
+}
+
+function buildGroupElement(group, sessions) {
+  const groupEl = document.createElement('div');
+  groupEl.className = 'session-group' + (group.collapsed ? ' collapsed' : '');
+
+  const headerEl = document.createElement('div');
+  headerEl.className = 'session-group-header';
+  const expandIcon = document.createElement('span');
+  expandIcon.className = 'expand-icon';
+  expandIcon.textContent = '▼';
+  const nameEl = document.createElement('span');
+  nameEl.className = 'group-name';
+  nameEl.textContent = group.name;
+  const delBtn = document.createElement('button');
+  delBtn.type = 'button';
+  delBtn.className = 'group-delete';
+  delBtn.textContent = '×';
+  delBtn.title = `删除分组「${group.name}」`;
+  delBtn.setAttribute('aria-label', `删除分组 ${group.name}`);
+  delBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const confirmed = await showConfirmDialog({
+      title: '删除分组',
+      message: `删除分组「${group.name}」后,其中的 ${sessions.length} 个会话将移回时间分组。`,
+      okLabel: '删除',
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      await deleteGroup(group.id);
+    } catch (err) {
+      showError('Failed to delete session group: ' + (err.message || err));
+    }
+  });
+  headerEl.append(expandIcon, nameEl, delBtn);
+  headerEl.addEventListener('click', () => toggleGroup(group.id));
+  groupEl.appendChild(headerEl);
+
+  const sessionsEl = document.createElement('div');
+  sessionsEl.className = 'session-group-sessions';
+  sessions.forEach(sess => {
+    sessionsEl.appendChild(createSessionItem(sess));
+  });
+  groupEl.appendChild(sessionsEl);
+  return groupEl;
+}
+
+function renderTimeBuckets(sessions, sortFn) {
+  const buckets = [
+    { key: 'today', label: '今天' },
+    { key: 'yesterday', label: '昨天' },
+    { key: 'week', label: '最近 7 天' },
+    { key: 'older', label: '更早' },
+  ];
+  const byBucket = new Map();
+  for (const sess of sessions.slice().sort(sortFn)) {
+    const bucketKey = getSessionTimeBucket(getSessionTimestamp(sess));
+    if (!byBucket.has(bucketKey)) byBucket.set(bucketKey, []);
+    byBucket.get(bucketKey).push(sess);
+  }
+  for (const bucket of buckets) {
+    const items = byBucket.get(bucket.key);
+    if (!items || items.length === 0) continue;
+    const header = document.createElement('div');
+    header.className = 'session-group-header session-time-header';
+    const icon = document.createElement('span');
+    icon.className = 'expand-icon';
+    icon.textContent = '▸';
+    const label = document.createElement('span');
+    label.textContent = bucket.label;
+    const count = document.createElement('span');
+    count.className = 'session-time-count';
+    count.textContent = String(items.length);
+    header.append(icon, label, count);
+    sessionListEl.appendChild(header);
+    const sessionsEl = document.createElement('div');
+    sessionsEl.className = 'session-group-sessions';
+    items.forEach(sess => sessionsEl.appendChild(createSessionItem(sess)));
+    sessionListEl.appendChild(sessionsEl);
+  }
+}
+
+function isSameDay(ts, refTs) {
+  const d = new Date(ts);
+  const r = new Date(refTs);
+  return d.getFullYear() === r.getFullYear() && d.getMonth() === r.getMonth() && d.getDate() === r.getDate();
 }
 
 function createSessionItem(sess) {
@@ -988,6 +1149,20 @@ function createSessionItem(sess) {
   label.textContent = sess.title;
   item.appendChild(label);
 
+  // Move-to-group button
+  const moveBtn = document.createElement('button');
+  moveBtn.type = 'button';
+  moveBtn.className = 'session-move';
+  moveBtn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+  moveBtn.title = '移动到分组';
+  moveBtn.setAttribute('aria-label', `Move session "${sess.title}" to a group`);
+  moveBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openSessionMenu(moveBtn, sess);
+  });
+  item.appendChild(moveBtn);
+
+  // Delete button
   const deleteBtn = document.createElement('button');
   deleteBtn.type = 'button';
   deleteBtn.className = 'session-delete';
@@ -996,7 +1171,14 @@ function createSessionItem(sess) {
   deleteBtn.setAttribute('aria-label', `Delete session "${sess.title}"`);
   deleteBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
-    if (deleteBtn.disabled || !confirm(`Delete session "${sess.title}"?`)) return;
+    if (deleteBtn.disabled) return;
+    const confirmed = await showConfirmDialog({
+      title: '删除会话',
+      message: `确定删除会话「${sess.title}」吗?此操作不可恢复。`,
+      okLabel: '删除',
+      danger: true,
+    });
+    if (!confirmed) return;
     deleteBtn.disabled = true;
     try {
       await closeSession(sess.id);
@@ -1008,57 +1190,141 @@ function createSessionItem(sess) {
 
   item.addEventListener('click', () => setActiveSession(sess.id));
 
-  // Right-click context menu for grouping
+  // Right-click also opens the move menu (native menu is disabled in the desktop shell)
   item.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    showSessionContextMenu(e, sess);
+    openSessionMenuAt(e.clientX, e.clientY, sess);
   });
 
   return item;
 }
 
-function showSessionContextMenu(e, sess) {
-  // Simple implementation: prompt for group name
-  const groupName = prompt('输入分组名称（留空则移除分组）:', sess.groupId || '');
-  if (groupName !== null) {
-    assignSessionToGroup(sess.id, groupName || null);
+// ─── Session move-to-group menu ─────────────────────────────────────────
+let _sessionMenuSession = null;
+let _menuSuppressClick = false;
+
+function openSessionMenu(anchorEl, sess) {
+  const rect = anchorEl.getBoundingClientRect();
+  openSessionMenuAt(rect.left, rect.top, sess);
+}
+
+function openSessionMenuAt(x, y, sess) {
+  _sessionMenuSession = sess;
+  const menu = $('session-menu');
+  const groupsEl = $('session-menu-groups');
+  groupsEl.innerHTML = '';
+
+  const groups = [...state.sessionGroups.values()]
+    .sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh'));
+  if (groups.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'session-menu-empty';
+    empty.textContent = '暂无分组';
+    groupsEl.appendChild(empty);
+  } else {
+    for (const group of groups) {
+      const item = document.createElement('div');
+      item.className = 'session-menu-item' + (sess.groupId === group.id ? ' active' : '');
+      item.textContent = group.name;
+      item.addEventListener('click', async () => {
+        closeSessionMenu();
+        try {
+          await assignSessionToGroup(sess.id, group.id);
+        } catch (_) {
+          // assignSessionToGroup already restored state and displayed the error.
+        }
+      });
+      groupsEl.appendChild(item);
+    }
   }
+
+  menu.classList.remove('hidden');
+  const menuRect = menu.getBoundingClientRect();
+  let left = Math.min(x - menuRect.width - 4, window.innerWidth - menuRect.width - 8);
+  left = Math.max(8, left);
+  let top = Math.min(y, window.innerHeight - menuRect.height - 8);
+  top = Math.max(8, top);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+
+  _menuSuppressClick = true;
+  setTimeout(() => { _menuSuppressClick = false; }, 0);
+}
+
+function closeSessionMenu() {
+  $('session-menu').classList.add('hidden');
+  _sessionMenuSession = null;
+}
+
+// ─── Group CRUD ─────────────────────────────────────────────────────────
+async function createGroup(name) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) return null;
+  const existing = state.sessionGroups.get(trimmed);
+  if (existing) return existing;
+  state.sessionGroups.set(trimmed, { id: trimmed, name: trimmed, sessionIds: [], collapsed: false });
+  saveSessionGroups();
+  renderSessionList();
+  return state.sessionGroups.get(trimmed);
+}
+
+async function deleteGroup(groupId) {
+  const group = state.sessionGroups.get(groupId);
+  if (!group) return;
+
+  const sessions = [...state.sessions.values()].filter(sess => sess.groupId === groupId);
+  for (const sess of sessions) {
+    try {
+      await assignSessionToGroup(sess.id, null);
+    } catch (_) {
+      // Keep the group when a session could not be ungrouped remotely.
+      return;
+    }
+  }
+  state.sessionGroups.delete(groupId);
+  saveSessionGroups();
+  renderSessionList();
 }
 
 async function assignSessionToGroup(sessionId, groupName) {
   const sess = state.sessions.get(sessionId);
   if (!sess) return;
-
-  // Create group if it doesn't exist
-  if (groupName && !state.sessionGroups.has(groupName)) {
-    state.sessionGroups.set(groupName, {
-      id: groupName,
-      name: groupName,
-      sessionIds: [],
-      collapsed: false
-    });
+  const previousGroupId = sess.groupId || null;
+  const trimmed = groupName ? String(groupName).trim() : '';
+  let createdGroup = false;
+  if (trimmed && !state.sessionGroups.has(trimmed)) {
+    await createGroup(trimmed);
+    createdGroup = true;
   }
 
-  sess.groupId = groupName;
-
-  if (sess.bridgeSessionId) {
-    try {
+  const nextGroupId = trimmed || null;
+  try {
+    if (sess.bridgeSessionId) {
       await window.zeroAgent.rpc('session/group', {
         sessionId: sess.bridgeSessionId,
-        groupId: groupName
+        groupId: nextGroupId,
       });
-    } catch (err) {
-      console.error('Failed to update group:', err);
     }
+    sess.groupId = nextGroupId;
+    saveSessionGroups();
+    renderSessionList();
+  } catch (err) {
+    sess.groupId = previousGroupId;
+    if (createdGroup && ![...state.sessions.values()].some(item => item.groupId === trimmed)) {
+      state.sessionGroups.delete(trimmed);
+    }
+    saveSessionGroups();
+    renderSessionList();
+    showError('Failed to update session group: ' + (err.message || err));
+    throw err;
   }
-
-  renderSessionList();
 }
 
 function toggleGroup(groupId) {
   const group = state.sessionGroups.get(groupId);
   if (group) {
     group.collapsed = !group.collapsed;
+    saveSessionGroups();
     renderSessionList();
   }
 }
@@ -1078,21 +1344,31 @@ function resetReplacedSession(sess, replacement) {
   sess.messages = [];
   sess.untitled = true;
   sess.lastError = '';
+  sess.groupId = null;
+  sess.createdAt = Number(replacement.createdAt) || Date.now();
+  sess.updatedAt = Number(replacement.updatedAt) || sess.createdAt;
   sess.tokenUsage = mergeTokenUsage(sess.tokenUsage, replacement.tokenUsage);
   state.runtimeBySessionId.delete(sess.id);
   state.activeAgents.delete(sess.id);
+  _domCache.delete(sess.id);
   setActiveSession(sess.id);
 }
-
-async function replaceFinalSession(bridgeSessionId) {
+async function replaceFinalSession(bridgeSessionId, cwd = '') {
   try {
     return await window.zeroAgent.rpc('session/replace', { sessionId: bridgeSessionId });
   } catch (firstError) {
-    try {
-      return await window.zeroAgent.rpc('session/replace', { sessionId: bridgeSessionId });
-    } catch (_) {
-      throw firstError;
+    if (!(firstError && (firstError.status === 404 || /not found/i.test(firstError.message || '')))) {
+      try {
+        return await window.zeroAgent.rpc('session/replace', { sessionId: bridgeSessionId });
+      } catch (_) {
+        throw firstError;
+      }
     }
+    const recovered = await window.zeroAgent.rpc('session/new', { cwd: cwd || '' });
+    if (recovered?.session) return recovered;
+    const newBridgeSessionId = recovered?.sessionId || recovered?.id;
+    if (!newBridgeSessionId) throw firstError;
+    return { sessionId: newBridgeSessionId, session: { id: newBridgeSessionId, title: 'New chat' } };
   }
 }
 
@@ -1101,7 +1377,7 @@ async function deleteSession(id) {
   if (!sess) return;
 
   if (state.sessions.size === 1) {
-    const result = await replaceFinalSession(sess.bridgeSessionId);
+    const result = await replaceFinalSession(sess.bridgeSessionId, sess.cwd);
     const replacement = result.session || result;
     if (!replacement.id && !replacement.sessionId) throw new Error('Bridge did not return a replacement session');
     resetReplacedSession(sess, replacement);
@@ -1112,23 +1388,18 @@ async function deleteSession(id) {
     try {
       await window.zeroAgent.rpc('session/delete', { sessionId: sess.bridgeSessionId });
     } catch (err) {
-      // If the bridge no longer knows this session (e.g. the backend was
-      // restarted and its in-memory map was reset), drop the local session
-      // instead of blocking deletion with a 404.
       if (!(err && (err.status === 404 || /not found/i.test(err.message || '')))) {
         throw err;
       }
     }
   }
 
-  const keys = [...state.sessions.keys()];
-  const idx = keys.indexOf(id);
+  const wasActive = state.activeId === id;
   await discardSession(sess);
-
-  if (state.activeId === id) {
-    const remaining = [...state.sessions.keys()];
-    const newIdx = Math.max(0, Math.min(idx, remaining.length - 1));
-    setActiveSession(remaining[newIdx]);
+  if (wasActive) {
+    const next = [...state.sessions.values()].sort(compareSessionsByUpdatedAt)[0];
+    if (next) setActiveSession(next.id);
+    else state.activeId = null;
   } else {
     renderSessionList();
   }
@@ -1151,6 +1422,7 @@ async function discardSession(sess) {
   state.sessions.delete(sess.id);
   state.runtimeBySessionId.delete(sess.id);
   state.activeAgents.delete(sess.id);
+  _domCache.delete(sess.id);
 }
 
 async function newSession() {
@@ -1383,6 +1655,12 @@ function handleNotification(msg) {
     }
     if (msg.groupId !== undefined) {
       sess.groupId = msg.groupId;
+    }
+    if (msg.updatedAt !== undefined) {
+      sess.updatedAt = Number(msg.updatedAt) || sess.updatedAt;
+    }
+    if (msg.createdAt !== undefined) {
+      sess.createdAt = Number(msg.createdAt) || sess.createdAt;
     }
 
     const runtime = getSessionRuntime(sess);
@@ -2616,6 +2894,9 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
         for (const bSess of existingSessions) {
           const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
           const sess = createLocalSession(localId, bSess.title || 'Restored', bSess.id || bSess.sessionId);
+          if (bSess.createdAt) sess.createdAt = Number(bSess.createdAt);
+          if (bSess.updatedAt) sess.updatedAt = Number(bSess.updatedAt);
+          sess.groupId = bSess.groupId || null;
           // Fetch full messages for this session
           const sid = bSess.id || bSess.sessionId;
           const msgRes = await window.zeroAgent.rpc('session/poll', { sessionId: sid, afterId: 0, limit: 9999 }).catch(() => null);
@@ -2631,8 +2912,25 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
             runtime.lastPolledMessageId = maxId;
           }
         }
-        // Activate the first session
-        const firstLocalId = [...state.sessions.keys()][0];
+        // Restore group metadata from the bridge (session -> group_id mapping)
+        const groupsRes = await window.zeroAgent.rpc('groups/list', {}).catch(() => null);
+        if (groupsRes?.groups) {
+          for (const g of groupsRes.groups) {
+            if (!state.sessionGroups.has(g.id)) {
+              state.sessionGroups.set(g.id, {
+                id: g.id,
+                name: g.name || g.id,
+                sessionIds: g.sessionIds || [],
+                collapsed: false,
+              });
+            }
+          }
+        }
+        loadSessionGroups();
+        renderSessionList();
+        const activeBridgeId = listRes?.activeSessionId;
+        const activeLocal = [...state.sessions.values()].find(sess => sess.bridgeSessionId === activeBridgeId);
+        const firstLocalId = activeLocal?.id || [...state.sessions.keys()][0];
         if (firstLocalId) setActiveSession(firstLocalId);
       } else {
         await newSession();
@@ -2645,7 +2943,10 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
 }
 
 window.zeroAgent.onBridgeReady(() => {
-  markBridgeReady();
+  void markBridgeReady().catch((err) => {
+    addDiagnostic('error', 'Bridge bootstrap failed', err);
+    showError('Failed to restore sessions: ' + (err.message || err));
+  });
 });
 
 window.zeroAgent.onBridgeMessage(() => {
@@ -3104,10 +3405,8 @@ const pendingImages = []; // Array of { dataUrl, id }
   updateSendButton();
   inputEl.focus();
 
-  // Initialize default group
-  if (!state.sessionGroups.has('default')) {
-    state.sessionGroups.set('default', { id: 'default', name: '未分组', sessionIds: [], collapsed: false });
-  }
+  // Restore group metadata persisted locally (names/collapsed state)
+  loadSessionGroups();
 
   // ─── Input Event Listeners ──────────────────────────────────────────────
   inputEl.addEventListener('input', () => {
@@ -3187,11 +3486,6 @@ const pendingImages = []; // Array of { dataUrl, id }
     } else submitInput();
   });
 
-  // Initialize default group
-  if (!state.sessionGroups.has('default')) {
-    state.sessionGroups.set('default', { id: 'default', name: '未分组', sessionIds: [], collapsed: false });
-  }
-
   // ─── Button Event Listeners ────────────────────────────────────────────
   $('new-session-btn')?.addEventListener('click', newSession);
   $('error-dismiss')?.addEventListener('click', hideError);
@@ -3202,6 +3496,103 @@ const pendingImages = []; // Array of { dataUrl, id }
   $('toggle-right-drawer')?.addEventListener('click', toggleRightDrawer);
   $('toggle-right-drawer-alt')?.addEventListener('click', toggleRightDrawer);
   $('close-right-drawer')?.addEventListener('click', toggleRightDrawer);
+
+  // ─── New group button ───────────────────────────────────────────────────
+  $('add-group-btn')?.addEventListener('click', async () => {
+    const name = await showPromptDialog({
+      title: '新建分组',
+      placeholder: '输入分组名称',
+      okLabel: '创建',
+    });
+    if (name === null) return;
+    const trimmed = name.trim();
+    if (!trimmed) { showError('分组名称不能为空'); return; }
+    if (state.sessionGroups.has(trimmed)) { showError(`分组「${trimmed}」已存在`); return; }
+    await createGroup(trimmed);
+  });
+
+  // ─── Confirm dialog ─────────────────────────────────────────────────────
+  $('confirm-ok')?.addEventListener('click', () => closeConfirmDialog(true));
+  $('confirm-cancel')?.addEventListener('click', () => closeConfirmDialog(false));
+  $('confirm-close')?.addEventListener('click', () => closeConfirmDialog(false));
+  document.querySelectorAll('[data-close-confirm]').forEach(el => {
+    el.addEventListener('click', () => closeConfirmDialog(false));
+  });
+
+  // ─── Prompt dialog ──────────────────────────────────────────────────────
+  $('prompt-ok')?.addEventListener('click', () => {
+    const input = $('prompt-input');
+    closePromptDialog(input.value);
+  });
+  $('prompt-cancel')?.addEventListener('click', () => closePromptDialog(null));
+  $('prompt-close')?.addEventListener('click', () => closePromptDialog(null));
+  document.querySelectorAll('[data-close-prompt]').forEach(el => {
+    el.addEventListener('click', () => closePromptDialog(null));
+  });
+  const promptInput = $('prompt-input');
+  if (promptInput) {
+    promptInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        closePromptDialog(promptInput.value);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        closePromptDialog(null);
+      }
+    });
+  }
+
+  // ─── Session move menu ──────────────────────────────────────────────────
+  const sessionMenu = $('session-menu');
+  sessionMenu?.querySelector('[data-menu-action="new-group"]')?.addEventListener('click', async () => {
+    const target = _sessionMenuSession;
+    closeSessionMenu();
+    if (!target) return;
+    const name = await showPromptDialog({
+      title: '新建分组',
+      placeholder: '输入分组名称',
+      okLabel: '创建',
+    });
+    if (name === null) return;
+    const trimmed = name.trim();
+    if (!trimmed) {
+      showError('分组名称不能为空');
+      return;
+    }
+    if (state.sessionGroups.has(trimmed)) {
+      showError(`分组「${trimmed}」已存在`);
+      return;
+    }
+    try {
+      await assignSessionToGroup(target.id, trimmed);
+    } catch (_) {
+      // assignSessionToGroup already restored state and displayed the error.
+    }
+  });
+  sessionMenu?.querySelector('[data-menu-action="ungroup"]')?.addEventListener('click', async () => {
+    const target = _sessionMenuSession;
+    closeSessionMenu();
+    if (!target) return;
+    try {
+      await assignSessionToGroup(target.id, null);
+    } catch (_) {
+      // assignSessionToGroup already restored state and displayed the error.
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (_menuSuppressClick) return;
+    if (sessionMenu && !sessionMenu.classList.contains('hidden') && !sessionMenu.contains(e.target)) {
+      closeSessionMenu();
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (sessionMenu && !sessionMenu.classList.contains('hidden')) {
+        e.preventDefault();
+        closeSessionMenu();
+      }
+    }
+  });
 
   // ─── Model Picker ───────────────────────────────────────────────────────
   modelStatus?.addEventListener('click', openModelPicker);

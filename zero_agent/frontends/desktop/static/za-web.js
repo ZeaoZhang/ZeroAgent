@@ -145,6 +145,8 @@
         if (!sid) throw new Error('session/group missing sessionId');
         return http(`/session/${encodeURIComponent(sid)}/group`, { method: 'POST', body: params || {} });
       }
+      case 'groups/list':
+        return http('/groups');
       case 'session/model': {
         const sid = params.sessionId || params.id || params.bridgeSessionId;
         if (!sid) throw new Error('session/model missing sessionId');

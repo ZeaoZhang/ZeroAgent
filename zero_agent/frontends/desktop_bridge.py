@@ -60,6 +60,7 @@ def find_default_project_root() -> Path:
 DEFAULT_PROJECT_ROOT = find_default_project_root()
 
 MAX_SESSION_IDEMPOTENCY_RESULTS = 256
+SESSION_PERSISTENCE_LOCK = threading.Lock()
 
 
 def remember_session_result(results: OrderedDict[tuple[str, str], dict], operation: str, session_id: str, result: dict) -> None:
@@ -360,24 +361,36 @@ class AgentManager:
             for sess in self.sessions.values()
             if sess.log_path and _DESKTOP_SESSION_ID_RE.fullmatch(sess.id)
         }
+    def _newest_session_id(self) -> Optional[str]:
+        if not self.sessions:
+            return None
+        return max(
+            self.sessions.values(),
+            key=lambda sess: (float(sess.updated_at or 0), sess.id),
+        ).id
 
-    def _persist_sessions(self) -> None:
+
+    def _persist_sessions(self, *, raise_on_error: bool = False) -> None:
         """Atomically write all in-memory sessions to sessions.json."""
         store = os.path.join(self.sessions_dir, "sessions.json")
+        tmp = f"{store}.{uuid.uuid4().hex}.tmp"
         try:
-            os.makedirs(self.sessions_dir, exist_ok=True)
-            with self.lock:
+            with self.lock, SESSION_PERSISTENCE_LOCK:
+                os.makedirs(self.sessions_dir, exist_ok=True)
                 payload = {
                     "version": 1,
                     "activeSessionId": self.active_session_id,
                     "sessions": [_session_to_persistable(s) for s in self.sessions.values()],
                 }
-            tmp = store + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh, ensure_ascii=False, indent=2)
-            os.replace(tmp, store)
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh, ensure_ascii=False, indent=2)
+                os.replace(tmp, store)
         except Exception as exc:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
             print(f"persist sessions failed: {exc}", file=sys.stderr)
+            if raise_on_error:
+                raise
 
     def _load_persisted_sessions(self) -> None:
         """Restore sessions from sessions.json on startup."""
@@ -539,6 +552,29 @@ class AgentManager:
                     client.log_path = None
         return owned_path
 
+    def set_session_group(self, sid: str, group_id: str | None) -> dict:
+        with self.lock:
+            sess = self.sessions.get(sid)
+            if not sess:
+                raise web.HTTPNotFound(
+                    text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False),
+                    content_type="application/json",
+                )
+            previous_group_id = sess.group_id
+            previous_updated_at = sess.updated_at
+            normalized = str(group_id).strip() if group_id else None
+            sess.group_id = normalized or None
+            sess.updated_at = time.time()
+            try:
+                self._persist_sessions(raise_on_error=True)
+            except Exception:
+                sess.group_id = previous_group_id
+                sess.updated_at = previous_updated_at
+                raise
+            result = {"ok": True, "sessionId": sid, "groupId": sess.group_id}
+        emit_session_state(sess, "group-changed")
+        return result
+
     def delete_session(self, sid: str) -> dict:
         with self.lock:
             key = ("delete", sid)
@@ -555,7 +591,7 @@ class AgentManager:
                     sess.agent.abort()
             self.sessions.pop(sid)
             if self.active_session_id == sid:
-                self.active_session_id = next(iter(self.sessions), None)
+                self.active_session_id = self._newest_session_id()
             if owned_path:
                 with contextlib.suppress(OSError):
                     if os.path.isfile(owned_path):
@@ -1326,27 +1362,20 @@ async def get_tokens_handler(request):
 
 
 async def set_session_group_handler(request):
-    """Assign session to a group"""
+    """Assign a session to a persisted frontend group."""
     sid = request.match_info["sid"]
     data = await read_json(request)
-    group_id = data.get("groupId")
-
-    sess = manager.get_session(sid)
-    sess.group_id = group_id
-    sess.updated_at = time.time()
-
-    return json_ok({"ok": True, "sessionId": sid, "groupId": group_id})
-
-
+    return json_ok(manager.set_session_group(sid, data.get("groupId")))
 async def list_groups_handler(request):
     """List all session groups"""
-    # Groups are managed in frontend for now, backend just stores group_id
+    with manager.lock:
+        session_groups = [(sess.id, sess.group_id) for sess in manager.sessions.values()]
     groups = {}
-    for sess in manager.sessions.values():
-        if sess.group_id:
-            if sess.group_id not in groups:
-                groups[sess.group_id] = {"id": sess.group_id, "name": sess.group_id, "sessionIds": []}
-            groups[sess.group_id]["sessionIds"].append(sess.id)
+    for session_id, group_id in session_groups:
+        if group_id:
+            if group_id not in groups:
+                groups[group_id] = {"id": group_id, "name": group_id, "sessionIds": []}
+            groups[group_id]["sessionIds"].append(session_id)
     return json_ok({"ok": True, "groups": list(groups.values())})
 
 

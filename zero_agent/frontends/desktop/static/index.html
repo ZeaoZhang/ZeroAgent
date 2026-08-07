@@ -11,11 +11,19 @@
     <aside id="left-drawer" class="drawer left-drawer">
       <div class="drawer-header">
         <h2>Sessions</h2>
-        <button id="new-session-btn" class="icon-btn" title="New chat" aria-label="New chat">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 5v14M5 12h14"/>
-          </svg>
-        </button>
+        <div class="drawer-header-actions">
+          <button id="add-group-btn" class="icon-btn" title="新建分组" aria-label="新建分组">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+              <path d="M12 11v4M10 13h4"/>
+            </svg>
+          </button>
+          <button id="new-session-btn" class="icon-btn" title="New chat" aria-label="New chat">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 5v14M5 12h14"/>
+            </svg>
+          </button>
+        </div>
       </div>
       <div class="drawer-content">
         <div id="session-list" class="session-list"></div>
@@ -133,6 +141,50 @@
           <div id="model-list" class="model-list"></div>
         </div>
       </div>
+    </div>
+
+    <!-- Confirm Dialog -->
+    <div id="confirm-modal" class="modal hidden">
+      <div class="modal-backdrop" data-close-confirm></div>
+      <div class="modal-content confirm-dialog">
+        <div class="modal-header">
+          <h3 id="confirm-title">确认</h3>
+          <button class="icon-btn" id="confirm-close" aria-label="取消">✕</button>
+        </div>
+        <div class="modal-body">
+          <p id="confirm-message" class="dialog-message"></p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn ghost" id="confirm-cancel">取消</button>
+          <button class="btn primary" id="confirm-ok">确认</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompt Dialog -->
+    <div id="prompt-modal" class="modal hidden">
+      <div class="modal-backdrop" data-close-prompt></div>
+      <div class="modal-content prompt-dialog">
+        <div class="modal-header">
+          <h3 id="prompt-title">输入</h3>
+          <button class="icon-btn" id="prompt-close" aria-label="取消">✕</button>
+        </div>
+        <div class="modal-body">
+          <input id="prompt-input" class="dialog-input" type="text" autocomplete="off" />
+        </div>
+        <div class="modal-footer">
+          <button class="btn ghost" id="prompt-cancel">取消</button>
+          <button class="btn primary" id="prompt-ok">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Session menu (move to group) -->
+    <div id="session-menu" class="session-menu hidden" role="menu" aria-label="移动到分组">
+      <div class="session-menu-title">移动到分组</div>
+      <div id="session-menu-groups" class="session-menu-groups"></div>
+      <button type="button" class="session-menu-item" data-menu-action="new-group" role="menuitem">＋ 新建分组…</button>
+      <button type="button" class="session-menu-item" data-menu-action="ungroup" role="menuitem">移出分组</button>
     </div>
 
     <!-- Error banner -->

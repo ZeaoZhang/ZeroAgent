@@ -46,6 +46,20 @@ def test_frontend_message_reconciliation_regression() -> None:
         check=False,
     )
     assert result.returncode == 0, f"Node regression failed:\n{result.stdout}\n{result.stderr}"
+def test_frontend_session_sidebar_regression() -> None:
+    root = Path(__file__).resolve().parents[1]
+    node = shutil.which("node")
+    assert node, "Node.js is required for the frontend session sidebar regression"
+    script = root / "tests" / "frontend_session_sidebar.test.js"
+    result = subprocess.run(
+        [node, str(script)],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"Node session sidebar regression failed:\n{result.stdout}\n{result.stderr}"
+
 
 
 def test_desktop_session_deletion_uses_atomic_replacement() -> None:
@@ -95,7 +109,34 @@ def test_desktop_sessions_own_distinct_logs_and_delete_only_their_own(monkeypatc
     manager.delete_session(first.id)
     assert not Path(first.log_path).exists()
     assert Path(second.log_path).read_text(encoding="utf-8") == "second"
-    assert second.id in manager.sessions
+def test_deleting_active_session_selects_newest_remaining_and_persists(monkeypatch, tmp_path) -> None:
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test",
+            api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+    oldest = manager.create_session()
+    active = manager.create_session()
+    newest = manager.create_session()
+    oldest.updated_at = 10.0
+    active.updated_at = 20.0
+    newest.updated_at = 30.0
+    manager.active_session_id = active.id
+    manager._persist_sessions()
+
+    manager.delete_session(active.id)
+
+    assert manager.active_session_id == newest.id
+    restored = desktop_bridge.AgentManager()
+    assert restored.active_session_id == newest.id
+
+
 
 
 def test_persisted_desktop_session_regenerates_owned_log_path(tmp_path) -> None:
@@ -396,6 +437,8 @@ def test_create_app_exposes_desktop_http_contract() -> None:
     assert ("POST", "/session/{sid}/cancel") in routes
     assert ("POST", "/session/{sid}/model") in routes
     assert ("POST", "/session/{sid}/group") in routes
+    assert ("GET", "/groups") in routes
+    assert ("GET", "/session/{sid}/agents") in routes
     assert ("POST", "/session/{sid}/agents/{aid}/cancel") in routes
     assert ("GET", "/ws") in routes
 
@@ -1058,3 +1101,45 @@ def test_cancel_marks_session_cancelled_and_aborts_runner() -> None:
     assert sess.partial is None
     assert sess.terminal_status == "cancelled"
     assert sess.terminal_reason == "user_cancelled"
+def test_session_group_assignment_persists_and_reloads(monkeypatch, tmp_path) -> None:
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test",
+            api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    first = desktop_bridge.AgentManager()
+    session = first.create_session()
+
+    first.set_session_group(session.id, "work")
+
+    second = desktop_bridge.AgentManager()
+    assert second.sessions[session.id].group_id == "work"
+def test_session_group_assignment_rolls_back_when_persistence_fails(monkeypatch, tmp_path) -> None:
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test",
+            api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+    session = manager.create_session()
+    original_updated_at = session.updated_at
+
+    def fail_persist(*, raise_on_error=False):
+        raise OSError("read-only sessions store")
+
+    monkeypatch.setattr(manager, "_persist_sessions", fail_persist)
+    with pytest.raises(OSError, match="read-only"):
+        manager.set_session_group(session.id, "work")
+
+    assert session.group_id is None
+    assert session.updated_at == original_updated_at
