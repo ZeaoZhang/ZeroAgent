@@ -468,6 +468,57 @@ def test_sync_chat_preserves_native_usage_protocol_and_normalizes_stop(monkeypat
     assert mock.usage is usage
     assert mock.tool_protocol == "native"
     assert mock.stop_reason == "end_turn"
+def test_chat_logs_redacted_request_and_response_metadata(monkeypatch, caplog) -> None:
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="hello", reasoning_content="", tool_calls=None),
+                finish_reason="stop",
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+    )
+    monkeypatch.setattr(
+        "zero_agent.llm.sessions.litellm.completion",
+        lambda **kwargs: response,
+    )
+
+    session = _make_session()
+    session.config.stream = False
+    session.config.api_key = "sk-secret-value"
+    with caplog.at_level("INFO", logger="zero_agent.llm.sessions"):
+        _drain_chat(session.chat([{"role": "user", "content": "do not log me"}], tools=[]))
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "llm_request" in messages
+    assert "llm_response" in messages
+    assert "gpt-test" in messages
+    assert "do not log me" not in messages
+    assert "sk-secret-value" not in messages
+
+
+def test_chat_logs_redacted_failure_and_preserves_cause(monkeypatch, caplog) -> None:
+    def fail(**kwargs):
+        raise RuntimeError("upstream rejected key sk-secret-value")
+
+    monkeypatch.setattr("zero_agent.llm.sessions.litellm.completion", fail)
+    session = _make_session()
+    session.config.stream = False
+    session.config.api_key = "sk-secret-value"
+
+    with caplog.at_level("ERROR", logger="zero_agent.llm.sessions"):
+        try:
+            _drain_chat(session.chat([{"role": "user", "content": "private prompt"}], tools=[]))
+        except Exception as exc:
+            error = exc
+
+    assert type(error).__name__ == "LLMError"
+    assert isinstance(error.__cause__, RuntimeError)
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "llm_failure" in messages
+    assert "RuntimeError" in messages
+    assert "private prompt" not in messages
+    assert "sk-secret-value" not in messages
 
 
 def test_stream_chat_preserves_accumulated_fields_when_final_chunk_has_no_message(monkeypatch) -> None:
@@ -588,6 +639,47 @@ def test_close_response_log_prevents_late_worker_write(tmp_path) -> None:
         ),
         session_log_path=str(tmp_path / "owned.log"),
     )
+
+    session.close_response_log()
+    session._write_model_response_log(
+        [{"role": "user", "content": "private"}],
+        SimpleNamespace(content="private", tool_calls=[], thinking=""),
+    )
+
+    assert not (tmp_path / "owned.log").exists()
+
+
+def test_chat_writes_session_response_log(monkeypatch, tmp_path) -> None:
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="hello", reasoning_content="", tool_calls=None),
+                finish_reason="stop",
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+    )
+    monkeypatch.setattr(
+        "zero_agent.llm.sessions.litellm.completion",
+        lambda **kwargs: response,
+    )
+    session = LiteLLMSession(
+        LLMBackendConfig(
+            name="default",
+            provider="openai",
+            api_key="sk-test",
+            api_base="https://api.openai.com/v1",
+            model="gpt-test",
+        ),
+        sessions_dir=str(tmp_path),
+    )
+    session.config.stream = False
+
+    _drain_chat(session.chat([{"role": "user", "content": "hi"}], tools=[]))
+
+    response_logs = list(tmp_path.glob("model_responses_*.txt"))
+    assert len(response_logs) == 1
+    assert "=== Prompt ===" in response_logs[0].read_text(encoding="utf-8")
 
     session.close_response_log()
     session._write_model_response_log(

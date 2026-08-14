@@ -340,6 +340,26 @@ class TestContinueCmd:
             with patch("zero_agent.bots.shared.continue_cmd._sessions_glob",
                        os.path.join(tmp, "model_responses_*.txt")):
                 assert list_sessions() == []
+    def test_list_sessions_counts_only_pairs_with_real_user_prompts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model_responses_test.txt"
+            path.write_text(
+                "=== Prompt ===\n"
+                '{"role": "user", "content": "   "}\n'
+                "=== Response ===\n"
+                "[{'type': 'text', 'text': 'ignored'}]\n"
+                "=== Prompt ===\n"
+                '{"role": "user", "content": "real prompt"}\n'
+                "=== Response ===\n"
+                "[{'type': 'text', 'text': 'answer'}]\n",
+                encoding="utf-8",
+            )
+            with patch("zero_agent.bots.shared.continue_cmd._sessions_glob", str(path)):
+                sessions = list_sessions()
+
+        assert len(sessions) == 1
+        assert sessions[0][2] == "real prompt"
+        assert sessions[0][3] == 1
 
     def test_reset_conversation(self):
         mock_runner = MagicMock()

@@ -7,10 +7,13 @@ LiteLLMSession 封装 litellm.completion()，用一套代码处理所有 LLM 提
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
+from urllib.parse import urlsplit
 
 import litellm
 
@@ -27,6 +30,25 @@ from zero_agent.llm.base import (
     usage_has_cache_metrics,
 )
 from zero_agent.llm.converters import msgs_claude_to_openai
+
+_logger = logging.getLogger("zero_agent.llm.sessions")
+
+
+def _redact_error(value: Any, secret: str = "") -> str:
+    """Return an exception string safe for diagnostic logs."""
+    text = str(value)
+    if secret:
+        text = text.replace(secret, "<redacted-api-key>")
+    return text[:1000]
+
+
+def _api_host(api_base: str) -> str:
+    """Return only the host portion of an API base URL."""
+    try:
+        return urlsplit(str(api_base)).netloc or "<unknown>"
+    except ValueError:
+        return "<invalid>"
+
 
 
 def _model_cost_map_path(path: str | os.PathLike[str] | None = None) -> Path | None:
@@ -177,34 +199,24 @@ class LiteLLMSession:
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Generator[str, None, MockResponse]:
-        """发送消息到 LLM 并获取流式响应.
-
-        Generator 协议:
-            - yield: 流式文本块（str），供 UI 实时展示.
-            - return: MockResponse，包含完整内容和工具调用.
-
-        Args:
-            messages: 消息列表，OpenAI 格式 [{"role": ..., "content": ...}].
-            tools: 工具 schema 列表，OpenAI 格式 [{"type": "function", "function": {...}}].
-
-        Yields:
-            文本内容块（流式时逐块 yield，非流式时一次性 yield 全部内容）.
-
-        Returns:
-            MockResponse 包含 content / tool_calls / thinking / stop_reason.
-        """
+        """发送消息到 LLM 并获取流式响应."""
+        request_started = time.monotonic()
         with self.lock:
-            # 追加标准化后的消息到历史。AgentLoop may pass custom
-            # tool_results; normalize them before they hit provider payloads.
             normalized_messages = self._normalize_incoming_messages(messages)
             self.history.extend(normalized_messages)
             self._trim_history()
             full_messages = self._build_messages()
 
-        # Native-only mode passes provider tool schemas through unchanged.
         tools = self._sanitize_tools(tools)
-
-        # 记录 prompt 日志
+        _logger.info(
+            "llm_request backend=%s model=%s api_host=%s stream=%s messages=%d tools=%d",
+            self.name,
+            self.config.model,
+            _api_host(self.config.api_base),
+            bool(self.config.stream),
+            len(normalized_messages),
+            len(tools or []),
+        )
         self._write_llm_log(
             "Prompt",
             json.dumps(normalized_messages, ensure_ascii=False, indent=2),
@@ -216,7 +228,15 @@ class LiteLLMSession:
             else:
                 mock = yield from self._sync_chat(full_messages, tools)
 
-            # 记录 response 日志
+            elapsed_ms = round((time.monotonic() - request_started) * 1000, 1)
+            _logger.info(
+                "llm_response backend=%s model=%s elapsed_ms=%s stop_reason=%s tool_calls=%d",
+                self.name,
+                self.config.model,
+                elapsed_ms,
+                mock.stop_reason,
+                len(mock.tool_calls or []),
+            )
             resp_log = {
                 "content": mock.content[:2000] if mock.content else "",
                 "tool_calls": [
@@ -227,13 +247,38 @@ class LiteLLMSession:
                 "stop_reason": mock.stop_reason,
             }
             self._write_llm_log("Response", json.dumps(resp_log, ensure_ascii=False, indent=2))
-
-            # Write model_responses log for continue_cmd / session history.
             self._write_model_response_log(messages, mock)
-
             return mock
         except Exception as e:
-            raise LLMError(f"LLM 调用失败 [{self.name}]: {e}") from e
+            elapsed_ms = round((time.monotonic() - request_started) * 1000, 1)
+            safe_error = _redact_error(e, self.config.api_key)
+            _logger.error(
+                "llm_failure backend=%s model=%s api_host=%s elapsed_ms=%s error_type=%s error=%s",
+                self.name,
+                self.config.model,
+                _api_host(self.config.api_base),
+                elapsed_ms,
+                type(e).__name__,
+                safe_error,
+            )
+            self._write_llm_log(
+                "Failure",
+                json.dumps(
+                    {
+                        "backend": self.name,
+                        "model": self.config.model,
+                        "api_host": _api_host(self.config.api_base),
+                        "elapsed_ms": elapsed_ms,
+                        "error_type": type(e).__name__,
+                        "error": safe_error,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+            raise LLMError(
+                f"LLM 调用失败 [{self.name}]: {safe_error}"
+            ) from e
 
     def _stream_chat(
         self,
@@ -1282,7 +1327,7 @@ class LiteLLMSession:
             if mock.thinking:
                 blocks.append({"type": "thinking", "thinking": mock.thinking})
 
-            ts = _time.strftime("%Y-%m-%d %H:%M:%S")
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
             try:
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(f"=== Prompt === {ts}\n"

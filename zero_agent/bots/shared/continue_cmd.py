@@ -203,7 +203,7 @@ def _parse_native_history(pairs: list) -> list | None:
 
 
 def list_sessions(exclude_pid: int | None = None) -> list:
-    """Newest-first list of (path, mtime, first_user_text, n_rounds)."""
+    """Newest-first list of sessions containing real user prompts."""
     files = glob.glob(_sessions_glob)
     if exclude_pid is not None:
         tag = f"model_responses_{exclude_pid}.txt"
@@ -215,7 +215,7 @@ def list_sessions(exclude_pid: int | None = None) -> list:
                 content = fh.read()
         except OSError:
             continue
-        pairs = _pairs(content)
+        pairs = [pair for pair in _pairs(content) if _user_text(pair[0])]
         if not pairs:
             continue
         out.append((f, os.path.getmtime(f), _preview_text(pairs), len(pairs)))

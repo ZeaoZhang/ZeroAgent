@@ -278,6 +278,28 @@ def _resolve_runtime_path(path: str | os.PathLike[str] | None) -> str:
 # Session persistence (sessions.json) so conversations survive app restarts.
 # ---------------------------------------------------------------------------
 
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return "\n".join(
+            str(block.get("text") or block.get("content") or "").strip()
+            for block in content
+            if isinstance(block, dict) and block.get("type") in {"text", "input_text"}
+        ).strip()
+    return ""
+
+
+def session_has_user_message(session_or_messages: Session | list[dict]) -> bool:
+    messages = getattr(session_or_messages, "messages", session_or_messages)
+    return any(
+        isinstance(message, dict)
+        and message.get("role") == "user"
+        and bool(_message_text(message.get("content")))
+        for message in (messages or [])
+    )
+
+
 def _session_to_persistable(sess: Session) -> dict:
     return {
         "id": sess.id,
@@ -430,16 +452,23 @@ class AgentManager:
 
 
     def _persist_sessions(self, *, raise_on_error: bool = False) -> None:
-        """Atomically write all in-memory sessions to sessions.json."""
+        """Atomically write non-empty in-memory sessions to sessions.json."""
         store = os.path.join(self.sessions_dir, "sessions.json")
         tmp = f"{store}.{uuid.uuid4().hex}.tmp"
         try:
             with self.lock, SESSION_PERSISTENCE_LOCK:
+                persisted = [s for s in self.sessions.values() if session_has_user_message(s)]
+                if not persisted:
+                    with contextlib.suppress(OSError):
+                        os.remove(store)
+                    return
                 os.makedirs(self.sessions_dir, exist_ok=True)
+                persisted_ids = {s.id for s in persisted}
+                active_id = self.active_session_id if self.active_session_id in persisted_ids else persisted[-1].id
                 payload = {
                     "version": 1,
-                    "activeSessionId": self.active_session_id,
-                    "sessions": [_session_to_persistable(s) for s in self.sessions.values()],
+                    "activeSessionId": active_id,
+                    "sessions": [_session_to_persistable(s) for s in persisted],
                 }
                 with open(tmp, "w", encoding="utf-8") as fh:
                     json.dump(payload, fh, ensure_ascii=False, indent=2)
@@ -452,7 +481,7 @@ class AgentManager:
                 raise
 
     def _load_persisted_sessions(self) -> None:
-        """Restore sessions from sessions.json on startup."""
+        """Restore non-empty sessions and remove stale empty records."""
         store = os.path.join(self.sessions_dir, "sessions.json")
         if not os.path.isfile(store):
             return
@@ -462,10 +491,13 @@ class AgentManager:
         except Exception as exc:
             print(f"load persisted sessions failed: {exc}", file=sys.stderr)
             return
-        sessions = payload.get("sessions") or []
-        for data in sessions:
+        skipped = False
+        for data in payload.get("sessions") or []:
             try:
                 sess = _session_from_persisted(data, self.sessions_dir)
+                if not session_has_user_message(sess):
+                    skipped = True
+                    continue
                 self.sessions[sess.id] = sess
             except Exception as exc:
                 print(f"skip broken persisted session: {exc}", file=sys.stderr)
@@ -474,6 +506,9 @@ class AgentManager:
             self.active_session_id = active
         elif self.sessions:
             self.active_session_id = next(iter(self.sessions))
+        if skipped:
+            self._persist_sessions()
+
 
     def _load_base_config(self) -> AgentConfig:
         try:
@@ -562,11 +597,12 @@ class AgentManager:
         sess.updated_at = time.time()
         if role == "user" and content.strip() and sess.title == "New chat":
             sess.title = content.strip().replace("\n", " ")[:40]
-        self._persist_sessions()
+        if session_has_user_message(sess):
+            self._persist_sessions()
         return msg
-
     def create_session(self, cwd: Optional[str] = None) -> Session:
         sid = "sess-" + uuid.uuid4().hex[:12]
+        os.makedirs(self.sessions_dir, exist_ok=True)
         sess = Session(
             id=sid,
             cwd=str(cwd or self.workspace_dir),
@@ -575,7 +611,6 @@ class AgentManager:
         with self.lock:
             self.sessions[sid] = sess
             self.active_session_id = sid
-            self._persist_sessions()
         emit_session_state(sess, "created")
         return sess
 
@@ -999,7 +1034,9 @@ class AgentManager:
                     sess.status = "cancelled"
                     sess.last_error = ""
                 else:
-                    error_detail = reason or text or terminal_status
+                    data = terminal.get("data")
+                    data_error = data.get("error") if isinstance(data, dict) else ""
+                    error_detail = str(data_error or reason or text or terminal_status)
                     sess.status = "error"
                     sess.last_error = error_detail
                     self.add_message(sess, "error", text or error_detail)

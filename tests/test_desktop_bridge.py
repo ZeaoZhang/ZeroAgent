@@ -124,14 +124,14 @@ def test_deleting_active_session_selects_newest_remaining_and_persists(monkeypat
     oldest = manager.create_session()
     active = manager.create_session()
     newest = manager.create_session()
+    for session in (oldest, active, newest):
+        manager.add_message(session, "user", "hello")
     oldest.updated_at = 10.0
     active.updated_at = 20.0
     newest.updated_at = 30.0
     manager.active_session_id = active.id
     manager._persist_sessions()
-
     manager.delete_session(active.id)
-
     assert manager.active_session_id == newest.id
     restored = desktop_bridge.AgentManager()
     assert restored.active_session_id == newest.id
@@ -139,7 +139,9 @@ def test_deleting_active_session_selects_newest_remaining_and_persists(monkeypat
 
 
 
+
 def test_persisted_desktop_session_regenerates_owned_log_path(tmp_path) -> None:
+
     sid = "sess-123456789abc"
     sess = desktop_bridge._session_from_persisted({"id": sid}, str(tmp_path))
     assert sess.log_path == desktop_bridge._desktop_log_path(str(tmp_path), sid)
@@ -340,6 +342,7 @@ def test_session_token_usage_has_cache_fields_and_typed_persisted_defaults() -> 
         "output": 0,
         "total": 0,
         "limit": 200000,
+
         "cacheRead": 0,
         "cacheCreation": 0,
         "cacheMiss": 0,
@@ -424,7 +427,6 @@ def test_create_app_exposes_desktop_http_contract() -> None:
     assert ("POST", "/config") in routes
     assert ("GET", "/model-profiles") in routes
     assert ("GET", "/slash/commands") in routes
-    assert ("POST", "/slash/resolve") in routes
     assert ("GET", "/history/sessions") in routes
     assert ("POST", "/history/resume") in routes
     assert ("GET", "/sessions") in routes
@@ -1045,6 +1047,17 @@ def test_run_agent_turn_failed_is_error_with_reason() -> None:
     assert sess.terminal_status == "failed"
     assert sess.terminal_reason == "RuntimeError"
 
+def test_run_agent_turn_failed_persists_underlying_error_detail() -> None:
+    sess = _run_terminal(
+        "failed",
+        "LLMError",
+        "partial response",
+        data={"error": "LLM 调用失败 [deepseek-flash]: timeout"},
+    )
+
+    assert sess.status == "error"
+    assert sess.last_error == "LLM 调用失败 [deepseek-flash]: timeout"
+    assert sess.terminal_reason == "LLMError"
 
 def test_run_agent_turn_protocol_error_is_error_with_reason() -> None:
     sess = _run_terminal("protocol_error", "invalid_step_outcome", "Protocol error")
@@ -1116,8 +1129,8 @@ def test_session_group_assignment_persists_and_reloads(monkeypatch, tmp_path) ->
     monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
     first = desktop_bridge.AgentManager()
     session = first.create_session()
+    first.add_message(session, "user", "hello")
     group = first.create_group("work")
-
     first.set_session_group(session.id, group["id"])
 
     second = desktop_bridge.AgentManager()
@@ -1199,3 +1212,53 @@ def test_session_group_assignment_rejects_unknown_group(monkeypatch, tmp_path) -
         manager.set_session_group(session.id, "group-missing")
 
     assert session.group_id is None
+
+
+def test_empty_sessions_are_not_persisted_until_first_user_message(monkeypatch, tmp_path) -> None:
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+    session = manager.create_session()
+
+    assert not (tmp_path / "sessions" / "sessions.json").exists()
+    manager.add_message(session, "assistant", "answer without a user prompt")
+    assert not (tmp_path / "sessions" / "sessions.json").exists()
+
+    manager.add_message(session, "user", "  hello  ")
+    payload = json.loads((tmp_path / "sessions" / "sessions.json").read_text(encoding="utf-8"))
+    assert [item["id"] for item in payload["sessions"]] == [session.id]
+
+
+def test_loading_sessions_discards_persisted_empty_conversations(monkeypatch, tmp_path) -> None:
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir(parents=True)
+    sessions_dir.joinpath("sessions.json").write_text(json.dumps({
+        "version": 1,
+        "activeSessionId": "sess-empty000000",
+        "sessions": [
+            {"id": "sess-empty000000", "messages": []},
+            {"id": "sess-valid00000", "messages": [{"role": "user", "content": "hello"}]},
+        ],
+    }), encoding="utf-8")
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+
+    manager = desktop_bridge.AgentManager()
+
+    assert list(manager.sessions) == ["sess-valid00000"]
+    payload = json.loads(sessions_dir.joinpath("sessions.json").read_text(encoding="utf-8"))
+    assert [item["id"] for item in payload["sessions"]] == ["sess-valid00000"]

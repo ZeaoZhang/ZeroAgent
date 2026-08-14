@@ -134,6 +134,7 @@ const testExports = `
     renderSessionList,
     toggleGroup,
     getSessionTimeBucket: typeof getSessionTimeBucket === 'function' ? getSessionTimeBucket : null,
+    sessionHasUserMessage: typeof sessionHasUserMessage === 'function' ? sessionHasUserMessage : null,
     compareSessionsByUpdatedAt: typeof compareSessionsByUpdatedAt === 'function' ? compareSessionsByUpdatedAt : null,
     setConfirmHook: (fn) => { showConfirmDialog = fn; },
     setErrorHook: (fn) => { showError = fn; },
@@ -141,6 +142,7 @@ const testExports = `
     setRenderHook: (fn) => { renderSessionList = fn; },
     setSessionListElement: (element) => { sessionListEl = element; },
   };
+
 `;
 vm.runInNewContext(source.slice(0, slashCommandsMarker) + testExports, context, {
   filename: appPath,
@@ -157,6 +159,26 @@ function resetState() {
   state.activeAgents.clear();
   state.activeId = null;
 }
+async function testEmptySessionsAreNotShownInSidebar() {
+  resetState();
+  const list = new FakeElement('div');
+  exported.setSessionListElement(list);
+  const empty = { id: 'local-empty', title: 'New chat', messages: [] };
+  const valid = { id: 'local-valid', title: 'Hello', messages: [{ role: 'user', content: 'hello' }], updatedAt: Date.now() };
+  state.sessions.set(empty.id, empty);
+  state.sessions.set(valid.id, valid);
+
+  assert.equal(exported.sessionHasUserMessage(empty), false);
+  assert.equal(exported.sessionHasUserMessage(valid), true);
+  exported.renderSessionList();
+
+  const rows = [];
+  for (const section of list.children) {
+    for (const row of section.children[1]?.children || []) rows.push(row);
+  }
+  assert.deepEqual(rows.map(row => row.dataset.sessionId), [valid.id]);
+}
+
 
 async function testDeleteUsesBridgeIdAndSelectsNewestRemaining() {
   resetState();
@@ -264,7 +286,7 @@ async function testSoleSession404RecoversWithNewRemoteSession() {
     rpc: async (method, params) => {
       calls.push({ method, params });
       if (method === 'session/replace') {
-        const error = new Error('session not found');
+        const error = new Error('not found');
         error.status = 404;
         throw error;
       }
@@ -284,12 +306,12 @@ async function testRenderSessionListBucketsAndGroupActions() {
   const list = new FakeElement('div');
   exported.setSessionListElement(list);
   const now = Date.now();
-  const grouped = { id: 'local-group', bridgeSessionId: 'bridge-group', title: 'Grouped', messages: [], groupId: 'group-work', updatedAt: now };
-  const todayNewest = { id: 'local-today-new', bridgeSessionId: 'bridge-today-new', title: 'Today newest', messages: [], updatedAt: now - 1000 };
-  const todayOld = { id: 'local-today-old', bridgeSessionId: 'bridge-today-old', title: 'Today old', messages: [], updatedAt: now - 2000 };
-  const yesterday = { id: 'local-yesterday', bridgeSessionId: 'bridge-yesterday', title: 'Yesterday', messages: [], updatedAt: now - 86400000 };
-  const week = { id: 'local-week', bridgeSessionId: 'bridge-week', title: 'Week', messages: [], updatedAt: now - 3 * 86400000 };
-  const older = { id: 'local-older', bridgeSessionId: 'bridge-older', title: 'Older', messages: [], updatedAt: now - 8 * 86400000 };
+  const grouped = { id: 'local-group', bridgeSessionId: 'bridge-group', title: 'Grouped', messages: [{ role: 'user', content: 'grouped' }], groupId: 'group-work', updatedAt: now };
+  const todayNewest = { id: 'local-today-new', bridgeSessionId: 'bridge-today-new', title: 'Today newest', messages: [{ role: 'user', content: 'newest' }], updatedAt: now - 1000 };
+  const todayOld = { id: 'local-today-old', bridgeSessionId: 'bridge-today-old', title: 'Today old', messages: [{ role: 'user', content: 'old' }], updatedAt: now - 2000 };
+  const yesterday = { id: 'local-yesterday', bridgeSessionId: 'bridge-yesterday', title: 'Yesterday', messages: [{ role: 'user', content: 'yesterday' }], updatedAt: now - 86400000 };
+  const week = { id: 'local-week', bridgeSessionId: 'bridge-week', title: 'Week', messages: [{ role: 'user', content: 'week' }], updatedAt: now - 3 * 86400000 };
+  const older = { id: 'local-older', bridgeSessionId: 'bridge-older', title: 'Older', messages: [{ role: 'user', content: 'older' }], updatedAt: now - 8 * 86400000 };
   [grouped, todayOld, todayNewest, yesterday, week, older].forEach(sess => state.sessions.set(sess.id, sess));
   context.window.zeroAgent = { rpc: async () => ({ ok: true, group: { id: 'group-work', name: 'Work', position: 0, sessionIds: [] } }) };
   await exported.createGroup('Work');
@@ -425,6 +447,7 @@ async function testGroupCreationUsesPersistedBridgeEntity() {
   await testRenderSessionListBucketsAndGroupActions();
   await testCollapsibleSectionAndDragPayload();
   await testGroupCreationUsesPersistedBridgeEntity();
+  await testEmptySessionsAreNotShownInSidebar();
 })().catch(error => {
   console.error(error.stack || error);
   process.exitCode = 1;

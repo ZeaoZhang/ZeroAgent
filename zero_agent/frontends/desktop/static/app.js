@@ -987,6 +987,18 @@ function isSameDay(ts, refTs) {
   return d.getFullYear() === r.getFullYear() && d.getMonth() === r.getMonth() && d.getDate() === r.getDate();
 }
 
+function sessionHasUserMessage(sess) {
+  return !!sess?.messages?.some(message => {
+    if (!message || message.role !== 'user') return false;
+    if (typeof message.content === 'string') return message.content.trim().length > 0;
+    if (!Array.isArray(message.content)) return false;
+    return message.content.some(block => (
+      block && (block.type === 'text' || block.type === 'input_text')
+      && String(block.text || block.content || '').trim().length > 0
+    ));
+  });
+}
+
 function loadSessionGroups() {
   // Collapse state now stored by SECTION_COLLAPSE_KEY; group entities from bridge.
 }
@@ -995,11 +1007,10 @@ function loadSessionGroups() {
 // ─── Time helpers & render ────────────────────────────────────────────────
 function renderSessionList() {
   sessionListEl.innerHTML = '';
-
-  // Partition sessions: user groups vs ungrouped
   const grouped = new Map();
   const ungrouped = [];
   for (const sess of state.sessions.values()) {
+    if (!sessionHasUserMessage(sess)) continue;
     if (sess.groupId && state.sessionGroups.has(sess.groupId)) {
       if (!grouped.has(sess.groupId)) grouped.set(sess.groupId, []);
       grouped.get(sess.groupId).push(sess);
@@ -1007,28 +1018,17 @@ function renderSessionList() {
       ungrouped.push(sess);
     }
   }
-
   const byRecent = compareSessionsByUpdatedAt;
-
-  // Render user groups sorted by position (including empty ones)
   const sorted = [...state.sessionGroups.entries()]
-    .sort(([,a], [,b]) => (a.position ?? 0) - (b.position ?? 0));
+    .sort(([, a], [, b]) => (a.position ?? 0) - (b.position ?? 0));
   for (const [groupId, group] of sorted) {
     const sessions = (grouped.get(groupId) || []).slice().sort(byRecent);
     const g = { ...group, collapsed: isSectionCollapsed(groupId) ? true : !!group.collapsed };
     sessionListEl.appendChild(buildGroupElement(g, sessions));
   }
-
-  // Render ungrouped sessions bucketed by time
   renderTimeBuckets(ungrouped, byRecent);
-
-  // Initialize drawer collapse state
-  if (state.leftDrawerCollapsed) {
-    leftDrawer.classList.add('collapsed');
-  }
-  if (state.rightDrawerCollapsed) {
-    rightDrawer.classList.add('collapsed');
-  }
+  if (state.leftDrawerCollapsed) leftDrawer.classList.add('collapsed');
+  if (state.rightDrawerCollapsed) rightDrawer.classList.add('collapsed');
 }
 
 function buildSessionSection(section, sessions) {
@@ -1043,8 +1043,8 @@ function buildSessionSection(section, sessions) {
   headerEl.setAttribute('aria-controls', contentId);
   const expandIcon = document.createElement('span');
   expandIcon.className = 'expand-icon';
-  expandIcon.textContent = '▼';
-  if (section.collapsed) expandIcon.textContent = '▸';
+  expandIcon.setAttribute('aria-hidden', 'true');
+  expandIcon.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
   const nameEl = document.createElement('span');
   nameEl.className = 'group-name';
   nameEl.textContent = section.label;
@@ -2945,56 +2945,36 @@ async function restartBridge(options = {}) {
 // ─── Bridge events ───────────────────────────────────────────────────────
 let _bootstrappingSession = false;
 async function markBridgeReady(noticeText = 'Bridge ready.') {
-  if (state.bridgeReady) return; // already marked ready, prevent double-fire
+  if (state.bridgeReady) return;
   state.bridgeReady = true;
   state.restartingBridge = false;
   if (getActiveSessionRuntime()?.busy) setStatus('busy', 'Agent is responding…');
   else setStatus('ok', 'Ready');
   updateBridgeNotice(noticeText);
   hideError();
-  // Restore sessions from bridge (survives page refresh) or create first session
   if (state.sessions.size === 0 && !_bootstrappingSession) {
     _bootstrappingSession = true;
     try {
-      // Try to restore existing sessions from bridge
       const listRes = await window.zeroAgent.rpc('session/list', {}).catch(() => null);
-      const existingSessions = listRes?.sessions || [];
-      if (existingSessions.length > 0) {
-        // Restore each session from bridge
-        for (const bSess of existingSessions) {
-          const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-          const sess = createLocalSession(localId, bSess.title || 'Restored', bSess.id || bSess.sessionId);
-          if (bSess.createdAt) sess.createdAt = Number(bSess.createdAt);
-          if (bSess.updatedAt) sess.updatedAt = Number(bSess.updatedAt);
-          sess.groupId = bSess.groupId || null;
-          // Fetch full messages for this session
-          const sid = bSess.id || bSess.sessionId;
-          const msgRes = await window.zeroAgent.rpc('session/poll', { sessionId: sid, afterId: 0, limit: 9999 }).catch(() => null);
-          if (msgRes?.messages) {
-            sess.messages = msgRes.messages;
-            // Initialize polling state so we don't re-fetch these messages
-            const runtime = getSessionRuntime(sess);
-            runtime.seenBridgeMessageIds = new Set();
-            let maxId = 0;
-            for (const m of msgRes.messages) {
-              if (m.id) { runtime.seenBridgeMessageIds.add(Number(m.id)); maxId = Math.max(maxId, Number(m.id)); }
-            }
-            runtime.lastPolledMessageId = maxId;
-          }
-        }
-        // Restore group metadata from the bridge (session -> group_id mapping)
+      for (const bSess of listRes?.sessions || []) {
+        const sid = bSess.id || bSess.sessionId;
+        const msgRes = await window.zeroAgent.rpc('session/poll', { sessionId: sid, afterId: 0, limit: 9999 }).catch(() => null);
+        const messages = msgRes?.messages || [];
+        if (!sessionHasUserMessage({ messages })) continue;
+        const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const sess = createLocalSession(localId, bSess.title || 'Restored', sid);
+        if (bSess.createdAt) sess.createdAt = Number(bSess.createdAt);
+        if (bSess.updatedAt) sess.updatedAt = Number(bSess.updatedAt);
+        sess.groupId = bSess.groupId || null;
+        sess.messages = messages;
+        const runtime = getSessionRuntime(sess);
+        runtime.seenBridgeMessageIds = new Set(messages.filter(m => m.id).map(m => Number(m.id)));
+        runtime.lastPolledMessageId = Math.max(0, ...messages.map(m => Number(m.id) || 0));
+      }
+      if (state.sessions.size > 0) {
         const groupsRes = await window.zeroAgent.rpc('groups/list', {}).catch(() => null);
-        if (groupsRes?.groups) {
-          for (const g of groupsRes.groups) {
-            if (!state.sessionGroups.has(g.id)) {
-              state.sessionGroups.set(g.id, {
-                id: g.id,
-                name: g.name || g.id,
-                sessionIds: g.sessionIds || [],
-                collapsed: false,
-              });
-            }
-          }
+        for (const g of groupsRes?.groups || []) {
+          if (!state.sessionGroups.has(g.id)) state.sessionGroups.set(g.id, { ...g, collapsed: false });
         }
         loadSessionGroups();
         renderSessionList();
@@ -3008,7 +2988,6 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
     } finally { _bootstrappingSession = false; }
   }
   updateSendButton();
-  // Refresh model profiles from bridge (authoritative source)
   loadModelProfiles();
 }
 

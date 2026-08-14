@@ -249,6 +249,13 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
 }
 
 .session-group-header .expand-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  color: var(--text-faint);
   transition: transform 0.2s;
 }
 
@@ -1278,7 +1285,12 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
 }
 
 .session-time-header .expand-icon {
-  font-size: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
   color: var(--text-faint);
 }
 
