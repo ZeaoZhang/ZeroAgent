@@ -594,6 +594,8 @@ class LiteLLMSession:
             "api_base": self.config.api_base,
             "temperature": self.config.temperature,
         }
+        if self.config.litellm_settings:
+            kwargs.update(self.config.litellm_settings)
         if self.config.provider:
             kwargs["custom_llm_provider"] = self.config.provider
 

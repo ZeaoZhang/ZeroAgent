@@ -35,6 +35,8 @@ llm_backends:
     model: claude-test
     thinking_type: enabled
     thinking_budget_tokens: 4096
+    litellm_settings:
+      drop_params: true
   backup:
     provider: openai
     api_key: sk-backup
@@ -57,6 +59,7 @@ llm_backends:
     assert config.litellm_model_cost_map == str(cost_map)
     assert config.llm_backends["primary"].thinking_type == "enabled"
     assert config.llm_backends["primary"].thinking_budget_tokens == 4096
+    assert config.llm_backends["primary"].litellm_settings == {"drop_params": True}
     assert config.llm_backends["backup"].vision is True
     assert config.llm_backends["backup"].vision_model == "gpt-vision-test"
     assert config.llm_backends["backup"].vision_max_tokens == 512

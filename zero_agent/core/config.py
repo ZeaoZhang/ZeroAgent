@@ -109,7 +109,7 @@ class LLMBackendConfig:
         proxy: HTTP 代理 URL.
         stream: 是否启用 SSE 流式响应.
         verify: SSL 证书验证.
-        service_tier: 优先级 (仅部分提供商支持).
+        litellm_settings: LiteLLM per-request settings such as drop_params.
     """
 
     name: str
@@ -140,6 +140,7 @@ class LLMBackendConfig:
     spring_back_multiplier: float = 1.0  # spring-back 定时器乘数
     api_mode: str = "chat_completions"  # "chat_completions" | "responses"
     tool_protocol: str = "native"  # "native" | "text"
+    litellm_settings: Optional[dict] = None
 
 
 @dataclass

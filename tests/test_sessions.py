@@ -168,6 +168,27 @@ def test_completion_kwargs_include_provider_for_openai_compatible_backend() -> N
     assert kwargs["custom_llm_provider"] == "openai"
     assert kwargs["api_base"] == "https://api.deepseek.com"
 
+def test_completion_kwargs_forward_litellm_settings() -> None:
+    session = LiteLLMSession(
+        LLMBackendConfig(
+            name="reasoning",
+            provider="openai",
+            api_key="sk-test",
+            api_base="https://oai.sb/v1",
+            model="grok-4.6",
+            reasoning_effort="high",
+            litellm_settings={"drop_params": True},
+        )
+    )
+
+    kwargs = session._build_completion_kwargs(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        stream=False,
+    )
+
+    assert kwargs["drop_params"] is True
+    assert kwargs["reasoning_effort"] == "high"
 
 def test_completion_kwargs_use_native_tools_without_text_protocol(monkeypatch) -> None:
     monkeypatch.delenv("ZA_LANG", raising=False)
