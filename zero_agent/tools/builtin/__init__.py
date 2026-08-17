@@ -15,7 +15,7 @@ Virtual/internal tools (handled by engine/Handler, NOT in schema):
     no_tool  — Triggered by engine when LLM produces no tool call
     bad_json — Triggered by engine when LLM produces malformed JSON arguments
 
-Other capabilities (NOT exposed as standalone tools):
-    vision   — Via SOP + code_run: LLM writes Python to call zero_agent.utils.vision_api.ask_vision()
-    IM send  — Handled by bot processes, not agent tool
+Other capabilities:
+    vision   — A configured multimodal backend exposed as a conditional builtin tool.
+    IM send  — Handled by bot processes, not agent tool.
 """

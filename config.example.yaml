@@ -53,12 +53,14 @@ llm_backends:
     #   X-Custom-Header: value
     #   X-Request-Source: ZeroAgent
 
-    # Claude thinking options. Enable only for models/endpoints that support it.
+    # Thinking and vision capabilities.
     thinking_type: null
     thinking_budget_tokens: null
-
-    # OpenAI-style reasoning option for models/endpoints that support it.
-    reasoning_effort: null
+    vision: false
+    vision_model: null
+    vision_max_tokens: 1024
+    vision_detail: auto
+    vision_max_pixels: 1440000
 
     # OpenAI service tier option for supported endpoints.
     service_tier: null
@@ -87,8 +89,14 @@ llm_backends:
   #   read_timeout: 30
   #   proxy: null
   #   verify: true
-  #   extra_headers: {}
+  #   thinking_type: null
+  #   thinking_budget_tokens: null
   #   reasoning_effort: null
+  #   vision: true
+  #   vision_model: null
+  #   vision_max_tokens: 1024
+  #   vision_detail: auto
+  #   vision_max_pixels: 1440000
   #   service_tier: null
   #   health_check_interval: 60
   #   spring_back_multiplier: 1.0

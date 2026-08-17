@@ -18,10 +18,42 @@ from zero_agent.core.config import AgentConfig, LLMBackendConfig
 from zero_agent.frontends import desktop_bridge
 
 
+@pytest.fixture(autouse=True)
+def isolate_desktop_bridge_config(monkeypatch, tmp_path):
+    """Keep bridge tests from reading or writing the user's real session store."""
+    config = AgentConfig(
+        llm_backends={
+            "default": LLMBackendConfig(
+                name="default",
+                provider="openai",
+                api_key="test",
+                api_base="https://x",
+                model="m",
+            )
+        },
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    (tmp_path / "workspace").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "sessions").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+
+
+
 def test_desktop_bridge_source_uses_zeroagent_entrypoint() -> None:
     source = inspect.getsource(desktop_bridge)
     assert ("agent" + "main") not in source
     assert ("za" + "_adapter") not in source
+
+
+def test_bridge_tests_never_write_the_production_session_store(tmp_path) -> None:
+    """Guard: a stray AgentManager() in a bridge test must stay in tmp_path."""
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "hello")
+    assert manager.sessions_dir == str(tmp_path / "sessions")
+    assert (tmp_path / "sessions" / "sessions.json").exists()
 
 
 def test_web_frontend_folds_tool_markers() -> None:
@@ -1246,7 +1278,7 @@ def test_loading_sessions_discards_persisted_empty_conversations(monkeypatch, tm
         sessions_dir=str(tmp_path / "sessions"),
     )
     sessions_dir = tmp_path / "sessions"
-    sessions_dir.mkdir(parents=True)
+    sessions_dir.mkdir(parents=True, exist_ok=True)
     sessions_dir.joinpath("sessions.json").write_text(json.dumps({
         "version": 1,
         "activeSessionId": "sess-empty000000",

@@ -6,6 +6,8 @@ LiteLLMSession 封装 litellm.completion()，用一套代码处理所有 LLM 提
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import logging
 import os
@@ -40,6 +42,71 @@ def _redact_error(value: Any, secret: str = "") -> str:
     if secret:
         text = text.replace(secret, "<redacted-api-key>")
     return text[:1000]
+
+
+def _image_to_data_url(image_input: str | Path | Any, max_pixels: int) -> str:
+    """Convert a path or PIL image to an OpenAI-compatible JPEG data URL."""
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise LLMError("Vision requires Pillow; install zero-agent[memory]") from exc
+
+    if isinstance(image_input, (str, Path)):
+        with Image.open(image_input) as opened:
+            image = opened.copy()
+    elif hasattr(image_input, "size") and hasattr(image_input, "save"):
+        image = image_input
+    else:
+        raise TypeError("image_input must be an image path or PIL Image")
+
+    width, height = image.size
+    if max_pixels > 0 and width * height > max_pixels:
+        scale = (max_pixels / (width * height)) ** 0.5
+        image = image.resize(
+            (max(1, int(width * scale)), max(1, int(height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+    if image.mode not in ("RGB", "L"):
+        image = image.convert("RGB")
+
+    output = io.BytesIO()
+    image.save(output, format="JPEG", quality=80, optimize=True)
+    encoded = base64.b64encode(output.getvalue()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def _vision_messages_for_provider(
+    messages: List[Dict[str, Any]],
+    provider: str,
+) -> List[Dict[str, Any]]:
+    """Convert OpenAI image content to Anthropic content blocks when needed."""
+    if provider.lower() != "anthropic":
+        return messages
+    converted: List[Dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            converted.append(message)
+            continue
+        blocks = []
+        for part in content:
+            if part.get("type") == "text":
+                blocks.append(part)
+            elif part.get("type") == "image_url":
+                url = (part.get("image_url") or {}).get("url", "")
+                if url.startswith("data:") and ";base64," in url:
+                    metadata, data = url.split(";base64,", 1)
+                    media_type = metadata[5:] or "image/jpeg"
+                    blocks.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": data,
+                        },
+                    })
+        converted.append({**message, "content": blocks})
+    return converted
 
 
 def _api_host(api_base: str) -> str:
@@ -415,29 +482,91 @@ class LiteLLMSession:
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]],
     ) -> Generator[str, None, MockResponse]:
-        """非流式调用 LLM.
-
-        Yields:
-            一次性全部文本内容.
-
-        Returns:
-            MockResponse.
-        """
+        """非流式调用 LLM."""
         kwargs = self._build_completion_kwargs(messages, tools, stream=False)
         response = litellm.completion(**kwargs)
-
         mock = MockResponse.from_litellm_response(response)
         interruption = classify_interruption(mock)
         if interruption:
-            mock.content = append_interruption_marker(
-                mock.content,
-                interruption.kind,
-            )
+            mock.content = append_interruption_marker(mock.content, interruption.kind)
         yield mock.content
-
         self._record_usage(mock.usage)
         self._record_assistant(mock)
         return mock
+
+    def vision(
+        self,
+        image_input: str | Path | Any,
+        prompt: str = "详细描述这张图片的内容",
+        *,
+        max_pixels: Optional[int] = None,
+        timeout: Optional[int] = None,
+    ) -> str:
+        """Send one image request through this configured backend.
+
+        Args:
+            image_input: Image path or PIL image object.
+            prompt: Text instruction accompanying the image.
+            max_pixels: Optional local resize ceiling.
+            timeout: Optional request timeout override in seconds.
+
+        Returns:
+            The text returned by the configured vision model.
+
+        Raises:
+            LLMError: If the backend is text-only, image preparation fails,
+                or the provider returns an invalid/error response.
+        """
+        if not self.config.vision:
+            raise LLMError(f"LLM backend '{self.name}' does not support vision")
+
+        try:
+            image_url = _image_to_data_url(
+                image_input,
+                max_pixels or self.config.vision_max_pixels,
+            )
+        except LLMError:
+            raise
+        except Exception as exc:
+            raise LLMError(f"Vision image preparation failed: {exc}") from exc
+
+        content = [
+            {"type": "text", "text": prompt or "详细描述这张图片的内容"},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url,
+                    "detail": self.config.vision_detail,
+                },
+            },
+        ]
+        messages = _vision_messages_for_provider(
+            [{"role": "user", "content": content}],
+            self.config.provider,
+        )
+        kwargs = self._build_completion_kwargs(messages, tools=None, stream=False)
+        kwargs["model"] = self.config.vision_model or self.config.model
+        if self.config.vision_max_tokens:
+            kwargs["max_tokens"] = self.config.vision_max_tokens
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+
+        try:
+            response = litellm.completion(**kwargs)
+            message = response.choices[0].message
+            text = getattr(message, "content", "")
+            if isinstance(text, list):
+                text = "".join(
+                    str(part.get("text", ""))
+                    for part in text
+                    if isinstance(part, dict) and part.get("type") == "text"
+                )
+            if not text:
+                raise ValueError("vision response did not contain text")
+            return str(text)
+        except Exception as exc:
+            safe_error = _redact_error(exc, self.config.api_key)
+            raise LLMError(f"Vision call failed [{self.name}]: {safe_error}") from exc
 
     def _build_completion_kwargs(
         self,
@@ -508,7 +637,8 @@ class LiteLLMSession:
             kwargs["ssl_verify"] = False
 
         # Claude thinking 支持
-        if self.config.thinking_type and "claude" in self.config.provider.lower():
+        # Explicit thinking configuration is forwarded to compatible relays.
+        if self.config.thinking_type:
             thinking = {"type": self.config.thinking_type}
             if self.config.thinking_type == "enabled" and self.config.thinking_budget_tokens:
                 thinking["budget_tokens"] = self.config.thinking_budget_tokens

@@ -184,6 +184,31 @@ class AutoFailoverSession:
                     source_history_len=history_len,
                 )
             )
+    def vision(
+        self,
+        image_input: Any,
+        prompt: str = "详细描述这张图片的内容",
+        **kwargs: Any,
+    ) -> str:
+        """Run a stateless vision request on the active backend."""
+        self._try_health_check()
+        active = self._active
+        try:
+            return active.vision(image_input, prompt, **kwargs)
+        except Exception as primary_error:
+            for backup in self.backups:
+                if not hasattr(backup, "vision"):
+                    continue
+                try:
+                    result = backup.vision(image_input, prompt, **kwargs)
+                    self._active = backup
+                    self._active_name = backup.name
+                    self._is_fallback_active = True
+                    return result
+                except Exception as backup_error:
+                    primary_error = backup_error
+            raise primary_error
+
 
     def _fallback(
         self,

@@ -171,3 +171,22 @@ class TestToolRegistry:
         assert "vision" not in names
         assert "memory_plot" not in names
         assert "send_im" not in names
+
+
+def test_with_builtins_registers_vision_when_backend_supports_it() -> None:
+    config = AgentConfig(
+        llm_backends={
+            "default": LLMBackendConfig(
+                name="default",
+                provider="openai",
+                api_key="test-key",
+                api_base="https://api.openai.com/v1",
+                model="vision-model",
+                vision=True,
+            ),
+        },
+    )
+
+    registry = ToolRegistry.with_builtins(config)
+
+    assert "vision" in {tool.name for tool in registry.list_all()}

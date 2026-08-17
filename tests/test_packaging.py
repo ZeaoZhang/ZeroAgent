@@ -148,8 +148,8 @@ def test_memory_package_contains_only_runtime_modules() -> None:
     assert "zero_agent.memory" not in package_data
     assert memory_files == {"__init__.py", "compress_session.py", "manager.py"}
     assert not (ROOT / "zero_agent" / "memory" / "L4_raw_sessions").exists()
-    assert not (ROOT / "zero_agent" / "memory" / "vision_api.py").exists()
     assert not (ROOT / "zero_agent" / "memory" / "ui_detect.py").exists()
+    assert not (ROOT / "zero_agent" / "memory" / "vision_api.py").exists()
     sop_seed_dir = ROOT / "zero_agent" / "assets" / "memory_seed" / "sops"
     assert sop_seed_dir.is_dir()
     assert all(path.is_file() and path.suffix == ".md" for path in sop_seed_dir.iterdir())

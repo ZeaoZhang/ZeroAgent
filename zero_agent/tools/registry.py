@@ -194,7 +194,6 @@ class ToolRegistry:
         """
         registry = cls()
 
-        # 内置工具模块列表
         builtin_modules = [
             ("zero_agent.tools.builtin.control", "register_control_tools"),
             ("zero_agent.tools.builtin.code", "register_code_tools"),
@@ -202,6 +201,7 @@ class ToolRegistry:
             ("zero_agent.tools.builtin.memory", "register_memory_tools"),
             ("zero_agent.tools.builtin.user", "register_user_tools"),
             ("zero_agent.tools.builtin.web", "register_web_tools"),
+            ("zero_agent.tools.builtin.vision", "register_vision_tools"),
         ]
 
         for module_name, register_func in builtin_modules:

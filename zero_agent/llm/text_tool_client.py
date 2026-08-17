@@ -121,6 +121,9 @@ class TextToolSession:
         if callable(close):
             close()
     # ---- chat: text-protocol emulation ----
+    def vision(self, image_input: Any, prompt: str = "详细描述这张图片的内容", **kwargs: Any) -> str:
+        """Delegate a stateless vision request to the wrapped backend."""
+        return self.backend.vision(image_input, prompt, **kwargs)
     def chat(
         self,
         messages: List[Dict[str, Any]],

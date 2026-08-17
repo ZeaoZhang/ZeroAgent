@@ -96,8 +96,13 @@ class LLMBackendConfig:
         max_tokens: 单次响应最大 token 数.
         temperature: 采样温度 0-2.
         reasoning_effort: 推理力度 (none/minimal/low/medium/high/xhigh).
-        thinking_type: Claude thinking 类型，如 "enabled".
-        thinking_budget_tokens: Claude thinking token 预算.
+        thinking_type: 思考类型，如 "enabled"；显式配置时按请求协议透传.
+        thinking_budget_tokens: 思考 token 预算.
+        vision: 是否允许该 backend 接收图片请求.
+        vision_model: 视觉请求的可选模型覆盖，未设置时使用 model.
+        vision_max_tokens: 视觉请求的最大输出 token 数.
+        vision_detail: 视觉细节级别 (auto/low/high).
+        vision_max_pixels: 本地图片预处理的最大像素数.
         max_retries: HTTP 请求失败最大重试次数.
         connect_timeout: TCP 连接超时秒数.
         read_timeout: 读取超时秒数.
@@ -118,6 +123,11 @@ class LLMBackendConfig:
     reasoning_effort: Optional[str] = None
     thinking_type: Optional[str] = None
     thinking_budget_tokens: Optional[int] = None
+    vision: bool = False
+    vision_model: Optional[str] = None
+    vision_max_tokens: Optional[int] = 1024
+    vision_detail: str = "auto"
+    vision_max_pixels: int = 1_440_000
     max_retries: int = 4
     connect_timeout: int = 5
     read_timeout: int = 30

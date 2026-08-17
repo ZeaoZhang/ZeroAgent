@@ -40,6 +40,11 @@ llm_backends:
     api_key: sk-backup
     api_base: https://api.openai.com/v1
     model: gpt-test
+    vision: true
+    vision_model: gpt-vision-test
+    vision_max_tokens: 512
+    vision_detail: high
+    vision_max_pixels: 900000
 """,
         encoding="utf-8",
     )
@@ -52,6 +57,11 @@ llm_backends:
     assert config.litellm_model_cost_map == str(cost_map)
     assert config.llm_backends["primary"].thinking_type == "enabled"
     assert config.llm_backends["primary"].thinking_budget_tokens == 4096
+    assert config.llm_backends["backup"].vision is True
+    assert config.llm_backends["backup"].vision_model == "gpt-vision-test"
+    assert config.llm_backends["backup"].vision_max_tokens == 512
+    assert config.llm_backends["backup"].vision_detail == "high"
+    assert config.llm_backends["backup"].vision_max_pixels == 900000
 
 
 def test_configure_auto_yaml_loads_without_duplicate_backend_name(tmp_path) -> None:
