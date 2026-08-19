@@ -140,6 +140,22 @@
         if (!sid) throw new Error('session/cancel missing sessionId');
         return http(`/session/${encodeURIComponent(sid)}/cancel`, { method: 'POST', body: params || {} });
       }
+      case 'session/plan': {
+        const sid = params.sessionId || params.id || params.bridgeSessionId;
+        if (!sid) throw new Error('session/plan missing sessionId');
+        return http(`/session/${encodeURIComponent(sid)}/plan`, {
+          method: 'POST',
+          body: { task: params.task || '' },
+        });
+      }
+      case 'session/plan/execute': {
+        const sid = params.sessionId || params.id || params.bridgeSessionId;
+        if (!sid) throw new Error('session/plan/execute missing sessionId');
+        return http(`/session/${encodeURIComponent(sid)}/plan/execute`, {
+          method: 'POST',
+          body: {},
+        });
+      }
       case 'session/group': {
         const sid = params.sessionId || params.id || params.bridgeSessionId;
         if (!sid) throw new Error('session/group missing sessionId');
@@ -195,6 +211,8 @@
     selectProjectRoot: () => rpc('app/path/selectProjectRoot', {}),
     openConfig: () => rpc('app/path/open', { kind: 'config' }),
     pollSession: (sessionId, afterId = 0) => rpc('session/poll', { sessionId, afterId }),
+    startPlan: (sessionId, task) => rpc('session/plan', { sessionId, task }),
+    executePlan: (sessionId) => rpc('session/plan/execute', { sessionId }),
     rpc,
     onBridgeMessage: (cb) => on('bridge-message', cb),
     onBridgeNotification: (cb) => on('bridge-notification', cb),

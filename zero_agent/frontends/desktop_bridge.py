@@ -1684,6 +1684,17 @@ async def cancel_handler(request):
     sid = request.match_info["sid"]
     return json_ok(manager.cancel(sid))
 
+async def plan_handler(request):
+    sid = request.match_info["sid"]
+    data = await read_json(request)
+    task = data.get("task", "")
+    return json_ok(manager.start_plan(sid, task), status=202)
+
+
+async def plan_execute_handler(request):
+    sid = request.match_info["sid"]
+    return json_ok(manager.execute_plan(sid), status=202)
+
 
 async def path_open_handler(request):
     data = await read_json(request)
@@ -1851,6 +1862,8 @@ def create_app(*, security: Optional[BridgeSecurity] = None, host: str = "127.0.
     app.router.add_post("/session/{sid}/prompt", prompt_handler)
     app.router.add_get("/session/{sid}/messages", messages_handler)
     app.router.add_post("/session/{sid}/cancel", cancel_handler)
+    app.router.add_post("/session/{sid}/plan", plan_handler)
+    app.router.add_post("/session/{sid}/plan/execute", plan_execute_handler)
     app.router.add_post("/session/{sid}/model", set_model_handler)
     app.router.add_get("/session/{sid}/tokens", get_tokens_handler)
     app.router.add_post("/session/{sid}/group", set_session_group_handler)

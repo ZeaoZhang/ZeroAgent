@@ -469,6 +469,8 @@ def test_create_app_exposes_desktop_http_contract() -> None:
     assert ("POST", "/session/{sid}/prompt") in routes
     assert ("GET", "/session/{sid}/messages") in routes
     assert ("POST", "/session/{sid}/cancel") in routes
+    assert ("POST", "/session/{sid}/plan") in routes
+    assert ("POST", "/session/{sid}/plan/execute") in routes
     assert ("POST", "/session/{sid}/model") in routes
     assert ("POST", "/session/{sid}/group") in routes
     assert ("GET", "/groups") in routes
@@ -1627,3 +1629,135 @@ def test_execute_plan_submits_executing_task(monkeypatch) -> None:
     assert captured["plan_path"] == str(plan_file)
     assert captured["prompt"] == "do it"
     assert sess.plan_status == "executing"
+
+
+class _FakePlanManager:
+    """Fake manager for plan HTTP handlers; never touches a real LLM runner."""
+
+    def __init__(self) -> None:
+        self.start_calls: list[tuple[str, str]] = []
+        self.execute_calls: list[str] = []
+        self.start_error: Exception | None = None
+        self.execute_error: Exception | None = None
+        self.start_result: dict = {"ok": True, "sessionId": "sess-123456789abc", "planPath": "/tmp/plan.md", "accepted": True}
+        self.execute_result: dict = {"ok": True, "sessionId": "sess-123456789abc", "accepted": True}
+
+    def start_plan(self, sid: str, task: str) -> dict:
+        self.start_calls.append((sid, task))
+        if self.start_error is not None:
+            raise self.start_error
+        return self.start_result
+
+    def execute_plan(self, sid: str) -> dict:
+        self.execute_calls.append(sid)
+        if self.execute_error is not None:
+            raise self.execute_error
+        return self.execute_result
+
+
+def _plan_client_run(test_fn) -> None:
+    async def run() -> None:
+        client = await _open_test_client()
+        try:
+            await test_fn(client)
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_plan_http_endpoint_starts_plan(monkeypatch) -> None:
+    fake = _FakePlanManager()
+    monkeypatch.setattr(desktop_bridge, "manager", fake)
+
+    async def run(client) -> None:
+        headers = {"Authorization": "Bearer secret"}
+        resp = await client.post("/session/sess-123456789abc/plan", json={"task": "build it"}, headers=headers)
+        payload = await resp.json()
+        assert resp.status == 202
+        assert payload["ok"] is True
+        assert fake.start_calls == [("sess-123456789abc", "build it")]
+
+    _plan_client_run(run)
+
+
+def test_plan_http_endpoint_rejects_empty_task(monkeypatch) -> None:
+    fake = _FakePlanManager()
+    fake.start_error = web.HTTPBadRequest(text=json.dumps({"error": "task is required"}), content_type="application/json")
+    monkeypatch.setattr(desktop_bridge, "manager", fake)
+
+    async def run(client) -> None:
+        resp = await client.post(
+            "/session/sess-123456789abc/plan", json={"task": "   "}, headers={"Authorization": "Bearer secret"}
+        )
+        assert resp.status == 400
+        assert fake.start_calls == [("sess-123456789abc", "   ")]
+
+    _plan_client_run(run)
+
+
+def test_plan_http_endpoint_rejects_running_session(monkeypatch) -> None:
+    fake = _FakePlanManager()
+    fake.start_error = web.HTTPConflict(text=json.dumps({"error": "session is already running"}), content_type="application/json")
+    monkeypatch.setattr(desktop_bridge, "manager", fake)
+
+    async def run(client) -> None:
+        resp = await client.post(
+            "/session/sess-123456789abc/plan", json={"task": "build it"}, headers={"Authorization": "Bearer secret"}
+        )
+        assert resp.status == 409
+
+    _plan_client_run(run)
+
+
+def test_plan_http_endpoint_missing_session(monkeypatch) -> None:
+    fake = _FakePlanManager()
+    fake.start_error = web.HTTPNotFound(text=json.dumps({"error": "session not found: sess-123456789abc"}), content_type="application/json")
+    monkeypatch.setattr(desktop_bridge, "manager", fake)
+
+    async def run(client) -> None:
+        resp = await client.post(
+            "/session/sess-123456789abc/plan", json={"task": "build it"}, headers={"Authorization": "Bearer secret"}
+        )
+        assert resp.status == 404
+
+    _plan_client_run(run)
+
+
+def test_plan_execute_http_endpoint_requires_ready(monkeypatch) -> None:
+    fake = _FakePlanManager()
+    fake.execute_error = web.HTTPConflict(text=json.dumps({"error": "plan is not ready"}), content_type="application/json")
+    monkeypatch.setattr(desktop_bridge, "manager", fake)
+
+    async def run(client) -> None:
+        resp = await client.post("/session/sess-123456789abc/plan/execute", headers={"Authorization": "Bearer secret"})
+        assert resp.status == 409
+        assert fake.execute_calls == ["sess-123456789abc"]
+
+    _plan_client_run(run)
+
+
+def test_plan_execute_http_endpoint_requires_plan_file(monkeypatch) -> None:
+    fake = _FakePlanManager()
+    fake.execute_error = web.HTTPConflict(text=json.dumps({"error": "plan file is missing"}), content_type="application/json")
+    monkeypatch.setattr(desktop_bridge, "manager", fake)
+
+    async def run(client) -> None:
+        resp = await client.post("/session/sess-123456789abc/plan/execute", headers={"Authorization": "Bearer secret"})
+        assert resp.status == 409
+
+    _plan_client_run(run)
+
+
+def test_plan_execute_http_endpoint_succeeds(monkeypatch) -> None:
+    fake = _FakePlanManager()
+    monkeypatch.setattr(desktop_bridge, "manager", fake)
+
+    async def run(client) -> None:
+        resp = await client.post("/session/sess-123456789abc/plan/execute", headers={"Authorization": "Bearer secret"})
+        payload = await resp.json()
+        assert resp.status == 202
+        assert payload["ok"] is True
+        assert fake.execute_calls == ["sess-123456789abc"]
+
+    _plan_client_run(run)
