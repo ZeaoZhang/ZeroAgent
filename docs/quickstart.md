@@ -123,4 +123,5 @@ pip install -e ".[all-extras]"
 | `/resume` | 恢复历史会话 |
 | `/continue` | 保存会话快照 |
 | `/new` | 开始新会话 |
+| `/plan <task>` | 创建并运行一个可验证的计划流程；验证完成后等待明确 `/plan execute`，不会自动改代码 |
 | `/exit` | 退出 |

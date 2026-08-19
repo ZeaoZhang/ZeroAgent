@@ -1,9 +1,18 @@
 # Plan Mode SOP
 
 **触发**：3步以上有依赖/多文件协同/条件分支/需并行 | **禁用**：1-2步简单任务直接做
-任务开始前必须先创建工作目录 `./plan_XXX/`（XXX=任务英文短名）
-单独使用一个code_run({'inline_eval':True, 'script':'handler.enter_plan_mode("./plan_XXX/plan.md")'})进入plan模式
-handler是inline_eval自动注入的变量
+
+**公共入口**：用户在 Desktop / CLI / TUI 输入 `/plan <task>`。前端必须创建真实 `TaskMode.PLAN` 任务，并把创建出的 `plan_XXX/plan.md` 路径写入 `TaskContract.plan_path`；`TaskContract` 是 plan 状态的唯一状态源，禁止恢复旧的 `working` 标志流程或从聊天文本猜测状态。内部工具、兼容层或 subagent 仍可保留 `code_run({'inline_eval': True, 'script': 'handler.enter_plan_mode("./plan_XXX/plan.md")'})`，但这只是兼容入口，不能替代公共 `/plan <task>`。
+
+任务开始前必须先创建工作目录 `./plan_XXX/`（XXX=任务英文短名），且工作目录布局固定：
+
+| 文件 | 用途 |
+|---|---|
+| `plan.md` | 用户确认后的执行清单，必须含验证步骤 |
+| `exploration_findings.md` | 规划前只读探索结论 |
+| `verify_context.json` | 独立验证输入上下文 |
+| `evidence.json` | plan 任务证据账本快照 |
+| `result.md` | 独立验证报告，末行必须是字面量 `VERDICT: PASS`、`VERDICT: FAIL` 或 `VERDICT: PARTIAL` |
 
 ---
 
@@ -21,11 +30,12 @@ handler是inline_eval自动注入的变量
 
 **为什么必须用subagent**：主agent上下文是最稀缺资源，探测长输出会挤占规划执行空间。
 
-### 步骤1：创建目录（必做） + SOP匹配 + 设置plan标志（主agent直接做）
+### 步骤1：创建目录（必做） + SOP匹配 + 初始化 TaskContract（主agent直接做）
 
 1. 创建工作目录 `mkdir plan_XXX/`
-2. 从上下文中的 L1 Insight 索引匹配可用领域SOP
-3. 更新checkpoint：`[任务] XXX | [需求] 一句话 | [约束] 关键限制 | [匹配SOP] ... | [进度] 探索态`
+2. 确保 `plan_XXX/plan.md` 存在，保留后续 `exploration_findings.md`、`verify_context.json`、`evidence.json`、`result.md` 的固定位置
+3. 从上下文中的 L1 Insight 索引匹配可用领域SOP
+4. 通过 `/plan <task>` 或兼容的 `enter_plan_mode("./plan_XXX/plan.md")` 进入 `TaskMode.PLAN`，状态只以 `TaskContract` 为准
 
 ### 步骤2：启动探索subagent（监察模式）
 
@@ -107,8 +117,8 @@ handler是inline_eval自动注入的变量
 
 ## 验证检查点
 N+1. [ ] **[VERIFY] 启动独立验证subagent**
-     SOP: verify_sop.md plan_sop.md
-     操作：读plan_sop.md第四章内容 → 准备verify_context.json → 启动验证subagent → 读取VERDICT → 按结果处理
+     SOP: zero_agent/assets/memory_seed/sops/verify_sop.md plan_sop.md
+     操作：读 plan_sop.md 第四章内容 → 准备 verify_context.json → 导出 evidence.json → 启动验证subagent → 读取 result.md 的 VERDICT → 按结果处理
      ⚠ 不可跳过，不可在未启动subagent的情况下标记[✓]
 
 ---
@@ -124,13 +134,13 @@ N+1. [ ] **[VERIFY] 启动独立验证subagent**
 - □ **复杂/繁琐步骤是否标注了[D]？**（读大量代码/网页/重复操作必须委托subagent）
 - □ **是否包含"验证检查点"section，且有[VERIFY]步骤？（必须有，这是强制步骤）**
 
-### 步骤6：用户确认
+### 步骤6：用户确认 / 等待执行
 
-ask_user 确认plan后才能转入执行态。**⛔ 用户未确认不得执行。**
+ask_user 只用于澄清计划中的不确定点；**⛔ TaskMode.PLAN 不得自动改业务代码，也不得把用户确认当成执行授权。** 规划态只产出 `plan.md`、`exploration_findings.md`、`verify_context.json`、`evidence.json`、`result.md`。
 
-### 步骤7：转入执行态
+### 步骤7：进入 ready 等待态
 
-更新checkpoint：`[执行] plan.md | 当前：步骤1 | ⚡有[P]标记必须读subagent.md执行Map模式`
+当 `plan.md` 已写好、独立验证也完成且全部 `[ ]` 清零时，PLAN 任务的完成证书必须满足：`plan_remaining == 0`，`verify_status == pass` 或用户明确接受 `partial_accepted`，并且 `result.md` 的 `VERDICT: PASS` / `VERDICT: PARTIAL` 与证书一致。此时状态显示为 `ready`：表示“验证完成，等待用户明确输入 `/plan execute`”。**ready 禁止自动执行或自动修改代码**；只有 `/plan execute` 才能用同一个 `TaskContract.plan_path` 创建 `TaskMode.EXECUTING` 任务并进入执行态。
 
 ---
 
@@ -188,23 +198,26 @@ file_read(plan.md) 全文扫描，确认所有步骤（含[VERIFY]）均为 `[�
 
 - task_description：原始任务描述（用户原话）
 - plan_file：plan.md绝对路径
+- verify_sop：`zero_agent/assets/memory_seed/sops/verify_sop.md`
 - task_type：code|data|browser|file|system
 - deliverables：交付物列表（type/path/expected）
 - required_checks：必做检查列表（check/tool）
 
-**传什么**：任务描述、plan路径、交付物清单、必做检查。**不传**：执行过程、调试记录。
+同时在同一目录导出 `evidence.json`。完成判定依赖 `plan.md`、`verify_context.json`、`evidence.json`、`result.md` 同时存在；缺任一文件都不能宣称 ready。
+
+**传什么**：任务描述、plan路径、交付物清单、必做检查、验证SOP路径。**不传**：执行过程、调试记录。
 
 ### 步骤9：启动验证subagent
 
 按 subagent.md 标准流程启动验证subagent，input要点：
 
 - **角色**：你是独立验证者，工作是对抗性验证（证明交付物不能用）
-- **第一步强制**：file_read verify_sop.md 完整阅读验证SOP
+- **第一步强制**：file_read `zero_agent/assets/memory_seed/sops/verify_sop.md` 完整阅读验证SOP
 - **按 verify_sop.md 第3节**选择对应task_type的验证策略执行
 - **每个检查必须有工具调用证据**（实际执行，不是叙述）
 - **任务描述**：（填入原始任务描述）
 - **交付物清单**：（填入deliverables列表）
-- **输出**：在 result.md 中按 verify_sop.md 第6节格式输出，最后一行 `VERDICT: PASS / FAIL / PARTIAL`
+- **输出**：在 result.md 中按 verify_sop.md 第6节格式输出，最后一行必须是以下三个字面量之一：`VERDICT: PASS`、`VERDICT: FAIL`、`VERDICT: PARTIAL`
 - **约束**：3轮内完成，每轮至少1个实际工具调用
 
 同时传入 verify_context.json 的路径，让subagent自行读取详细上下文。
@@ -213,23 +226,24 @@ file_read(plan.md) 全文扫描，确认所有步骤（含[VERIFY]）均为 `[�
 
 轮询 output.txt 等待 `[ROUND END]`，然后读取 result.md：
 
-1. **找VERDICT行**：读取result.md最后几行，提取 `VERDICT: PASS/FAIL/PARTIAL`
-2. **检查有效性**：如果所有PASS项都没有工具调用输出（只有叙述），视为验证无效，按FAIL处理
+1. **找VERDICT行**：读取 result.md 最后几行，只接受字面量 `VERDICT: PASS`、`VERDICT: FAIL`、`VERDICT: PARTIAL`
+2. **检查有效性**：如果 PASS/PARTIAL 项没有工具调用输出（只有叙述），或 `evidence.json` 没有可关联的成功验证证据，视为验证无效，按 FAIL 处理
 3. **按结果处理**：
-   - **PASS** → 进入任务完成收尾
-   - **FAIL** → 进入修复循环
-   - **PARTIAL** → 主agent判断可接受则完成，否则修复
-   - **无VERDICT行** → 从output.txt提取关键信息，主agent自行判断PASS/FAIL
+   - **PASS** → 要求 plan remaining 为 0，证书 `verify_status=pass`，进入 ready
+   - **FAIL** → 不得 ready，进入修复循环
+   - **PARTIAL** → 只能在用户明确接受后写入 `partial_accepted`，证书与 result.md 保持一致；否则修复
+   - **无VERDICT行** → 验证无效，按 FAIL 处理
 
-**任务完成收尾**（验证PASS后执行）：
+**ready 收尾**（验证PASS或用户接受PARTIAL后执行）：
 
 1. 标记plan.md中 `[VERIFY]` 步骤为 `[✓]`
-2. 更新checkpoint：`[完成] XXX任务 | [产出] ... | [经验] ...`
-3. 向用户确认任务完成
+2. file_read(plan.md) 终止检查：确认0个 `[ ]` 残留
+3. 确认 completion certificate 的 `plan_remaining` 与终止检查一致，且 `verify_status` 与 result.md 的 VERDICT 一致
+4. 将计划标记为 `ready`，向用户说明：验证已完成，等待明确 `/plan execute`
 
-**重要**：只有在验证PASS后，才能标记[VERIFY]为[✓]并声称任务完成。如果验证FAIL，需要进入修复循环。
+**重要**：只有在验证PASS，或验证PARTIAL且用户明确接受后，才能标记[VERIFY]为[✓]并进入 ready。ready 不是执行态，不会自动改代码；如果验证FAIL，需要进入修复循环。
 
-**Fallback**：若subagent未产出result.md（turn耗尽），从output.txt提取VERDICT关键信息。
+**Fallback**：若subagent未产出result.md（turn耗尽），验证无效，按FAIL处理；禁止从output.txt猜一个PASS。
 
 ### 修复循环（FAIL后）
 

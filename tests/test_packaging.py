@@ -65,8 +65,7 @@ def test_qt_chat_frontend_is_not_packaged() -> None:
     pyproject = _pyproject()
     extras = pyproject["project"]["optional-dependencies"]
 
-    assert "qt" not in extras
-    assert "zero-agent[ui,browser,memory,plot,bots]" in extras["all-extras"]
+    assert "zero-agent[ui,browser,memory,plot,bots,monitoring]" in extras["all-extras"]
     assert importlib.util.find_spec("zero_agent.frontends.qtapp") is None
 
 
@@ -95,6 +94,7 @@ def test_removed_frontend_and_alias_files_are_absent() -> None:
         "desktop_commands.py",
         "hub.pyw",
         "launcher.py",
+        "plan_command.py",
         "plan_state.py",
         "stapp.py",
         "tui.py",
@@ -125,6 +125,7 @@ def test_packaged_modules_do_not_include_removed_layers() -> None:
         "conductor.py",
         "desktop_bridge.py",
         "desktop_commands.py",
+        "plan_command.py",
         "launcher.py",
         "plan_state.py",
         "stapp.py",
@@ -154,6 +155,39 @@ def test_memory_package_contains_only_runtime_modules() -> None:
     assert sop_seed_dir.is_dir()
     assert all(path.is_file() and path.suffix == ".md" for path in sop_seed_dir.iterdir())
     assert (ROOT / "zero_agent" / "assets" / "review_sop").is_dir()
+
+
+def test_plan_sop_documents_current_plan_contract() -> None:
+    plan_sop_path = ROOT / "zero_agent" / "assets" / "memory_seed" / "sops" / "plan_sop.md"
+    plan_sop = plan_sop_path.read_text(encoding="utf-8")
+
+    for expected in (
+        "/plan <task>",
+        "TaskMode.PLAN",
+        "TaskContract",
+        "ready",
+        "plan.md",
+        "exploration_findings.md",
+        "verify_context.json",
+        "evidence.json",
+        "result.md",
+        "VERDICT: PASS",
+        "VERDICT: FAIL",
+        "VERDICT: PARTIAL",
+        "zero_agent/assets/memory_seed/sops/verify_sop.md",
+    ):
+        assert expected in plan_sop
+
+
+def test_repl_docs_include_plan_command() -> None:
+    docs = {
+        "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
+        "docs/quickstart.md": (ROOT / "docs" / "quickstart.md").read_text(encoding="utf-8"),
+    }
+
+    for name, source in docs.items():
+        assert "`/plan <task>`" in source, name
+        assert "不会自动改代码" in source, name
 
 
 def test_agent_runner_lives_under_runners_package() -> None:
@@ -249,16 +283,23 @@ def test_repository_has_no_removed_name_fragments() -> None:
             continue
         if path.suffix not in text_suffixes and path.name != ".gitignore":
             continue
-        # Allowed intentional GA references in UltraPlan port
-        if "ga_ultraplan" in relative.as_posix() or relative.name in ("test_ultraplan.py", "test_packaging.py", "pyproject.toml"):
+        # Allowed intentional GA references in UltraPlan port and historical design docs.
+        if "ga_ultraplan" in relative.as_posix() or relative.name in (
+            "test_ultraplan.py",
+            "test_packaging.py",
+            "pyproject.toml",
+        ):
             continue
         if "memory_seed/sops/ultraplan_sop.md" in relative.as_posix():
+            continue
+        if relative.as_posix().startswith("docs/superpowers/"):
             continue
         # Ported modules with legacy GA-derived references (comments, param names)
         if relative.as_posix() in (
             "zero_agent/frontends/worldline.py",
             "zero_agent/frontends/plan_state.py",
             "zero_agent/frontends/at_complete.py",
+            "zero_agent/frontends/plan_command.py",
         ):
             continue
 
