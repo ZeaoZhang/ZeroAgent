@@ -30,7 +30,7 @@ WS API:
 """
 from __future__ import annotations
 
-import asyncio, contextlib, copy, hmac, importlib, ipaddress, json, os, re, secrets, signal, sys, urllib.parse, webbrowser
+import asyncio, contextlib, copy, hmac, importlib, ipaddress, json, os, re, secrets, shutil, signal, sys, urllib.parse, webbrowser
 import threading, time, traceback, uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -41,6 +41,8 @@ from aiohttp import web, WSMsgType
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import AgentConfig, default_config_path, load_default_config
+from zero_agent.core.types import TaskMode
+from zero_agent.frontends.plan_command import create_plan_workspace
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -249,6 +251,12 @@ class Session:
     log_path: Optional[str] = None
     sub_agents: List[Dict[str, Any]] = field(default_factory=list)
     restore_history: bool = False
+    plan_path: Optional[str] = None
+    plan_status: str = "inactive"  # inactive|planning|ready|executing|failed|cancelled
+    plan_task: str = ""
+
+
+_PLAN_STATUSES = {"inactive", "planning", "ready", "executing", "failed", "cancelled"}
 
 
 @dataclass
@@ -318,6 +326,9 @@ def _session_to_persistable(sess: Session) -> dict:
         "token_usage": _normalize_token_usage(sess.token_usage),
         "group_id": sess.group_id,
         "sub_agents": list(sess.sub_agents),
+        "planPath": sess.plan_path,
+        "planStatus": sess.plan_status,
+        "planTask": sess.plan_task,
     }
 
 
@@ -327,6 +338,9 @@ def _session_from_persisted(
 ) -> Session:
     sid = str(data.get("id") or ("sess-" + uuid.uuid4().hex[:12]))
     owned_path = _desktop_log_path(sessions_dir, sid) if sessions_dir and _DESKTOP_SESSION_ID_RE.fullmatch(sid) else None
+    plan_status = str(data.get("planStatus") or "inactive")
+    if plan_status not in _PLAN_STATUSES:
+        plan_status = "inactive"
     sess = Session(
         id=sid,
         title=str(data.get("title") or "New chat"),
@@ -343,6 +357,9 @@ def _session_from_persisted(
         group_id=data.get("group_id"),
         sub_agents=list(data.get("sub_agents") or []),
         token_usage=_normalize_token_usage(data.get("token_usage")),
+        plan_path=data.get("planPath"),
+        plan_status=plan_status,
+        plan_task=str(data.get("planTask") or ""),
     )
     sess.messages = list(data.get("messages") or [])
     sess.restore_history = bool(sess.messages)
@@ -583,6 +600,9 @@ class AgentManager:
             "tokenUsage": sess.token_usage,
             "groupId": sess.group_id,
             "subAgents": sess.sub_agents,
+            "planPath": sess.plan_path,
+            "planStatus": sess.plan_status,
+            "planTask": sess.plan_task,
         }
         if include_messages:
             out["messages"] = list(sess.messages)
@@ -898,7 +918,15 @@ class AgentManager:
             "session": self.snapshot(sess),
         }
 
-    def submit_prompt(self, sid: str, prompt: Any, images: Optional[list] = None) -> dict:
+    def submit_prompt(
+        self,
+        sid: str,
+        prompt: Any,
+        images: Optional[list] = None,
+        *,
+        task_mode: TaskMode = TaskMode.OPEN,
+        plan_path: Optional[str] = None,
+    ) -> dict:
         prompt, image_ids = normalize_prompt(prompt, images)
         with self.lock:
             sess = self.sessions.get(sid)
@@ -915,12 +943,120 @@ class AgentManager:
             sess.terminal_status = ""
             sess.terminal_reason = ""
             sess.partial = {"id": sess.msg_seq + 1, "role": "assistant", "content": "", "ts": time.time(), "partial": True}
-            t = threading.Thread(target=self.run_agent_turn, args=(sess, prompt, None), daemon=True, name=f"Turn-{sid}")
+            t = threading.Thread(
+                target=self.run_agent_turn,
+                args=(sess, prompt, None),
+                kwargs={"task_mode": task_mode, "plan_path": plan_path},
+                daemon=True,
+                name=f"Turn-{sid}",
+            )
             sess.thread = t
             t.start()
             seq = sess.msg_seq
         emit_session_state(sess, "running")
         return {"ok": True, "sessionId": sid, "accepted": True, "userMessageId": user_msg["id"], "seq": seq}
+
+    def start_plan(self, sid: str, task: str) -> dict:
+        """Create a plan workspace and submit the first PLAN task atomically."""
+        task_text = str(task or "").strip()
+        with self.lock:
+            sess = self.sessions.get(sid)
+            if not sess:
+                raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
+            if not task_text:
+                raise web.HTTPBadRequest(text=json.dumps({"error": "task is required"}, ensure_ascii=False), content_type="application/json")
+            if sess.status == "running":
+                raise web.HTTPConflict(text=json.dumps({"error": "session is already running"}, ensure_ascii=False), content_type="application/json")
+            if sess.plan_status in {"planning", "ready", "executing"}:
+                raise web.HTTPConflict(
+                    text=json.dumps({
+                        "error": "session already has an active plan",
+                        "planPath": sess.plan_path,
+                        "planStatus": sess.plan_status,
+                        "planTask": sess.plan_task,
+                    }, ensure_ascii=False),
+                    content_type="application/json",
+                )
+
+            workspace = create_plan_workspace(sess.cwd or self.workspace_dir, task_text)
+            prior = (sess.plan_path, sess.plan_status, sess.plan_task)
+            sess.plan_task = task_text
+            sess.plan_path = workspace.path
+            sess.plan_status = "planning"
+
+            try:
+                submitted = self._submit_turn(sess, task_text, None, TaskMode.PLAN, workspace.path)
+            except Exception:
+                sess.plan_path, sess.plan_status, sess.plan_task = prior
+                with contextlib.suppress(OSError):
+                    shutil.rmtree(workspace.directory, ignore_errors=True)
+                self._persist_sessions()
+                raise
+            if submitted is None:
+                sess.plan_path, sess.plan_status, sess.plan_task = prior
+                with contextlib.suppress(OSError):
+                    shutil.rmtree(workspace.directory, ignore_errors=True)
+                raise web.HTTPConflict(text=json.dumps({"error": "session is no longer available"}, ensure_ascii=False), content_type="application/json")
+            agent, display_q = submitted
+
+            user_msg = self.add_message(sess, "user", task_text)
+            sess.status = "running"
+            sess.last_error = ""
+            sess.terminal_status = ""
+            sess.terminal_reason = ""
+            sess.partial = {"id": sess.msg_seq + 1, "role": "assistant", "content": "", "ts": time.time(), "partial": True}
+            sess.thread = threading.Thread(target=self._drain_turn, args=(sess, agent, display_q), daemon=True, name=f"Plan-{sid}")
+            sess.thread.start()
+            seq = sess.msg_seq
+            self._persist_sessions()
+        emit_session_state(sess, "planning")
+        return {
+            "ok": True,
+            "sessionId": sid,
+            "planPath": workspace.path,
+            "planTask": task_text,
+            "accepted": True,
+            "userMessageId": user_msg["id"],
+            "seq": seq,
+        }
+
+    def execute_plan(self, sid: str) -> dict:
+        """Submit the preserved plan task with TaskMode.EXECUTING."""
+        with self.lock:
+            sess = self.sessions.get(sid)
+            if not sess:
+                raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
+            if sess.plan_status != "ready":
+                raise web.HTTPConflict(text=json.dumps({"error": "plan is not ready"}, ensure_ascii=False), content_type="application/json")
+            if not sess.plan_path or not os.path.isfile(sess.plan_path):
+                raise web.HTTPConflict(text=json.dumps({"error": "plan file is missing"}, ensure_ascii=False), content_type="application/json")
+            if sess.status == "running":
+                raise web.HTTPConflict(text=json.dumps({"error": "session is already running"}, ensure_ascii=False), content_type="application/json")
+
+            task = sess.plan_task or ""
+            plan_path = sess.plan_path
+            sess.plan_status = "executing"
+            try:
+                submitted = self._submit_turn(sess, task, None, TaskMode.EXECUTING, plan_path)
+            except Exception:
+                sess.plan_status = "ready"
+                raise
+            if submitted is None:
+                sess.plan_status = "ready"
+                raise web.HTTPConflict(text=json.dumps({"error": "session is no longer available"}, ensure_ascii=False), content_type="application/json")
+            agent, display_q = submitted
+
+            sess.status = "running"
+            sess.last_error = ""
+            sess.terminal_status = ""
+            sess.terminal_reason = ""
+            sess.partial = {"id": sess.msg_seq + 1, "role": "assistant", "content": "", "ts": time.time(), "partial": True}
+            sess.thread = threading.Thread(target=self._drain_turn, args=(sess, agent, display_q), daemon=True, name=f"Execute-{sid}")
+            sess.thread.start()
+            seq = sess.msg_seq
+            self._persist_sessions()
+        emit_session_state(sess, "executing")
+        return {"ok": True, "sessionId": sid, "planPath": plan_path, "planTask": task, "accepted": True, "seq": seq}
 
     def _sync_token_usage(self, sess: Session) -> None:
         """Refresh session token/context usage from the live runner if available."""
@@ -956,105 +1092,164 @@ class AgentManager:
             "cacheMetricsAvailable": stats.get("cache_metrics_available", False),
         })
 
-    def run_agent_turn(self, sess: Session, prompt: str, images: Optional[list] = None):
-        try:
-            with self.lock:
-                if self.sessions.get(sess.id) is not sess:
-                    return
-                if sess.agent is None:
-                    sess.agent = self.make_agent(sess)
-                agent = sess.agent
-                if self.sessions.get(sess.id) is not sess:
-                    return
-                if not hasattr(agent, "put_task"):
-                    raise RuntimeError("AgentRunner object has no put_task method")
-                display_q = agent.put_task(prompt, images=images or [])
-            pieces: list[str] = []
-            terminal: Optional[dict] = None
-            import queue as _queue
-            while terminal is None:
-                try:
-                    item = display_q.get(timeout=1.0)
-                except _queue.Empty:
-                    continue
-                if not isinstance(item, dict):
-                    continue
-                item_type = item.get("type")
-                if item_type == "chunk":
-                    text = str(item.get("text") or "")
-                    if not text:
-                        continue
-                    pieces.append(text)
-                    with self.lock:
-                        if sess.partial is not None:
-                            sess.partial["content"] = "".join(pieces) if getattr(agent, "inc_out", False) else text
-                            sess.partial["ts"] = time.time()
-                            sess.updated_at = time.time()
-                            self._sync_token_usage(sess)
-                    continue
-                if item_type == "terminal":
-                    terminal = item
-                    if "status" not in terminal:
-                        raise RuntimeError("invalid terminal event")
-                    continue
+    @staticmethod
+    def _live_task_mode(runner: Any) -> Optional[TaskMode]:
+        """Return the wrapped agent's live handler contract mode, if any."""
+        za = getattr(runner, "_agent", None)
+        handler = getattr(za, "handler", None)
+        contract = getattr(handler, "task_contract", None)
+        return getattr(contract, "mode", None)
 
-            terminal_status = str(terminal.get("status") or "failed")
-            reason = str(terminal.get("reason") or "")
-            text = str(terminal.get("text") or "")
-            with self.lock:
-                sess.partial = None
-                sess.terminal_status = terminal_status
-                sess.terminal_reason = reason
-                self._sync_token_usage(sess)
+    def _submit_turn(
+        self,
+        sess: Session,
+        prompt: str,
+        images: Optional[list],
+        task_mode: TaskMode,
+        plan_path: Optional[str],
+    ):
+        """Synchronously ensure a runner and submit one task.
 
-                if terminal_status == "completed":
-                    import re as _re
-                    text = _re.sub(r'\n*`{5}\n*\[Info\] Final response to user\.\n*`{5}\s*$', '', text)
-                    self.add_message(sess, "assistant", text)
-                    sess.status = "idle"
-                    sess.last_error = ""
-                elif terminal_status == "waiting":
-                    data = terminal.get("data")
-                    payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
-                    payload = payload if isinstance(payload, dict) else {}
-                    question = str(payload.get("question") or text or reason)
-                    candidates = payload.get("candidates")
-                    if not isinstance(candidates, list):
-                        candidates = []
-                    self.add_message(
-                        sess,
-                        "system",
-                        question,
-                        kind="input_required",
-                        candidates=[str(candidate) for candidate in candidates],
-                    )
-                    sess.status = "waiting"
-                    sess.last_error = ""
-                elif terminal_status == "cancelled":
-                    sess.status = "cancelled"
-                    sess.last_error = ""
-                else:
-                    data = terminal.get("data")
-                    data_error = data.get("error") if isinstance(data, dict) else ""
-                    error_detail = str(data_error or reason or text or terminal_status)
-                    sess.status = "error"
-                    sess.last_error = error_detail
-                    self.add_message(sess, "error", text or error_detail)
-                sess.updated_at = time.time()
-                self._persist_sessions()
-            emit_session_state(sess, sess.status)
-        except Exception as e:
-            tb = traceback.format_exc()
-            with self.lock:
-                sess.partial = None
+        Returns ``(agent, display_q)``, or ``None`` when the session was
+        detached (deleted/replaced) before submission could start.
+        """
+        with self.lock:
+            if self.sessions.get(sess.id) is not sess:
+                return None
+            if sess.agent is None:
+                sess.agent = self.make_agent(sess)
+            agent = sess.agent
+            if self.sessions.get(sess.id) is not sess:
+                return None
+            if not hasattr(agent, "put_task"):
+                raise RuntimeError("AgentRunner object has no put_task method")
+            display_q = agent.put_task(
+                prompt,
+                images=images or [],
+                task_mode=task_mode,
+                plan_path=plan_path,
+            )
+            return agent, display_q
+
+    def _drain_turn(self, sess: Session, agent: Any, display_q) -> None:
+        pieces: list[str] = []
+        terminal: Optional[dict] = None
+        import queue as _queue
+        while terminal is None:
+            try:
+                item = display_q.get(timeout=1.0)
+            except _queue.Empty:
+                continue
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "chunk":
+                text = str(item.get("text") or "")
+                if not text:
+                    continue
+                pieces.append(text)
+                with self.lock:
+                    if sess.partial is not None:
+                        sess.partial["content"] = "".join(pieces) if getattr(agent, "inc_out", False) else text
+                        sess.partial["ts"] = time.time()
+                        sess.updated_at = time.time()
+                        self._sync_token_usage(sess)
+                continue
+            if item_type == "terminal":
+                terminal = item
+                if "status" not in terminal:
+                    raise RuntimeError("invalid terminal event")
+                continue
+
+        terminal_status = str(terminal.get("status") or "failed")
+        reason = str(terminal.get("reason") or "")
+        text = str(terminal.get("text") or "")
+        with self.lock:
+            sess.partial = None
+            sess.terminal_status = terminal_status
+            sess.terminal_reason = reason
+            self._sync_token_usage(sess)
+            plan_contract = self._live_task_mode(agent) == TaskMode.PLAN
+
+            if terminal_status == "completed":
+                import re as _re
+                text = _re.sub(r'\n*`{5}\n*\[Info\] Final response to user\.\n*`{5}\s*$', '', text)
+                self.add_message(sess, "assistant", text)
+                sess.status = "idle"
+                sess.last_error = ""
+                if plan_contract:
+                    certificate = terminal.get("certificate")
+                    if (
+                        isinstance(certificate, dict)
+                        and certificate.get("plan_remaining") == 0
+                        and certificate.get("verify_status") in {"pass", "partial_accepted"}
+                    ):
+                        sess.plan_status = "ready"
+            elif terminal_status == "waiting":
+                data = terminal.get("data")
+                payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
+                payload = payload if isinstance(payload, dict) else {}
+                question = str(payload.get("question") or text or reason)
+                candidates = payload.get("candidates")
+                if not isinstance(candidates, list):
+                    candidates = []
+                self.add_message(
+                    sess,
+                    "system",
+                    question,
+                    kind="input_required",
+                    candidates=[str(candidate) for candidate in candidates],
+                )
+                sess.status = "waiting"
+                sess.last_error = ""
+            elif terminal_status == "cancelled":
+                sess.status = "cancelled"
+                sess.last_error = ""
+                if plan_contract:
+                    sess.plan_status = "cancelled"
+            else:
+                data = terminal.get("data")
+                data_error = data.get("error") if isinstance(data, dict) else ""
+                error_detail = str(data_error or reason or text or terminal_status)
                 sess.status = "error"
-                sess.last_error = str(e)
-                sess.terminal_status = "failed"
-                sess.terminal_reason = type(e).__name__
-                self.add_message(sess, "error", str(e))
-                self._persist_sessions()
-            print(tb, file=sys.stderr)
-            emit_session_state(sess, "error")
+                sess.last_error = error_detail
+                self.add_message(sess, "error", text or error_detail)
+                if plan_contract:
+                    sess.plan_status = "failed"
+            sess.updated_at = time.time()
+            self._persist_sessions()
+        emit_session_state(sess, sess.status)
+
+    def _fail_turn(self, sess: Session, exc: Exception) -> None:
+        tb = traceback.format_exc()
+        with self.lock:
+            sess.partial = None
+            sess.status = "error"
+            sess.last_error = str(exc)
+            sess.terminal_status = "failed"
+            sess.terminal_reason = type(exc).__name__
+            self.add_message(sess, "error", str(exc))
+            self._persist_sessions()
+        print(tb, file=sys.stderr)
+        emit_session_state(sess, "error")
+
+    def run_agent_turn(
+        self,
+        sess: Session,
+        prompt: str,
+        images: Optional[list] = None,
+        *,
+        task_mode: TaskMode = TaskMode.OPEN,
+        plan_path: Optional[str] = None,
+    ):
+        try:
+            submitted = self._submit_turn(sess, prompt, images, task_mode, plan_path)
+            if submitted is None:
+                return
+            agent, display_q = submitted
+            self._drain_turn(sess, agent, display_q)
+        except Exception as e:
+            self._fail_turn(sess, e)
 
     def messages(self, sid: str, after: int = 0, limit: int = 200) -> dict:
         with self.lock:
@@ -1212,6 +1407,9 @@ def emit_session_state(sess: Session, state_name: str):
         "tokenUsage": sess.token_usage,
         "modelOverride": sess.model_override,
         "groupId": sess.group_id,
+        "planPath": sess.plan_path,
+        "planStatus": sess.plan_status,
+        "planTask": sess.plan_task,
     })
 
 

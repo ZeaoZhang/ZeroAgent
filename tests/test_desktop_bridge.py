@@ -910,7 +910,7 @@ def _terminal(status: str, reason: str, text: str = "", data=None) -> dict:
 
 def _run_terminal(status: str, reason: str, text: str = "", data=None):
     class TerminalRunner:
-        def put_task(self, prompt, images=None):
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
             out = queue.Queue()
             out.put(_terminal(status, reason, text, data))
             return out
@@ -935,7 +935,7 @@ def test_run_agent_turn_keeps_cumulative_partial_once() -> None:
         def __init__(self):
             self.prompts = []
 
-        def put_task(self, prompt, images=None):
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
             self.prompts.append((prompt, images))
             out = queue.Queue()
             out.put({"type": "chunk", "text": "Hel", "source": "agent", "turn": 1})
@@ -986,7 +986,7 @@ def test_run_agent_turn_refreshes_token_usage() -> None:
     class TokenRunner:
         _agent = FakeAgent()
 
-        def put_task(self, prompt, images=None):
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
             out = queue.Queue()
             out.put({"type": "chunk", "text": "Hello", "source": "agent", "turn": 1})
             out.put(_terminal("completed", "completion_certificate", "Hello"))
@@ -1015,7 +1015,7 @@ def test_run_agent_turn_preserves_incremental_runner_chunks() -> None:
     class IncrementalRunner:
         inc_out = True
 
-        def put_task(self, prompt, images=None):
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
             out = queue.Queue()
             out.put({"type": "chunk", "text": "Hel", "source": "agent", "turn": 1})
             out.put({"type": "chunk", "text": "lo", "source": "agent", "turn": 1})
@@ -1294,3 +1294,336 @@ def test_loading_sessions_discards_persisted_empty_conversations(monkeypatch, tm
     assert list(manager.sessions) == ["sess-valid00000"]
     payload = json.loads(sessions_dir.joinpath("sessions.json").read_text(encoding="utf-8"))
     assert [item["id"] for item in payload["sessions"]] == ["sess-valid00000"]
+
+
+def test_session_plan_fields_default() -> None:
+    sess = desktop_bridge.Session(id="sess-123456789abc")
+    assert sess.plan_path is None
+    assert sess.plan_status == "inactive"
+    assert sess.plan_task == ""
+
+
+def test_session_plan_fields_persist_round_trip(tmp_path) -> None:
+    sess = desktop_bridge.Session(
+        id="sess-123456789abc",
+        plan_path="/tmp/plan.md",
+        plan_status="ready",
+        plan_task="build the thing",
+    )
+    payload = desktop_bridge._session_to_persistable(sess)
+    assert payload["planPath"] == "/tmp/plan.md"
+    assert payload["planStatus"] == "ready"
+    assert payload["planTask"] == "build the thing"
+
+    restored = desktop_bridge._session_from_persisted(payload, str(tmp_path))
+    assert restored.plan_path == "/tmp/plan.md"
+    assert restored.plan_status == "ready"
+    assert restored.plan_task == "build the thing"
+
+
+def test_session_plan_status_unknown_persisted_value_restores_inactive(tmp_path) -> None:
+    restored = desktop_bridge._session_from_persisted(
+        {"id": "sess-123456789abc", "planPath": "/tmp/plan.md", "planStatus": "bogus", "planTask": "x"},
+        str(tmp_path),
+    )
+    assert restored.plan_status == "inactive"
+    assert restored.plan_path == "/tmp/plan.md"
+    assert restored.plan_task == "x"
+
+
+def test_snapshot_exposes_plan_fields() -> None:
+    manager = desktop_bridge.AgentManager()
+    sess = desktop_bridge.Session(
+        id="sess-123456789abc",
+        plan_path="/tmp/plan.md",
+        plan_status="ready",
+        plan_task="build",
+    )
+    snap = manager.snapshot(sess)
+    assert snap["planPath"] == "/tmp/plan.md"
+    assert snap["planStatus"] == "ready"
+    assert snap["planTask"] == "build"
+
+
+def _completion_certificate(plan_remaining=0, verify_status="pass") -> dict:
+    return {
+        "task_id": "task-1",
+        "status": "completed",
+        "reason": "completion_certificate",
+        "evidence_count": 1,
+        "verify_status": verify_status,
+        "plan_remaining": plan_remaining,
+        "final_text": "plan complete",
+    }
+
+
+def _plan_terminal(status="completed", certificate=None) -> dict:
+    return {
+        "type": "terminal",
+        "status": status,
+        "reason": "completion_certificate" if status == "completed" else "RuntimeError",
+        "text": "plan complete",
+        "data": None,
+        "turn": 1,
+        "source": "agent",
+        "certificate": certificate,
+    }
+
+
+def _plan_contract_runner(terminal: dict, mode=None):
+    import types
+
+    contract = types.SimpleNamespace(mode=mode)
+    handler = types.SimpleNamespace(task_contract=contract)
+    agent = types.SimpleNamespace(handler=handler)
+
+    class PlanRunner:
+        def __init__(self, agent):
+            self._agent = agent
+
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
+            out = queue.Queue()
+            out.put(terminal)
+            return out
+
+    return PlanRunner(agent)
+
+
+def _run_plan_turn(terminal: dict, mode=None, *, plan_path="/tmp/plan.md", plan_status="planning"):
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session(cwd=manager.workspace_dir)
+    sess.agent = _plan_contract_runner(terminal, mode=mode)
+    sess.plan_status = plan_status
+    sess.plan_path = plan_path
+    manager.add_message(sess, "user", "make a plan")
+    sess.status = "running"
+    sess.partial = {"id": sess.msg_seq + 1, "role": "assistant", "content": "", "partial": True}
+    manager.run_agent_turn(sess, "make a plan")
+    return sess
+
+
+def test_run_agent_turn_plan_completion_sets_ready() -> None:
+    sess = _run_plan_turn(
+        _plan_terminal(certificate=_completion_certificate()),
+        mode=desktop_bridge.TaskMode.PLAN,
+    )
+    assert sess.plan_status == "ready"
+    assert sess.status == "idle"
+
+
+def test_run_agent_turn_plan_completed_without_certificate_not_ready() -> None:
+    sess = _run_plan_turn(
+        _plan_terminal(certificate=None),
+        mode=desktop_bridge.TaskMode.PLAN,
+    )
+    assert sess.plan_status == "planning"
+    assert sess.status == "idle"
+
+
+def test_run_agent_turn_plan_completed_with_remaining_items_not_ready() -> None:
+    sess = _run_plan_turn(
+        _plan_terminal(certificate=_completion_certificate(plan_remaining=1)),
+        mode=desktop_bridge.TaskMode.PLAN,
+    )
+    assert sess.plan_status == "planning"
+
+
+def test_run_agent_turn_plan_completed_with_failed_verification_not_ready() -> None:
+    sess = _run_plan_turn(
+        _plan_terminal(certificate=_completion_certificate(verify_status="fail")),
+        mode=desktop_bridge.TaskMode.PLAN,
+    )
+    assert sess.plan_status == "planning"
+
+
+def test_run_agent_turn_plan_failed_preserves_path() -> None:
+    sess = _run_plan_turn(
+        _plan_terminal(status="failed"),
+        mode=desktop_bridge.TaskMode.PLAN,
+    )
+    assert sess.plan_status == "failed"
+    assert sess.plan_path == "/tmp/plan.md"
+
+
+def test_run_agent_turn_plan_cancelled_preserves_path() -> None:
+    terminal = dict(_plan_terminal(status="cancelled"))
+    terminal["reason"] = "user_cancelled"
+    sess = _run_plan_turn(
+        terminal,
+        mode=desktop_bridge.TaskMode.PLAN,
+    )
+    assert sess.plan_status == "cancelled"
+    assert sess.plan_path == "/tmp/plan.md"
+
+
+def test_run_agent_turn_open_failure_does_not_cancel_ready_plan() -> None:
+    sess = _run_plan_turn(
+        _plan_terminal(status="failed"),
+        mode=desktop_bridge.TaskMode.OPEN,
+        plan_status="ready",
+    )
+
+    assert sess.plan_status == "ready"
+    assert sess.plan_path == "/tmp/plan.md"
+
+
+def test_run_agent_turn_open_cancelled_does_not_cancel_ready_plan() -> None:
+    terminal = dict(_plan_terminal(status="cancelled"))
+    terminal["reason"] = "user_cancelled"
+    sess = _run_plan_turn(
+        terminal,
+        mode=desktop_bridge.TaskMode.OPEN,
+        plan_status="ready",
+    )
+
+    assert sess.plan_status == "ready"
+    assert sess.plan_path == "/tmp/plan.md"
+
+
+def test_start_plan_creates_workspace_and_submits_plan(monkeypatch) -> None:
+    captured = {}
+
+    class FakeRunner:
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
+            captured["prompt"] = prompt
+            captured["task_mode"] = task_mode
+            captured["plan_path"] = plan_path
+            out = queue.Queue()
+            out.put(_plan_terminal(certificate=None))
+            return out
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session(cwd=manager.workspace_dir)
+    monkeypatch.setattr(manager, "make_agent", lambda s: FakeRunner())
+
+    result = manager.start_plan(sess.id, "Build the thing")
+    sess.thread.join(timeout=5)
+
+    assert result["planTask"] == "Build the thing"
+    assert captured["task_mode"] == desktop_bridge.TaskMode.PLAN
+    assert captured["plan_path"] == result["planPath"]
+    assert Path(result["planPath"]).is_file()
+    assert sess.plan_status == "planning"
+    assert sess.plan_task == "Build the thing"
+    assert sess.plan_path == result["planPath"]
+
+
+def test_start_plan_rejects_empty_task(monkeypatch) -> None:
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session(cwd=manager.workspace_dir)
+    with pytest.raises(web.HTTPBadRequest):
+        manager.start_plan(sess.id, "   ")
+    workspace = Path(manager.workspace_dir)
+    assert [p for p in workspace.iterdir() if p.name.startswith("plan_")] == []
+
+
+def test_start_plan_rejects_running_session(monkeypatch) -> None:
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session(cwd=manager.workspace_dir)
+    sess.status = "running"
+    with pytest.raises(web.HTTPConflict):
+        manager.start_plan(sess.id, "task")
+
+
+def test_start_plan_rejects_active_plan(monkeypatch) -> None:
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session(cwd=manager.workspace_dir)
+    sess.plan_status = "ready"
+    sess.plan_path = "/tmp/active-plan.md"
+    sess.plan_task = "existing task"
+
+    with pytest.raises(web.HTTPConflict) as exc_info:
+        manager.start_plan(sess.id, "another task")
+
+    payload = json.loads(exc_info.value.text)
+    assert payload["planPath"] == "/tmp/active-plan.md"
+    assert payload["planStatus"] == "ready"
+    assert payload["planTask"] == "existing task"
+
+
+def test_start_plan_rolls_back_on_submission_failure(monkeypatch) -> None:
+    class RaisingRunner:
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
+            raise RuntimeError("boom")
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session(cwd=manager.workspace_dir)
+    monkeypatch.setattr(manager, "make_agent", lambda s: RaisingRunner())
+    workspace = Path(manager.workspace_dir)
+    before = sorted(p.name for p in workspace.iterdir())
+
+    with pytest.raises(RuntimeError):
+        manager.start_plan(sess.id, "do the thing")
+
+    after = sorted(p.name for p in workspace.iterdir())
+    assert after == before
+    assert sess.plan_path is None
+    assert sess.plan_status == "inactive"
+    assert sess.plan_task == ""
+
+
+def test_execute_plan_requires_ready(monkeypatch) -> None:
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session(cwd=manager.workspace_dir)
+    with pytest.raises(web.HTTPConflict):
+        manager.execute_plan(sess.id)
+
+
+def test_execute_plan_requires_plan_file(monkeypatch) -> None:
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session(cwd=manager.workspace_dir)
+    sess.plan_status = "ready"
+    sess.plan_path = "/nonexistent/plan.md"
+    with pytest.raises(web.HTTPConflict):
+        manager.execute_plan(sess.id)
+
+
+def test_execute_plan_rolls_back_to_ready_on_failure(monkeypatch) -> None:
+    class RaisingRunner:
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
+            raise RuntimeError("boom")
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session(cwd=manager.workspace_dir)
+    plan_file = Path(manager.workspace_dir) / "plan.md"
+    plan_file.write_text("- [x] task", encoding="utf-8")
+    sess.plan_status = "ready"
+    sess.plan_path = str(plan_file)
+    sess.plan_task = "do it"
+    monkeypatch.setattr(manager, "make_agent", lambda s: RaisingRunner())
+
+    with pytest.raises(RuntimeError):
+        manager.execute_plan(sess.id)
+
+    assert sess.plan_status == "ready"
+
+
+def test_execute_plan_submits_executing_task(monkeypatch) -> None:
+    captured = {}
+
+    class FakeRunner:
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
+            captured["prompt"] = prompt
+            captured["task_mode"] = task_mode
+            captured["plan_path"] = plan_path
+            out = queue.Queue()
+            out.put(_plan_terminal(certificate=None))
+            return out
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session(cwd=manager.workspace_dir)
+    plan_file = Path(manager.workspace_dir) / "plan.md"
+    plan_file.write_text("- [x] task", encoding="utf-8")
+    sess.plan_status = "ready"
+    sess.plan_path = str(plan_file)
+    sess.plan_task = "do it"
+    monkeypatch.setattr(manager, "make_agent", lambda s: FakeRunner())
+
+    result = manager.execute_plan(sess.id)
+    sess.thread.join(timeout=5)
+
+    assert result["planPath"] == str(plan_file)
+    assert captured["task_mode"] == desktop_bridge.TaskMode.EXECUTING
+    assert captured["plan_path"] == str(plan_file)
+    assert captured["prompt"] == "do it"
+    assert sess.plan_status == "executing"
