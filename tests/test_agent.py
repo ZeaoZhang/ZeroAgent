@@ -901,6 +901,93 @@ class TestZeroAgentTaskLifecycle:
         assert agent._pending_task_state is None
 
 
+class TestZeroAgentInitialMode:
+    """ZeroAgent.run initial_mode / plan_path contract construction."""
+
+    @staticmethod
+    def _make_config(tmp_path) -> AgentConfig:
+        return AgentConfig(
+            llm_backends={
+                "default": LLMBackendConfig(
+                    name="default",
+                    provider="openai",
+                    api_key="test-key",
+                    api_base="https://api.openai.com/v1",
+                    model="test-model",
+                ),
+            },
+            default_backend="default",
+            max_turns=5,
+            workspace_dir=str(tmp_path / "workspace"),
+            memory_dir=str(tmp_path / "memory"),
+        )
+
+    def _make_agent(self, tmp_path, monkeypatch) -> ZeroAgent:
+        config = self._make_config(tmp_path)
+        fake_client = _FakeClient(config.llm_backends["default"], [])
+        monkeypatch.setattr(
+            "zero_agent.core.agent.LLMFactory.create_all_sessions",
+            lambda _config: {"default": fake_client},
+        )
+        return ZeroAgent(config=config)
+
+    def _capture_loop(self, tmp_path, monkeypatch):
+        agent = self._make_agent(tmp_path, monkeypatch)
+        seen = {}
+
+        class CapturingLoop:
+            def __init__(self, *, handler, max_turns, **_kwargs):
+                self.handler = handler
+                self.max_turns = max_turns
+
+            def run(self, **_kwargs):
+                seen["mode"] = self.handler.task_contract.mode
+                seen["plan_path"] = self.handler.task_contract.plan_path
+                seen["task_id"] = self.handler.task_contract.task_id
+                seen["plan_verify_status"] = self.handler.plan_verify_status
+                seen["ledger_records"] = list(self.handler.evidence_ledger.records)
+                seen["loop_max_turns"] = self.max_turns
+                if False:
+                    yield None
+                return TerminalEvent(status=TerminalStatus.FAILED, reason="blocked")
+
+        monkeypatch.setattr("zero_agent.core.agent.AgentLoop", CapturingLoop)
+        return agent, seen
+
+    def test_plan_contract_sets_mode_path_and_extended_budget(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        agent, seen = self._capture_loop(tmp_path, monkeypatch)
+        _exhaust(agent.run("draft the plan", initial_mode=TaskMode.PLAN, plan_path="plan.md"))
+        assert seen["mode"] is TaskMode.PLAN
+        assert seen["plan_path"] == "plan.md"
+        assert seen["task_id"].startswith("task-")
+        assert seen["plan_verify_status"] == "missing"
+        assert seen["ledger_records"] == []
+        assert seen["loop_max_turns"] == 120
+
+    def test_executing_contract_sets_mode_and_path(self, tmp_path, monkeypatch) -> None:
+        agent, seen = self._capture_loop(tmp_path, monkeypatch)
+        _exhaust(agent.run("execute the plan", initial_mode=TaskMode.EXECUTING, plan_path="plan.md"))
+        assert seen["mode"] is TaskMode.EXECUTING
+        assert seen["plan_path"] == "plan.md"
+        assert seen["loop_max_turns"] == 5
+
+    def test_open_default_contract_unchanged(self, tmp_path, monkeypatch) -> None:
+        agent, seen = self._capture_loop(tmp_path, monkeypatch)
+        _exhaust(agent.run("hello"))
+        assert seen["mode"] is TaskMode.OPEN
+        assert seen["plan_path"] is None
+
+    @pytest.mark.parametrize("mode", [TaskMode.PLAN, TaskMode.EXECUTING])
+    def test_missing_plan_path_rejected(self, tmp_path, monkeypatch, mode) -> None:
+        agent = self._make_agent(tmp_path, monkeypatch)
+        with pytest.raises(ValueError):
+            _exhaust(agent.run("no plan path", initial_mode=mode))
+
+
+
+
 
 class _FakeClient:
     """Minimal LLM client for ZeroAgent.run() tests."""

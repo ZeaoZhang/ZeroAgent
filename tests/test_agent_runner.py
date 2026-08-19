@@ -11,7 +11,7 @@ import pytest
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import AgentConfig, LLMBackendConfig
-from zero_agent.core.types import TerminalEvent, TerminalStatus
+from zero_agent.core.types import TaskMode, TerminalEvent, TerminalStatus
 from zero_agent.runners.agent_runner import AgentRunner, _consume_agent_run
 
 
@@ -399,7 +399,7 @@ class TestAgentRunnerTaskDispatch:
         assert not runner.is_running
 
     def test_multiple_tasks_sequential(self, mock_agent: ZeroAgent, monkeypatch) -> None:
-        def fake_run(prompt):
+        def fake_run(prompt, **kwargs):
             yield prompt
             return TerminalEvent(
                 status=TerminalStatus.COMPLETED,
@@ -423,7 +423,7 @@ class TestAgentRunnerTaskDispatch:
         assert runner._worker_thread.is_alive()
 
     def test_background_run_consumes_put_task(self, mock_agent: ZeroAgent, monkeypatch) -> None:
-        def fake_run(prompt):
+        def fake_run(prompt, **kwargs):
             assert prompt == "hello"
             yield {"turn": 1}
             yield "Hel"
@@ -452,7 +452,7 @@ class TestAgentRunnerTaskDispatch:
         assert not thread.is_alive()
 
     def test_inc_out_emits_incremental_chunks(self, mock_agent: ZeroAgent, monkeypatch) -> None:
-        def fake_run(_prompt):
+        def fake_run(_prompt, **kwargs):
             yield "Hel"
             yield "lo"
             return TerminalEvent(status=TerminalStatus.WAITING, reason="human_intervention")
@@ -522,7 +522,7 @@ class TestAgentRunnerTaskDispatch:
     def test_queue_preserves_non_success_terminal(
         self, mock_agent: ZeroAgent, monkeypatch, status, reason
     ) -> None:
-        def fake_run(_prompt):
+        def fake_run(_prompt, **kwargs):
             if False:
                 yield None
             return TerminalEvent(status=status, reason=reason)
@@ -536,7 +536,7 @@ class TestAgentRunnerTaskDispatch:
     def test_queue_preserves_terminal_answer_when_quiet_loop_emits_no_chunks(
         self, mock_agent: ZeroAgent, monkeypatch
     ) -> None:
-        def fake_run(_prompt):
+        def fake_run(_prompt, **kwargs):
             if False:
                 yield ""
             return TerminalEvent(
@@ -556,7 +556,7 @@ class TestAgentRunnerTaskDispatch:
         self, mock_agent: ZeroAgent, monkeypatch
     ) -> None:
         mock_agent.config.verbose = False
-        def fake_run(_prompt):
+        def fake_run(_prompt, **kwargs):
             yield "file_read({\"path\": \"README.md\"})\n\n"
             return TerminalEvent(
                 status=TerminalStatus.COMPLETED,
@@ -578,7 +578,7 @@ class TestAgentRunnerTaskDispatch:
     ) -> None:
         mock_agent.config.verbose = False
 
-        def fake_run(_prompt):
+        def fake_run(_prompt, **kwargs):
             yield "Tool result says Done. but completion is pending.\n"
             return TerminalEvent(
                 status=TerminalStatus.COMPLETED,
@@ -594,7 +594,7 @@ class TestAgentRunnerTaskDispatch:
         assert terminal["text"] == "Done."
 
     def test_queue_converts_generator_exception(self, mock_agent: ZeroAgent, monkeypatch) -> None:
-        def fake_run(_prompt):
+        def fake_run(_prompt, **kwargs):
             yield "partial"
             raise LookupError("broken")
 
@@ -611,7 +611,7 @@ class TestAgentRunnerTaskDispatch:
         yielded = threading.Event()
         release = threading.Event()
 
-        def fake_run(_prompt):
+        def fake_run(_prompt, **kwargs):
             yield "partial"
             yielded.set()
             release.wait(timeout=3)
@@ -668,7 +668,7 @@ class TestAgentRunnerTaskDispatch:
         release_active = threading.Event()
         calls: list[str] = []
 
-        def fake_run(prompt):
+        def fake_run(prompt, **kwargs):
             calls.append(prompt)
             active_started.set()
             yield "partial"
@@ -725,3 +725,45 @@ class TestAgentRunnerTaskDispatch:
         assert terminal["source"] == "race"
         assert runner._worker_thread is None
         run_mock.assert_not_called()
+
+    def test_put_task_forwards_task_mode_and_plan_path(
+        self, mock_agent: ZeroAgent, monkeypatch
+    ) -> None:
+        captured = {}
+
+        def fake_run(prompt, **kwargs):
+            captured["prompt"] = prompt
+            captured["initial_mode"] = kwargs.get("initial_mode")
+            captured["plan_path"] = kwargs.get("plan_path")
+            yield "ok"
+            return TerminalEvent(status=TerminalStatus.COMPLETED, reason="completion_certificate")
+
+        monkeypatch.setattr(mock_agent, "run", fake_run)
+        dq = AgentRunner(mock_agent).put_task(
+            "hello", task_mode=TaskMode.EXECUTING, plan_path="plan.md"
+        )
+
+        assert dq.get(timeout=3)["type"] == "chunk"
+        assert dq.get(timeout=3)["type"] == "terminal"
+        assert captured["prompt"] == "hello"
+        assert captured["initial_mode"] is TaskMode.EXECUTING
+        assert captured["plan_path"] == "plan.md"
+
+    def test_put_task_defaults_to_open_contract(
+        self, mock_agent: ZeroAgent, monkeypatch
+    ) -> None:
+        captured = {}
+
+        def fake_run(prompt, **kwargs):
+            captured["initial_mode"] = kwargs.get("initial_mode")
+            captured["plan_path"] = kwargs.get("plan_path")
+            yield "ok"
+            return TerminalEvent(status=TerminalStatus.COMPLETED, reason="completion_certificate")
+
+        monkeypatch.setattr(mock_agent, "run", fake_run)
+        dq = AgentRunner(mock_agent).put_task("hello")
+
+        assert dq.get(timeout=3)["type"] == "chunk"
+        assert dq.get(timeout=3)["type"] == "terminal"
+        assert captured["initial_mode"] is TaskMode.OPEN
+        assert captured["plan_path"] is None

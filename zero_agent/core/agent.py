@@ -416,6 +416,9 @@ class ZeroAgent:
         user_input: str,
         system_prompt: Optional[str] = None,
         initial_user_content: Optional[str] = None,
+        *,
+        initial_mode: TaskMode = TaskMode.OPEN,
+        plan_path: Optional[str] = None,
     ) -> Generator[Any, None, TerminalEvent]:
         """执行单次 agent 任务.
 
@@ -426,6 +429,8 @@ class ZeroAgent:
             user_input: 用户输入（任务描述）.
             system_prompt: 系统提示词，None 时使用默认构建.
             initial_user_content: 可选的首条 user message 内容.
+            initial_mode: 新任务的初始 TaskMode，默认 OPEN.
+            plan_path: PLAN/EXECUTING 任务必须提供的 plan 文件路径.
 
         Yields:
             str → 状态文本，供 UI 实时展示.
@@ -436,11 +441,21 @@ class ZeroAgent:
 
         Raises:
             RuntimeError: 当前有任务正在运行（不支持并发）.
+            ValueError: 无 pending task 时 PLAN/EXECUTING 未提供 plan_path.
         """
         self._apply_pending_runtime_config()
         pending_state = self._pending_task_state
         if pending_state is not None:
             self.clear_pending_task()
+
+        if (
+            pending_state is None
+            and initial_mode in (TaskMode.PLAN, TaskMode.EXECUTING)
+            and not plan_path
+        ):
+            raise ValueError(
+                f"TaskMode.{initial_mode.value} requires a non-empty plan_path"
+            )
 
         # 创建工作目录和记忆目录
         os.makedirs(self.config.workspace_dir, exist_ok=True)
@@ -454,7 +469,8 @@ class ZeroAgent:
             self.handler.task_contract = TaskContract(
                 task_id=f"task-{time.time_ns()}",
                 user_request=user_input,
-                mode=TaskMode.OPEN,
+                mode=initial_mode,
+                plan_path=plan_path,
             )
             self.handler.evidence_ledger = EvidenceLedger()
             self.handler.plan_verify_status = "missing"

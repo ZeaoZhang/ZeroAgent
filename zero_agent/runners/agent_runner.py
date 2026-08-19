@@ -15,7 +15,7 @@ import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from zero_agent.core.agent import ZeroAgent
-from zero_agent.core.types import TerminalEvent, TerminalStatus
+from zero_agent.core.types import TaskMode, TerminalEvent, TerminalStatus
 
 
 def _consume_agent_run(
@@ -525,6 +525,9 @@ class AgentRunner:
         query: str,
         source: str = "user",
         images: Optional[list] = None,
+        *,
+        task_mode: TaskMode = TaskMode.OPEN,
+        plan_path: Optional[str] = None,
     ) -> queue.Queue:
         """提交任务到 ZeroAgent, 返回流式输出队列.
 
@@ -538,6 +541,8 @@ class AgentRunner:
             query: 用户输入 / 任务描述.
             source: 来源标识 (e.g. "telegram", "user", "subagent:xxx").
             images: 图片路径列表 (预留, 当前未实现).
+            task_mode: 新任务的初始 TaskMode，默认 OPEN.
+            plan_path: PLAN/EXECUTING 任务必须提供的 plan 文件路径.
 
         Returns:
             queue.Queue — 消费者从中读取流式输出.
@@ -554,6 +559,8 @@ class AgentRunner:
                 "source": source,
                 "images": images or [],
                 "output": display_queue,
+                "task_mode": task_mode,
+                "plan_path": plan_path,
             })
         self._ensure_worker()
         return display_queue
@@ -642,6 +649,8 @@ class AgentRunner:
             query = task["query"]
             source = task["source"]
             display_queue = task["output"]
+            task_mode = task.get("task_mode", TaskMode.OPEN)
+            plan_path = task.get("plan_path")
 
             if self._shutdown_event.is_set():
                 self._put_runner_shutdown(display_queue, source=source)
@@ -691,7 +700,7 @@ class AgentRunner:
 
             try:
                 try:
-                    gen = self._agent.run(query)
+                    gen = self._agent.run(query, initial_mode=task_mode, plan_path=plan_path)
                 except Exception as exc:
                     terminal = TerminalEvent(
                         status=TerminalStatus.FAILED,
