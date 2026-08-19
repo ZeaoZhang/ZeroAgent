@@ -12,7 +12,7 @@
 | `exploration_findings.md` | 规划前只读探索结论 |
 | `verify_context.json` | 独立验证输入上下文 |
 | `evidence.json` | plan 任务证据账本快照 |
-| `result.md` | 独立验证报告，末行必须是字面量 `VERDICT: PASS`、`VERDICT: FAIL` 或 `VERDICT: PARTIAL` |
+| `result.md` | 独立验证报告，末行必须是字面量 `VERDICT: PASS`、`VERDICT: FAIL` 或 `VERDICT: PARTIAL`（即 `VERDICT: PASS / FAIL / PARTIAL` 三种结果之一） |
 
 ---
 
