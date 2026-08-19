@@ -43,7 +43,16 @@ renderMessages = () => null;
 isActiveSession = () => false;
 hideError = () => {};
 startTaskTimer = () => {};
-stopTaskTimer = () => {};
+stopTaskTimer = (sess) => {
+  if (sess) {
+    const runtime = getSessionRuntime(sess);
+    runtime.taskTimerId = null;
+    runtime.taskStartedAt = 0;
+  }
+};
+showError = (text, actionLabel, actionFn) => {
+  globalThis.lastError = { text, actionLabel, actionFn };
+};
 async function ensureBridgeSession(sess) { return sess.bridgeSessionId || sess.id; }
 setBusy = (busy, label, sess) => {
   if (sess) getSessionRuntime(sess).busy = busy;
@@ -57,6 +66,8 @@ globalThis.__testExports = {
   appendTurn,
   beginAssistantTurn,
   sendPrompt,
+  formatRequestError,
+  cleanErrorMessage,
   setMessagesElement: (value) => { messagesEl = value; },
   setStatusElements: (model, usage) => {
     currentModelEl = model;
@@ -66,11 +77,22 @@ globalThis.__testExports = {
 `;
 vm.runInNewContext(source.slice(0, slashCommandsMarker) + testExports, context, { filename: appPath });
 
-const { state, getSessionRuntime, upsertPolledMessage, finalizeAssistantReply, handleNotification, appendTurn, beginAssistantTurn, sendPrompt } = context.__testExports;
+const { state, getSessionRuntime, upsertPolledMessage, finalizeAssistantReply, handleNotification, appendTurn, beginAssistantTurn, sendPrompt, formatRequestError, cleanErrorMessage } = context.__testExports;
 const messageSummary = (session) => session.messages.map(({ id = null, content }) => ({ id, content }));
 const assistantSummary = (session) => session.messages
   .filter((message) => message.role === 'assistant')
   .map(({ id = null, content }) => ({ id, content }));
+
+assert.equal(
+  formatRequestError(new TypeError('Failed to fetch'), '模型请求'),
+  '模型请求失败：无法连接 ZeroAgent 服务，请检查 bridge 是否运行或网络连接。',
+);
+assert.equal(
+  formatRequestError(Object.assign(new Error('Gateway Timeout'), { status: 504 }), '轮询会话'),
+  '轮询会话超时，请稍后重试。',
+);
+assert.equal(cleanErrorMessage('**LLM Running (Turn 1) ...**'), '请求失败，详情请查看诊断信息。');
+assert.equal(formatRequestError(new Error('/private/backend/path'), '模型请求'), '模型请求失败，请稍后重试。');
 const messages = {
   lastElementChild: null,
   querySelectorAll: () => [],
@@ -316,6 +338,32 @@ const deferred = () => {
     { id: 2, content: 'first canonical answer' },
     { id: 4, content: 'second canonical answer' },
   ]);
+
+  const failedSession = {
+    id: 'local-network-error-test',
+    bridgeSessionId: 'bridge-network-error',
+    title: 'Network error',
+    untitled: false,
+    config: { llmNo: 0 },
+    messages: [],
+  };
+  state.sessions.set(failedSession.id, failedSession);
+  state.activeId = failedSession.id;
+  context.window.zeroAgent = {
+    rpc: async () => { throw new TypeError('Failed to fetch'); },
+    pollSession: async () => ({ status: 'idle', messages: [] }),
+  };
+  const failedRuntime = getSessionRuntime(failedSession);
+  failedRuntime.taskStartedAt = 123;
+  failedRuntime.taskTimerId = 456;
+  await sendPrompt('network failure');
+  assert.equal(failedRuntime.busy, false);
+  assert.equal(failedRuntime.taskStartedAt, 0);
+  assert.equal(failedRuntime.taskTimerId, null);
+  assert.equal(context.lastError.text, '模型请求失败：无法连接 ZeroAgent 服务，请检查 bridge 是否运行或网络连接。');
+  assert.equal(context.lastError.actionLabel, '检查会话状态');
+  assert.equal(failedSession.messages.at(-1).content, context.lastError.text);
+
 
   console.log('frontend message reconciliation regression passed');
 })().catch((err) => {

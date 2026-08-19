@@ -710,6 +710,34 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
 }
 .turn-rendered-md:empty { display: none; }
 
+/* Plan status card (reuses the plan turn / card vocabulary) */
+.plan-status-card {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  padding: 6px 10px;
+  overflow: visible;
+}
+.plan-status-card .plan-card-header {
+  cursor: default;
+  width: fit-content;
+}
+.plan-status-card .plan-task {
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.plan-status-card .plan-path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+.plan-status-card .plan-execute-btn {
+  margin-top: 8px;
+}
+
 /* Markdown content */
 .md {
   line-height: 1.72;

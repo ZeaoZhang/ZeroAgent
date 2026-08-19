@@ -55,7 +55,7 @@ def _get_config() -> Optional[dict]:
     # fallback: 环境变量
     pk = os.environ.get("LANGFUSE_PUBLIC_KEY")
     sk = os.environ.get("LANGFUSE_SECRET_KEY")
-    host = os.environ.get("LANGFUSE_HOST", "https://cloud.langfuse.com")
+    host = os.environ.get("LANGFUSE_HOST") or os.environ.get("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
     if pk and sk:
         return {
             "public_key": pk,

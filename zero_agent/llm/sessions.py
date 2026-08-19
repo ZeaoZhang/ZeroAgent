@@ -44,6 +44,73 @@ def _redact_error(value: Any, secret: str = "") -> str:
     return text[:1000]
 
 
+def _usage_from_chunk(chunk: Any) -> Any:
+    """Return usage for a stream chunk, restoring cache fields if possible.
+
+    litellm normalizes provider usage into its own ``Usage`` model.  OpenAI
+    compatible relays (e.g. oai.sb / deepseek) expose cache metrics either as
+    top-level fields (``prompt_cache_hit_tokens`` / ``prompt_cache_miss_tokens``)
+    or nested under ``prompt_tokens_details.cached_tokens``.  litellm keeps
+    those values on the typed model only when the nested object is non-empty,
+    so we re-read any raw usage dict attached to the chunk and re-merge cache
+    fields that were dropped.
+
+    The original usage object is returned unchanged when no recovery happened,
+    which keeps existing callers' identity expectations intact.
+    """
+    usage = getattr(chunk, "usage", None)
+    if usage is None:
+        return None
+
+    raw_candidates: List[Any] = []
+    model_extra = getattr(chunk, "model_extra", None) or {}
+    raw_usage = model_extra.get("usage")
+    if isinstance(raw_usage, dict):
+        raw_candidates.append(raw_usage)
+    elif hasattr(raw_usage, "model_dump"):
+        raw_candidates.append(raw_usage.model_dump())
+    provider_specific = getattr(chunk, "provider_specific_fields", None)
+    if isinstance(provider_specific, dict):
+        raw_candidates.append(provider_specific)
+
+    if not raw_candidates:
+        return usage
+
+    try:
+        if hasattr(usage, "model_dump"):
+            data = usage.model_dump()
+        elif hasattr(usage, "dict"):
+            data = usage.dict()
+        else:
+            data = dict(vars(usage)) if hasattr(usage, "__dict__") else usage
+    except Exception:
+        return usage
+    if not isinstance(data, dict):
+        return usage
+
+    recovered = False
+    cache_keys = (
+        "prompt_cache_hit_tokens",
+        "prompt_cache_miss_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    )
+    for raw in raw_candidates:
+        if not isinstance(raw, dict):
+            continue
+        ptd = raw.get("prompt_tokens_details")
+        if isinstance(ptd, dict) and ptd.get("cached_tokens") is not None:
+            if not isinstance(data.get("prompt_tokens_details"), dict):
+                data["prompt_tokens_details"] = {}
+            data["prompt_tokens_details"]["cached_tokens"] = ptd["cached_tokens"]
+            recovered = True
+        for key in cache_keys:
+            if raw.get(key) is not None and data.get(key) is None:
+                data[key] = raw[key]
+                recovered = True
+    return data if recovered else usage
+
+
 def _image_to_data_url(image_input: str | Path | Any, max_pixels: int) -> str:
     """Convert a path or PIL image to an OpenAI-compatible JPEG data URL."""
     try:
@@ -463,8 +530,8 @@ class LiteLLMSession:
             stop_source = final_stop_reason or mock.stop_reason
             mock.stop_reason = normalize_stop_reason(stop_source, has_tool_calls=has_tool_calls)
         mock.usage = next(
-            (usage for usage in (getattr(chunk, "usage", None) for chunk in reversed(stream_chunks)) if usage),
-            getattr(final_response, "usage", None),
+            (usage for usage in (_usage_from_chunk(chunk) for chunk in reversed(stream_chunks)) if usage),
+            _usage_from_chunk(final_response),
         )
         mock.tool_protocol = "native"
 
@@ -598,6 +665,12 @@ class LiteLLMSession:
             kwargs.update(self.config.litellm_settings)
         if self.config.provider:
             kwargs["custom_llm_provider"] = self.config.provider
+
+        # OpenAI 兼容 provider 流式请求需显式请求 usage chunk（cache 指标依赖它）。
+        # 未显式请求时 litellm 默认丢弃流式 usage，导致 _record_usage 收不到
+        # cache 字段、前端 Cache 显示 n/a（方案 A 修复的一部分）。
+        if stream and (self.config.provider or "").lower() == "openai":
+            kwargs.setdefault("stream_options", {}).setdefault("include_usage", True)
 
         if self.config.max_tokens:
             kwargs["max_tokens"] = self.config.max_tokens

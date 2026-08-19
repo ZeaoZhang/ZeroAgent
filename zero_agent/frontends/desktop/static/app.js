@@ -29,7 +29,9 @@ function getActiveConfig() {
 }
 function getActiveDiagnostics() {
   const sess = state.sessions.get(state.activeId);
-  return sess ? sess.diagnostics : [];
+  if (!sess) return [];
+  if (!Array.isArray(sess.diagnostics)) sess.diagnostics = [];
+  return sess.diagnostics;
 }
 
 // ─── DOM refs ─────────────────────────────────────────────────────────────
@@ -52,6 +54,50 @@ function diagnosticText(payload) {
   } catch (_) {
     return String(payload);
   }
+}
+
+function rawErrorText(error) {
+  if (error == null) return '';
+  if (typeof error === 'string') return error;
+  const candidates = [
+    error.message,
+    error.data?.error,
+    error.data?.message,
+    error.error,
+  ];
+  for (const candidate of candidates) {
+    if (candidate == null || candidate === '') continue;
+    if (typeof candidate === 'string') return candidate;
+    try { return JSON.stringify(candidate); } catch (_) { return String(candidate); }
+  }
+  return String(error);
+}
+
+function cleanErrorMessage(text) {
+  const cleaned = String(text || '')
+    .replace(/\*{0,2}LLM Running \(Turn \d+\) \.\.\.\*{0,2}/gi, '')
+    .trim();
+  return cleaned || '请求失败，详情请查看诊断信息。';
+}
+
+function formatRequestError(error, operation = '请求') {
+  const raw = rawErrorText(error);
+  const status = Number(error?.status || error?.data?.status || 0);
+  if (/timeout|timed out|超时|gateway timeout/i.test(raw) || status === 408 || status === 504) {
+    return `${operation}超时，请稍后重试。`;
+  }
+  if (
+    /failed to fetch|network|connection refused|connection reset|econnreset|enotfound|socket|websocket/i.test(raw)
+  ) {
+    return `${operation}失败：无法连接 ZeroAgent 服务，请检查 bridge 是否运行或网络连接。`;
+  }
+  if (status >= 500) {
+    return `${operation}失败：模型服务暂时不可用（HTTP ${status}），请稍后重试。`;
+  }
+  if (status === 401 || status === 403) {
+    return `${operation}失败：认证未通过，请检查 API 配置。`;
+  }
+  return `${operation}失败，请稍后重试。`;
 }
 
 function addDiagnostic(level, message, payload) {
@@ -851,6 +897,9 @@ function createLocalSession(id, title, bridgeSessionId = id) {
   const now = Date.now();
   const sess = {
     id, bridgeSessionId, title: title || 'New chat', messages: [], cwd: null,
+    planPath: null,
+    planStatus: 'inactive',
+    planTask: '',
     untitled: isUntitledSessionTitle(title),
     config: { ...state.defaultConfig },
     diagnostics: [],
@@ -1554,7 +1603,8 @@ function renderMessages() {
 
   const hasSavedMessages = !!sess && sess.messages.length > 0;
   const hasDraft = !!runtime?.assistantDraft && !runtime.assistantDraft.finalized;
-  if (!sess || (!hasSavedMessages && !hasDraft)) {
+  const hasPlan = hasActivePlan(sess);
+  if (!sess || (!hasSavedMessages && !hasDraft && !hasPlan)) {
     messagesEl.innerHTML = '';
     messagesEl.classList.add('empty');
     messagesEl.innerHTML = `
@@ -1590,6 +1640,7 @@ function renderMessages() {
     if (hasDraft) renderAssistantDraft(sess, runtime.assistantDraft);
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
+  renderPlanStatus(sess);
   state._prevRenderedId = state.activeId;
 }
 
@@ -1631,7 +1682,7 @@ function renderMessage(msg, append = true) {
   } else if (msg.role === 'error') {
     const wrap = document.createElement('div');
     wrap.className = 'msg msg-error';
-    wrap.textContent = msg.content;
+    wrap.textContent = cleanErrorMessage(msg.content);
     messagesEl.appendChild(wrap);
     const sess = state.sessions.get(state.activeId);
     const runtime = sess ? getSessionRuntime(sess) : null;
@@ -1732,6 +1783,10 @@ function handleNotification(msg) {
     if (msg.createdAt !== undefined) {
       sess.createdAt = Number(msg.createdAt) || sess.createdAt;
     }
+    if (msg.planPath !== undefined || msg.planStatus !== undefined || msg.planTask !== undefined) {
+      mergePlanMetadata(sess, msg);
+      if (isActiveSession(sess)) renderPlanStatus(sess);
+    }
 
     const runtime = getSessionRuntime(sess);
     if ((msg.state === 'running' || msg.status === 'running') && !runtime.polling) {
@@ -1796,12 +1851,14 @@ function handleNotification(msg) {
     setBusy(false, null, sess);
     hideError();
   } else if (kind === 'error') {
-    finalizeAssistantReply(sess);
+    clearAssistantDraft(sess);
     setBusy(false, null, sess);
     const errText = update.message || update.error || 'Bridge error';
-    sess.messages.push({ role: 'error', content: errText });
-    if (isActiveSession(sess)) renderMessage({ role: 'error', content: errText });
-    showError(errText);
+    addDiagnostic('error', 'Model request failed', errText);
+    const displayError = formatRequestError(errText, '模型请求');
+    sess.messages.push({ role: 'error', content: displayError });
+    if (isActiveSession(sess)) renderMessage({ role: 'error', content: displayError });
+    showError(displayError);
   } else if (kind === 'agent_thought_chunk') {
     const text = extractText(update.content);
     appendStreamChunk(sess, kind, text);
@@ -2271,6 +2328,24 @@ function upsertPolledMessage(sess, raw, { partial = false } = {}) {
   sess.messages.push(msg);
   if (isActiveSession(sess)) renderMessage(msg);
 }
+function clearAssistantDraft(sess) {
+  const runtime = sess ? getSessionRuntime(sess) : null;
+  if (!runtime) return;
+  stopTaskTimer(sess);
+  runtime.assistantDraft = null;
+  runtime.currentTurnEl = null;
+  runtime.activeTurnToken = 0;
+  runtime.activePromptUserId = 0;
+  if (isActiveSession(sess)) renderMessages();
+}
+
+async function retrySessionPolling(sess) {
+  const runtime = getSessionRuntime(sess);
+  runtime.forcePollOnce = true;
+  setBusy(true, '正在重新连接…', sess);
+  await pollSessionMessages(sess);
+}
+
 async function pollSessionMessages(sess) {
   if (!sess) return;
   const runtime = getSessionRuntime(sess);
@@ -2293,9 +2368,11 @@ async function pollSessionMessages(sess) {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
   } catch (e) {
+    const displayError = formatRequestError(e, '会话轮询');
     addDiagnostic('error', 'Polling failed', e);
-    showError('Polling failed: ' + (e.message || e));
+    clearAssistantDraft(sess);
     setBusy(false, null, sess);
+    showError(displayError, '重新连接', () => retrySessionPolling(sess));
   } finally {
     runtime.polling = false;
   }
@@ -2303,7 +2380,7 @@ async function pollSessionMessages(sess) {
 
 async function sendPrompt(text, images = [], options = {}) {
   if (!state.bridgeReady) {
-    showError('Bridge is not ready.');
+    showError('ZeroAgent 服务尚未连接，请检查 bridge 是否运行。', '重启服务', () => restartBridge());
     return;
   }
   if (!state.activeId) {
@@ -2368,12 +2445,15 @@ async function sendPrompt(text, images = [], options = {}) {
     runtime.forcePollOnce = true;
     pollSessionMessages(sess);
   } catch (e) {
-    sess.messages.push({ role: 'error', content: e.message || String(e) });
-    if (isActiveSession(sess)) renderMessage({ role: 'error', content: e.message || String(e) });
+    const displayError = formatRequestError(e, '模型请求');
+    addDiagnostic('error', 'Prompt failed', e);
+    clearAssistantDraft(sess);
+    sess.messages.push({ role: 'error', content: displayError });
+    if (isActiveSession(sess)) renderMessage({ role: 'error', content: displayError });
     setBusy(false, null, sess);
+    showError(displayError, '检查会话状态', () => retrySessionPolling(sess));
   }
 }
-
 async function cancelPrompt() {
   const sess = state.sessions.get(state.activeId);
   const runtime = sess ? getSessionRuntime(sess) : null;
@@ -2399,6 +2479,7 @@ const LOCAL_SLASH_COMMANDS = [
   { cmd: '/model', argHint: '', description: '选择模型' },
   { cmd: '/theme', argHint: 'light|dark|auto', description: '切换主题' },
   { cmd: '/cwd', argHint: '[path]', description: '显示当前目录或在指定目录新建会话' },
+  { cmd: '/plan', argHint: '[task]', description: '创建并运行一个可验证的计划流程' },
 ];
 
 let commandPaletteIndex = 0;
@@ -2473,7 +2554,7 @@ function renderCommandPalette(items) {
     btn.querySelector('.command-desc').textContent = entry.description || '';
     btn.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      applyCommandSuggestion(entry);
+      if (applyCommandSuggestion(entry)) submitInput();
     });
     commandPaletteEl.appendChild(btn);
   }
@@ -2497,8 +2578,9 @@ async function updateCommandPalette() {
 }
 
 function applyCommandSuggestion(entry) {
-  if (!entry?.cmd) return;
-  const hint = entry.argHint ? ' ' : '';
+  if (!entry?.cmd) return false;
+  const takesArg = !!entry.argHint;
+  const hint = takesArg ? ' ' : '';
   inputEl.value = `${entry.cmd}${hint}`;
   inputEl.focus();
   inputEl.selectionStart = inputEl.selectionEnd = inputEl.value.length;
@@ -2506,6 +2588,9 @@ function applyCommandSuggestion(entry) {
   inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
   updateSendButton();
   closeCommandPalette();
+  // Commands that take an argument keep the cursor in the input so the user
+  // can type it; only genuinely no-argument commands submit immediately.
+  return !takesArg;
 }
 
 function moveCommandPalette(delta) {
@@ -2545,6 +2630,7 @@ async function restoreResumeIndex(index, commandName) {
   }
   sess.messages = Array.isArray(result.messages) ? result.messages : [];
   if (result.session?.title) sess.title = result.session.title;
+  mergePlanMetadata(sess, result.session);
   const runtime = getSessionRuntime(sess);
   runtime.seenBridgeMessageIds = new Set();
   runtime.lastPolledMessageId = 0;
@@ -2680,6 +2766,13 @@ async function handleSlash(cmd) {
     case 'scheduler':
       await handleSchedulerCommand(arg);
       break;
+    case 'plan':
+      if (!arg) {
+        showSystem('Usage: /plan <task>');
+        break;
+      }
+      await handlePlanCommand(arg);
+      break;
     default:
       await runAgentSlash(`/${name}`, arg, cmd.trim());
   }
@@ -2708,6 +2801,173 @@ function showSystem(text) {
   if (sess) sess.messages.push(msg);
   renderMessage(msg);
   return msg;
+}
+
+// ─── Plan command ─────────────────────────────────────────────────────────
+const PLAN_STATUS_TEXT = {
+  inactive: 'inactive',
+  planning: 'planning',
+  ready: 'ready',
+  executing: 'executing',
+  failed: 'failed',
+  cancelled: 'cancelled',
+};
+const planStartPromises = new Map();   // localSessionId -> in-flight startPlan Promise
+const planExecutePromises = new Map(); // localSessionId -> in-flight executePlan Promise
+
+
+function planStatusText(status) {
+  return PLAN_STATUS_TEXT[status] || String(status || '');
+}
+
+function mergePlanMetadata(sess, meta) {
+  if (!sess || !meta) return;
+  if (meta.planPath !== undefined) sess.planPath = meta.planPath;
+  if (meta.planStatus !== undefined) sess.planStatus = meta.planStatus;
+  if (meta.planTask !== undefined) sess.planTask = meta.planTask;
+}
+function hasActivePlan(sess) {
+  if (!sess) return false;
+  const status = sess.planStatus;
+  if (!status || status === 'inactive') return false;
+  if (!sess.planPath && !sess.planTask) return false;
+  return true;
+}
+
+
+async function handlePlanCommand(arg) {
+  const sess = state.sessions.get(state.activeId);
+  if (!sess) {
+    showSystem('No active session.');
+    return;
+  }
+  if (getActiveSessionRuntime()?.busy) {
+    showSystem('Agent is still responding. Press Esc or Stop before starting a plan.');
+    return;
+  }
+  // Reuse an in-flight start so a rapid duplicate /plan never issues a second RPC.
+  if (planStartPromises.has(sess.id)) return planStartPromises.get(sess.id);
+  const run = (async () => {
+    try {
+      const sessionId = await ensureBridgeSession(sess);
+      const result = await window.zeroAgent.startPlan(sessionId, arg);
+      if (result?.error) {
+        if (isActiveSession(sess)) showSystem('创建计划失败：' + (result.error.message || result.error));
+        return;
+      }
+      mergePlanMetadata(sess, result);
+      // startPlan flips the backend to planning; reflect it locally if the
+      // response does not carry an explicit status.
+      if (!sess.planStatus || sess.planStatus === 'inactive') {
+        if (sess.planPath) sess.planStatus = 'planning';
+      }
+      if (isActiveSession(sess)) {
+        showSystem('Plan created: ' + (sess.planPath || arg));
+        renderPlanStatus(sess);
+      }
+    } catch (err) {
+      if (isActiveSession(sess)) showSystem('创建计划失败：' + (err.message || err));
+    } finally {
+      planStartPromises.delete(sess.id);
+    }
+  })();
+  planStartPromises.set(sess.id, run);
+  return run;
+}
+
+async function executePlanForSession(sess) {
+  if (!sess) sess = state.sessions.get(state.activeId);
+  if (!sess) return;
+  if (sess.planStatus !== 'ready') return;
+  if (getSessionRuntime(sess)?.busy) {
+    if (isActiveSession(sess)) showSystem('Plan execution already in progress.');
+    return;
+  }
+  // Reuse an in-flight execution so a rapid double-click never issues a second RPC.
+  if (planExecutePromises.has(sess.id)) return planExecutePromises.get(sess.id);
+  const run = (async () => {
+    try {
+      const sessionId = await ensureBridgeSession(sess);
+      const result = await window.zeroAgent.executePlan(sessionId);
+      if (result?.error) {
+        if (isActiveSession(sess)) showSystem('执行计划失败：' + (result.error.message || result.error));
+        return;
+      }
+      mergePlanMetadata(sess, result);
+      // The backend flips ready -> executing and emits a session-state event;
+      // reflect it locally too so the UI refreshes without waiting for the event.
+      if (sess.planStatus === 'ready') sess.planStatus = 'executing';
+      if (isActiveSession(sess)) {
+        showSystem('Plan execution started.');
+        renderPlanStatus(sess);
+      }
+    } catch (err) {
+      if (isActiveSession(sess)) showSystem('执行计划失败：' + (err.message || err));
+    } finally {
+      planExecutePromises.delete(sess.id);
+      if (isActiveSession(sess)) renderPlanStatus(sess);
+    }
+  })();
+  planExecutePromises.set(sess.id, run);
+  // Reflect the disabled in-flight button state immediately.
+  if (isActiveSession(sess)) renderPlanStatus(sess);
+  return run;
+}
+
+function renderPlanStatus(sess) {
+  if (!sess) sess = state.sessions.get(state.activeId);
+  if (!sess) return;
+  if (sess._planStatusEl && sess._planStatusEl.parentNode) {
+    sess._planStatusEl.parentNode.removeChild(sess._planStatusEl);
+  }
+  sess._planStatusEl = null;
+  const status = sess.planStatus;
+  if (!hasActivePlan(sess)) return;
+
+  const card = document.createElement('div');
+  card.className = 'turn plan-status-card';
+  card.dataset.kind = 'plan-status';
+
+  const header = document.createElement('div');
+  header.className = 'turn-header plan-card-header';
+  const tag = document.createElement('span');
+  tag.className = 'turn-tag';
+  tag.textContent = 'PLAN';
+  const statusEl = document.createElement('span');
+  statusEl.className = 'turn-status';
+  statusEl.textContent = planStatusText(status);
+  header.appendChild(tag);
+  header.appendChild(statusEl);
+  card.appendChild(header);
+
+  const body = document.createElement('div');
+  body.className = 'turn-body';
+  if (sess.planTask) {
+    const taskEl = document.createElement('div');
+    taskEl.className = 'plan-task';
+    taskEl.textContent = sess.planTask;
+    body.appendChild(taskEl);
+  }
+  if (sess.planPath) {
+    const pathEl = document.createElement('div');
+    pathEl.className = 'plan-path';
+    pathEl.textContent = sess.planPath;
+    body.appendChild(pathEl);
+  }
+  if (status === 'ready') {
+    const executing = planExecutePromises.has(sess.id);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn primary plan-execute-btn';
+    btn.textContent = executing ? '执行中…' : '执行计划';
+    btn.disabled = executing;
+    btn.addEventListener('click', () => executePlanForSession(sess));
+    body.appendChild(btn);
+  }
+  card.appendChild(body);
+  messagesEl.appendChild(card);
+  sess._planStatusEl = card;
+  return card;
 }
 
 function updateBridgeNotice(text) {
@@ -2781,7 +3041,8 @@ function showError(text, actionLabel, actionFn, options = {}) {
       try {
         await actionFn();
       } catch (err) {
-        showError('Action failed: ' + (err.message || err));
+        addDiagnostic('error', 'Action failed', err);
+        showError(formatRequestError(err, '操作'), null, null, { skipDiagnostic: true });
       }
     };
   } else {
@@ -2941,6 +3202,27 @@ async function restartBridge(options = {}) {
     }
   }, 2500);
 }
+// Hydrate local sessions (and their plan metadata) from a `session/list` snapshot.
+// Extracted so the UI test can exercise the list-hydration path without a real bridge.
+async function hydrateBridgeSessions(listRes) {
+  for (const bSess of listRes?.sessions || []) {
+    const sid = bSess.id || bSess.sessionId;
+    const msgRes = await window.zeroAgent.rpc('session/poll', { sessionId: sid, afterId: 0, limit: 9999 }).catch(() => null);
+    const messages = msgRes?.messages || [];
+    if (!sessionHasUserMessage({ messages })) continue;
+    const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const sess = createLocalSession(localId, bSess.title || 'Restored', sid);
+    if (bSess.createdAt) sess.createdAt = Number(bSess.createdAt);
+    if (bSess.updatedAt) sess.updatedAt = Number(bSess.updatedAt);
+    sess.groupId = bSess.groupId || null;
+    mergePlanMetadata(sess, bSess);
+    sess.messages = messages;
+    const runtime = getSessionRuntime(sess);
+    runtime.seenBridgeMessageIds = new Set(messages.filter(m => m.id).map(m => Number(m.id)));
+    runtime.lastPolledMessageId = Math.max(0, ...messages.map(m => Number(m.id) || 0));
+  }
+}
+
 
 // ─── Bridge events ───────────────────────────────────────────────────────
 let _bootstrappingSession = false;
@@ -2956,21 +3238,7 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
     _bootstrappingSession = true;
     try {
       const listRes = await window.zeroAgent.rpc('session/list', {}).catch(() => null);
-      for (const bSess of listRes?.sessions || []) {
-        const sid = bSess.id || bSess.sessionId;
-        const msgRes = await window.zeroAgent.rpc('session/poll', { sessionId: sid, afterId: 0, limit: 9999 }).catch(() => null);
-        const messages = msgRes?.messages || [];
-        if (!sessionHasUserMessage({ messages })) continue;
-        const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        const sess = createLocalSession(localId, bSess.title || 'Restored', sid);
-        if (bSess.createdAt) sess.createdAt = Number(bSess.createdAt);
-        if (bSess.updatedAt) sess.updatedAt = Number(bSess.updatedAt);
-        sess.groupId = bSess.groupId || null;
-        sess.messages = messages;
-        const runtime = getSessionRuntime(sess);
-        runtime.seenBridgeMessageIds = new Set(messages.filter(m => m.id).map(m => Number(m.id)));
-        runtime.lastPolledMessageId = Math.max(0, ...messages.map(m => Number(m.id) || 0));
-      }
+      await hydrateBridgeSessions(listRes);
       if (state.sessions.size > 0) {
         const groupsRes = await window.zeroAgent.rpc('groups/list', {}).catch(() => null);
         for (const g of groupsRes?.groups || []) {
@@ -3012,15 +3280,22 @@ window.zeroAgent.onBridgeError((err) => {
   setStatus('err', 'Error');
   state.bridgeReady = false;
   state.restartingBridge = false;
+  for (const sess of state.sessions.values()) {
+    const runtime = getSessionRuntime(sess);
+    if (runtime.busy) {
+      clearAssistantDraft(sess);
+      setBusy(false, null, sess);
+    }
+  }
 
   if (err.type === 'no-config') {
-    showError(err.message, 'Setup', async () => {
+    showError('未找到 ZeroAgent 配置，请先完成配置。', '打开配置', async () => {
       await window.zeroAgent.openConfig();
     }, { skipDiagnostic: true });
   } else if (err.type === 'no-python') {
-    showError(err.message, 'Settings', openSettings, { skipDiagnostic: true });
+    showError('未找到可用的 Python 环境，请检查安装。', '打开设置', openSettings, { skipDiagnostic: true });
   } else {
-    showError(err.message || 'Bridge error', null, null, { skipDiagnostic: true });
+    showError(formatRequestError(err, 'Bridge 连接'), '重启服务', () => restartBridge(), { skipDiagnostic: true });
   }
 });
 
@@ -3031,7 +3306,15 @@ window.zeroAgent.onBridgeClosed((info) => {
     return;
   }
   state.bridgeReady = false;
-  setStatus('err', `Bridge stopped (${info.code})`);
+  for (const sess of state.sessions.values()) {
+    const runtime = getSessionRuntime(sess);
+    if (runtime.busy) {
+      clearAssistantDraft(sess);
+      setBusy(false, null, sess);
+    }
+  }
+  setStatus('err', 'Bridge stopped');
+  showError('ZeroAgent 服务连接已断开，请检查 bridge 是否运行。', '重启服务', () => restartBridge(), { skipDiagnostic: true });
 });
 
 window.zeroAgent.onBridgeLog((text) => {
@@ -3492,7 +3775,7 @@ const pendingImages = []; // Array of { dataUrl, id }
       }
       if (e.key === 'Enter' && !e.shiftKey && commandPaletteItems.length) {
         e.preventDefault();
-        applyCommandSuggestion(commandPaletteItems[commandPaletteIndex]);
+        if (applyCommandSuggestion(commandPaletteItems[commandPaletteIndex])) submitInput();
         return;
       }
     }
