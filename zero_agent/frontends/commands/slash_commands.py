@@ -13,6 +13,7 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
+from zero_agent.core.types import CompletionCertificate, TaskMode
 from zero_agent.frontends.commands import _builtins
 
 if TYPE_CHECKING:
@@ -280,6 +281,127 @@ _register(
     description="设置或查看当前会话目标",
     arg_hint="[描述]",
 )
+
+
+def _handle_plan(args: str, agent: "ZeroAgent") -> str:
+    """Document the /plan command surface.
+
+    Plan start/execute is owned by the CLI/TUI frontends, which intercept
+    ``/plan`` before generic dispatch and manage the workspace lifecycle.
+    This handler only returns usage so ``/help`` and direct
+    ``handle_command`` callers get a stable, non-mutating description.
+    """
+    return (
+        "  用法:\n"
+        "    /plan <task>      创建计划工作区并进入 plan 模式\n"
+        "    /plan execute     执行已就绪的计划\n"
+    )
+
+
+_register(
+    "plan",
+    _handle_plan,
+    description="创建并运行一个可验证的计划流程",
+    arg_hint="[task]",
+)
+
+
+def has_active_plan(agent: "ZeroAgent") -> bool:
+    """Return True only for plans that can still block a new /plan.
+
+    Any pending task blocks starting a new plan because the next ``run()`` call
+    must first resume or clear the paused contract.  A live plan/executing run
+    and a certified ready PLAN also block so the user can run
+    ``/plan execute``.  Terminal failed/cancelled/budget-exhausted leftovers
+    have no pending state or ready certificate, so they must not strand the
+    user behind the active-plan gate.
+    """
+
+    if getattr(agent, "_pending_task_state", None) is not None:
+        return True
+
+    handler = getattr(agent, "handler", None)
+    contract = getattr(handler, "task_contract", None)
+    mode = getattr(getattr(contract, "mode", None), "value", getattr(contract, "mode", None))
+    if mode not in ("plan", "executing"):
+        return False
+    if getattr(agent, "_is_running_task", False):
+        return True
+    return resolve_ready_plan(agent) is not None
+
+
+def resolve_pending_plan(agent: "ZeroAgent") -> tuple[str, TaskMode, str] | None:
+    """Return the resumable pending PLAN/EXECUTING contract for /plan execute."""
+
+    pending = getattr(agent, "_pending_task_state", None)
+    contract = getattr(pending, "contract", None)
+    mode = getattr(contract, "mode", None)
+    if mode not in (TaskMode.PLAN, TaskMode.EXECUTING):
+        return None
+    plan_path = str(getattr(contract, "plan_path", None) or "").strip()
+    if not plan_path:
+        return None
+    task = str(getattr(contract, "user_request", "") or "").strip()
+    return task, mode, plan_path
+
+
+def resolve_ready_plan(agent: "ZeroAgent") -> tuple[str, str] | None:
+    """Return ``(task, plan_path)`` for the current certified-ready plan.
+
+    A plan is ready only when ALL of the following hold, read from live core
+    state (never message history):
+
+    * the current TaskContract is still in PLAN mode;
+    * its plan file exists and is non-empty;
+    * the completion evaluator produced a ``CompletionCertificate`` with
+      ``status == "completed"`` whose ``task_id`` matches the current
+      TaskContract;
+    * that certificate reports ``plan_remaining == 0`` and a
+      ``verify_status`` of ``pass`` or ``partial_accepted``;
+    * the plan checklist has at least one item and every item is done.
+
+    A hand-edited plan.md or an empty checklist is never sufficient.
+    """
+    from zero_agent.frontends import plan_state
+
+    try:
+        if not plan_state.is_active(agent):
+            return None
+        plan_path = plan_state.resolve_path(agent)
+    except Exception:
+        return None
+    if not plan_path:
+        return None
+    # The plan is only "ready" once the completion evaluator has certified it
+    # with a real CompletionCertificate bound to the current TaskContract.
+    handler = getattr(agent, "handler", None)
+    contract = getattr(handler, "task_contract", None)
+    certificate = getattr(handler, "completion_certificate", None)
+    if not isinstance(certificate, CompletionCertificate):
+        return None
+    if certificate.status != "completed":
+        return None
+    if contract is None or certificate.task_id != getattr(contract, "task_id", None):
+        return None
+    if certificate.plan_remaining != 0:
+        return None
+    if certificate.verify_status not in ("pass", "partial_accepted"):
+        return None
+
+    try:
+        with open(plan_path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    items = plan_state.extract(text)
+    if not items:
+        return None
+    if not plan_state.is_complete(items):
+        return None
+    task = str(getattr(contract, "user_request", "") or "").strip()
+    return task, plan_path
+
+
 
 
 # ── Dispatcher ────────────────────────────────────────────────────────

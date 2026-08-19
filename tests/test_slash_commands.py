@@ -15,7 +15,10 @@ from zero_agent.frontends.commands.slash_commands import (
     _build_index,
     _register,
     handle_command,
+    has_active_plan,
     is_exit_command,
+    resolve_pending_plan,
+    resolve_ready_plan,
 )
 
 
@@ -404,3 +407,293 @@ class TestHandleCommandNonSession:
         result = handle_command("/update plugins", mock_agent)
         mock_agent._register_builtin_plugins.assert_called_once()
         assert "已重新加载" in result
+
+
+# ── /plan registry ─────────────────────────────────────────────────────
+
+
+class TestPlanCommandRegistry:
+    """The /plan command is registered with Desktop-consistent metadata."""
+
+    def test_plan_registered_with_task_hint(self):
+        cmd_map = {cmd.name: cmd for cmd in COMMANDS}
+        assert "plan" in cmd_map
+        plan = cmd_map["plan"]
+        assert plan.arg_hint == "[task]"
+        assert plan.description == "创建并运行一个可验证的计划流程"
+
+    def test_plan_handler_is_non_mutating(self, mock_agent):
+        """handle_command('/plan ...') documents usage without running the agent."""
+        result = handle_command("/plan build a thing", mock_agent)
+        assert isinstance(result, str)
+        assert "用法" in result
+        mock_agent.run.assert_not_called()
+
+
+# ── plan helpers ──────────────────────────────────────────────────────
+
+
+class TestPlanHelpers:
+    """has_active_plan / resolve_ready_plan read the live TaskContract."""
+
+    @staticmethod
+    def _certificate(
+        task_id="t1",
+        plan_remaining=0,
+        verify_status="pass",
+        status="completed",
+    ):
+        from zero_agent.core.types import CompletionCertificate
+
+        return CompletionCertificate(
+            task_id=task_id,
+            status=status,  # type: ignore[arg-type]
+            reason="plan_verified",
+            evidence_count=0,
+            verify_status=verify_status,
+            plan_remaining=plan_remaining,
+        )
+
+    @staticmethod
+    def _agent_with_contract(
+        mode,
+        plan_path=None,
+        user_request="",
+        certificate=None,
+        running=False,
+        pending_contract=None,
+    ):
+        from types import SimpleNamespace
+        from zero_agent.core.types import TaskContract, TaskMode
+
+        contract = TaskContract(
+            task_id="t1",
+            user_request=user_request,
+            mode=TaskMode(mode),
+            plan_path=plan_path,
+        )
+        return SimpleNamespace(
+            _is_running_task=running,
+            _pending_task_state=(
+                SimpleNamespace(contract=pending_contract)
+                if pending_contract is not None else None
+            ),
+            handler=SimpleNamespace(
+                task_contract=contract,
+                completion_certificate=certificate,
+            )
+        )
+
+    @staticmethod
+    def _contract(mode, plan_path=None):
+        from zero_agent.core.types import TaskContract, TaskMode
+
+        return TaskContract("t1", "do it", TaskMode(mode), plan_path)
+
+    def test_has_active_plan_running_plan_and_executing(self):
+        assert has_active_plan(self._agent_with_contract("plan", running=True)) is True
+        assert has_active_plan(self._agent_with_contract("executing", running=True)) is True
+
+    def test_has_active_plan_ready_plan_after_run(self, tmp_path):
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("- [x] step one\n", encoding="utf-8")
+        agent = self._agent_with_contract(
+            "plan",
+            plan_path=str(plan_file),
+            user_request="do it",
+            certificate=self._certificate(),
+        )
+        assert has_active_plan(agent) is True
+
+    def test_has_active_plan_waiting_plan_pending_after_run(self, tmp_path):
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("- [ ] answer question\n", encoding="utf-8")
+        agent = self._agent_with_contract(
+            "plan",
+            plan_path=str(plan_file),
+            pending_contract=self._contract("plan", str(plan_file)),
+        )
+        assert has_active_plan(agent) is True
+    def test_has_active_plan_pending_executing_after_waiting_terminal(self, tmp_path):
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("- [x] step one\n", encoding="utf-8")
+        agent = self._agent_with_contract(
+            "executing",
+            plan_path=str(plan_file),
+            pending_contract=self._contract("executing", str(plan_file)),
+        )
+        assert has_active_plan(agent) is True
+
+    def test_has_active_plan_blocks_any_pending_task(self):
+        pending_contract = self._contract("open")
+        agent = self._agent_with_contract("open", pending_contract=pending_contract)
+        assert has_active_plan(agent) is True
+
+    def test_resolve_pending_plan_returns_pending_plan_contract(self, tmp_path):
+        from zero_agent.core.types import TaskMode
+
+        plan_file = tmp_path / "plan.md"
+        pending_contract = self._contract("executing", str(plan_file))
+        agent = self._agent_with_contract("open", pending_contract=pending_contract)
+
+        assert resolve_pending_plan(agent) == ("do it", TaskMode.EXECUTING, str(plan_file))
+
+    def test_resolve_pending_plan_ignores_non_plan_pending(self):
+        pending_contract = self._contract("open")
+        agent = self._agent_with_contract("open", pending_contract=pending_contract)
+        assert resolve_pending_plan(agent) is None
+
+
+    def test_has_active_plan_terminal_non_ready_plan_allows_recovery(self, tmp_path):
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("- [ ] never completed\n", encoding="utf-8")
+        agent = self._agent_with_contract("plan", plan_path=str(plan_file))
+        assert has_active_plan(agent) is False
+
+    def test_has_active_plan_terminal_executing_allows_recovery(self, tmp_path):
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("- [x] old step\n", encoding="utf-8")
+        agent = self._agent_with_contract("executing", plan_path=str(plan_file))
+        assert has_active_plan(agent) is False
+
+    def test_has_active_plan_open(self):
+        assert has_active_plan(self._agent_with_contract("open")) is False
+
+    def test_resolve_ready_plan_complete(self, tmp_path):
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("- [x] step one\n- [x] step two\n", encoding="utf-8")
+        agent = self._agent_with_contract(
+            "plan",
+            plan_path=str(plan_file),
+            user_request="do it",
+            certificate=self._certificate(),
+        )
+        assert resolve_ready_plan(agent) == ("do it", str(plan_file))
+
+    def test_resolve_ready_plan_accepts_partial_accepted(self, tmp_path):
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("- [x] step one\n", encoding="utf-8")
+        agent = self._agent_with_contract(
+            "plan",
+            plan_path=str(plan_file),
+            user_request="do it",
+            certificate=self._certificate(verify_status="partial_accepted"),
+        )
+        assert resolve_ready_plan(agent) == ("do it", str(plan_file))
+
+    def test_resolve_ready_plan_incomplete(self, tmp_path):
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("- [ ] pending\n", encoding="utf-8")
+        agent = self._agent_with_contract(
+            "plan",
+            plan_path=str(plan_file),
+            certificate=self._certificate(),
+        )
+        assert resolve_ready_plan(agent) is None
+
+    def test_resolve_ready_plan_not_in_plan_mode(self):
+        agent = self._agent_with_contract("open")
+        assert resolve_ready_plan(agent) is None
+
+    def test_resolve_ready_plan_requires_certificate(self, tmp_path):
+        """A hand-edited complete plan.md is not enough without a certificate."""
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("- [x] step one\n", encoding="utf-8")
+        agent = self._agent_with_contract(
+            "plan", plan_path=str(plan_file), user_request="do it"
+        )
+        assert resolve_ready_plan(agent) is None
+
+    def test_resolve_ready_plan_rejects_nonzero_remaining(self, tmp_path):
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("- [x] step one\n", encoding="utf-8")
+        agent = self._agent_with_contract(
+            "plan",
+            plan_path=str(plan_file),
+            user_request="do it",
+            certificate=self._certificate(plan_remaining=1),
+        )
+        assert resolve_ready_plan(agent) is None
+
+    def test_resolve_ready_plan_rejects_unverified_certificate(self, tmp_path):
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("- [x] step one\n", encoding="utf-8")
+        agent = self._agent_with_contract(
+            "plan",
+            plan_path=str(plan_file),
+            user_request="do it",
+            certificate=self._certificate(verify_status="not_required"),
+        )
+        assert resolve_ready_plan(agent) is None
+
+    def test_resolve_ready_plan_rejects_namespace_certificate(self, tmp_path):
+        from types import SimpleNamespace
+
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("- [x] step one\n", encoding="utf-8")
+        agent = self._agent_with_contract(
+            "plan",
+            plan_path=str(plan_file),
+            user_request="do it",
+            certificate=SimpleNamespace(
+                task_id="t1",
+                status="completed",
+                reason="plan_verified",
+                evidence_count=0,
+                verify_status="pass",
+                plan_remaining=0,
+            ),
+        )
+        assert resolve_ready_plan(agent) is None
+
+    def test_resolve_ready_plan_rejects_dict_certificate(self, tmp_path):
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("- [x] step one\n", encoding="utf-8")
+        agent = self._agent_with_contract(
+            "plan",
+            plan_path=str(plan_file),
+            user_request="do it",
+            certificate={
+                "task_id": "t1",
+                "status": "completed",
+                "reason": "plan_verified",
+                "evidence_count": 0,
+                "verify_status": "pass",
+                "plan_remaining": 0,
+            },
+        )
+        assert resolve_ready_plan(agent) is None
+
+    def test_resolve_ready_plan_rejects_stale_task_id(self, tmp_path):
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("- [x] step one\n", encoding="utf-8")
+        agent = self._agent_with_contract(
+            "plan",
+            plan_path=str(plan_file),
+            user_request="do it",
+            certificate=self._certificate(task_id="old-task"),
+        )
+        assert resolve_ready_plan(agent) is None
+
+    def test_resolve_ready_plan_rejects_non_completed_status(self, tmp_path):
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("- [x] step one\n", encoding="utf-8")
+        agent = self._agent_with_contract(
+            "plan",
+            plan_path=str(plan_file),
+            user_request="do it",
+            certificate=self._certificate(status="failed"),
+        )
+        assert resolve_ready_plan(agent) is None
+
+    def test_resolve_ready_plan_rejects_empty_checklist(self, tmp_path):
+        """An empty checklist is never ready, even with a valid certificate."""
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("# Plan\n\n## 执行计划\n\n", encoding="utf-8")
+        agent = self._agent_with_contract(
+            "plan",
+            plan_path=str(plan_file),
+            user_request="do it",
+            certificate=self._certificate(),
+        )
+        assert resolve_ready_plan(agent) is None

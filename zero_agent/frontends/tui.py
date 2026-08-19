@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import os
 import queue
+import shutil
 import threading
+import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
-from zero_agent.core.types import TerminalEvent, TerminalStatus
+from zero_agent.core.types import TaskMode, TerminalEvent, TerminalStatus
 from zero_agent.runners.agent_runner import _consume_agent_run
+
 
 # ── Optional-dependency guards ──────────────────────────────────────
 
@@ -390,6 +393,9 @@ if _TEXTUAL_AVAILABLE:
             self._abort_flag = threading.Event()
             self._command_defs: list[Any] = []
             self._message_log: list[Any] = []
+            self._plan_ready_notified = False
+            self._run_reservation_lock = threading.Lock()
+            self._run_reserved = False
 
         # ── Compose ─────────────────────────────────────────────
 
@@ -500,6 +506,9 @@ if _TEXTUAL_AVAILABLE:
 
         def _dispatch_command(self, raw: str) -> None:
             """Dispatch a /slash command and show result in chat."""
+            if self._try_dispatch_plan(raw):
+                return
+
             try:
                 from zero_agent.frontends.commands import handle_command, is_exit_command
             except ImportError:
@@ -519,11 +528,128 @@ if _TEXTUAL_AVAILABLE:
             if result and result.strip():
                 self._append_message("system", result)
 
+        def _try_dispatch_plan(self, raw: str) -> bool:
+            """Handle ``/plan <task>`` / ``/plan execute``; True if consumed."""
+            stripped = raw.strip()
+            if not stripped.startswith("/"):
+                return False
+            parts = stripped[1:].split(maxsplit=1)
+            if not parts or parts[0].lower() != "plan":
+                return False
+
+            from zero_agent.frontends.commands.slash_commands import (
+                has_active_plan,
+                resolve_pending_plan,
+                resolve_ready_plan,
+            )
+            from zero_agent.frontends.plan_command import create_plan_workspace
+
+            arg = parts[1].strip() if len(parts) > 1 else ""
+
+            if not arg:
+                self._append_message("user", raw)
+                self._append_message(
+                    "system",
+                    "用法: /plan <task> 创建计划工作区；/plan execute 执行已就绪的计划",
+                )
+                return True
+
+            if not self._reserve_run():
+                self._append_message("user", raw)
+                self._append_message("system", "当前有任务正在运行，请先等待完成", error=True)
+                return True
+
+            try:
+                if arg.lower() == "execute":
+                    pending = resolve_pending_plan(self.agent)
+                    if pending is not None:
+                        task, mode, plan_path = pending
+                    else:
+                        ready = resolve_ready_plan(self.agent)
+                        if ready is None:
+                            self._append_message("user", raw)
+                            self._append_message("system", "没有就绪的计划可执行", error=True)
+                            self._release_run_reservation()
+                            return True
+                        task, plan_path = ready
+                        mode = TaskMode.EXECUTING
+                    self._append_message("user", raw)
+                    self._run_prompt(
+                        task,
+                        initial_mode=mode,
+                        plan_path=plan_path,
+                        display_user=False,
+                        reserved=True,
+                    )
+                    return True
+
+                if has_active_plan(self.agent):
+                    self._append_message("user", raw)
+                    self._append_message("system", "已存在活动计划，请先 /plan execute", error=True)
+                    self._release_run_reservation()
+                    return True
+            except Exception:
+                self._release_run_reservation()
+                raise
+
+            try:
+                workspace = create_plan_workspace(self.agent.config.workspace_dir, arg)
+                self._append_message("user", raw)
+                self._run_prompt(
+                    arg,
+                    initial_mode=TaskMode.PLAN,
+                    plan_path=workspace.path,
+                    workspace_directory=workspace.directory,
+                    display_user=False,
+                    reserved=True,
+                )
+            except Exception:
+                self._release_run_reservation()
+                raise
+            return True
+
+        def _reserve_run(self) -> bool:
+            """Atomically reserve the single Agent.run slot until worker exit."""
+            lock = getattr(self, "_run_reservation_lock", None)
+            if lock is None:
+                lock = threading.Lock()
+                self._run_reservation_lock = lock
+            with lock:
+                if getattr(self, "_run_reserved", False) or getattr(self.agent, "_is_running_task", False):
+                    return False
+                self._run_reserved = True
+                return True
+
+        def _release_run_reservation(self) -> None:
+            """Release a prompt reservation acquired before the worker starts."""
+            lock = getattr(self, "_run_reservation_lock", None)
+            if lock is None:
+                self._run_reserved = False
+                return
+            with lock:
+                self._run_reserved = False
+
         # ── Agent prompt runner (threaded) ──────────────────────
 
-        def _run_prompt(self, prompt: str) -> None:
+        def _run_prompt(
+            self,
+            prompt: str,
+            *,
+            initial_mode: TaskMode = TaskMode.OPEN,
+            plan_path: Optional[str] = None,
+            workspace_directory: Optional[str] = None,
+            display_user: bool = True,
+            reserved: bool = False,
+        ) -> None:
             """Start an agent run in a background thread."""
-            self._append_message("user", prompt)
+            if not reserved and not self._reserve_run():
+                if display_user:
+                    self._append_message("user", prompt)
+                self._append_message("system", "当前有任务正在运行，请先等待完成", error=True)
+                return
+
+            if display_user:
+                self._append_message("user", prompt)
 
             # Clear streaming state
             self._streaming_text = ""
@@ -531,29 +657,145 @@ if _TEXTUAL_AVAILABLE:
             self._abort_flag.clear()
 
             # Launch worker
-            threading.Thread(
-                target=self._worker_run,
-                args=(prompt,),
-                daemon=True,
-            ).start()
-
-        def _worker_run(self, prompt: str) -> None:
-            """Background thread: run agent.run() and retain its terminal return."""
             try:
-                gen = self.agent.run(prompt)
+                threading.Thread(
+                    target=self._worker_run,
+                    args=(prompt,),
+                    kwargs={
+                        "initial_mode": initial_mode,
+                        "plan_path": plan_path,
+                        "workspace_directory": workspace_directory,
+                    },
+                    daemon=True,
+                ).start()
+            except Exception:
+                self._release_run_reservation()
+                raise
+
+        def _worker_run(
+            self,
+            prompt: str,
+            *,
+            initial_mode: TaskMode = TaskMode.OPEN,
+            plan_path: Optional[str] = None,
+            workspace_directory: Optional[str] = None,
+        ) -> None:
+            """Background thread: run agent.run() and retain its terminal return."""
+            agent = self.agent
+            baseline_handler = getattr(agent, "handler", None)
+            baseline_contract = getattr(baseline_handler, "task_contract", None)
+            baseline_task_id = getattr(baseline_contract, "task_id", None)
+            baseline_plan_path = getattr(baseline_contract, "plan_path", None)
+            adopted_plan_path = False
+
+            def observe_plan_adoption(*, permit_replaced_handler: bool = True) -> None:
+                nonlocal adopted_plan_path
+                if adopted_plan_path or not plan_path:
+                    return
+                if self.agent is not agent:
+                    return
+                handler = getattr(agent, "handler", None)
+                contract = getattr(handler, "task_contract", None)
+                if contract is None or getattr(contract, "plan_path", None) != plan_path:
+                    return
+                if handler is not baseline_handler and not permit_replaced_handler:
+                    return
+                if (
+                    handler is not baseline_handler
+                    or getattr(contract, "task_id", None) != baseline_task_id
+                    or baseline_plan_path == plan_path
+                ):
+                    adopted_plan_path = True
+
+            def tracked_gen(gen):
+                yielded_chunk = False
+                try:
+                    while True:
+                        try:
+                            chunk = next(gen)
+                        except StopIteration as stop:
+                            observe_plan_adoption(
+                                permit_replaced_handler=not yielded_chunk
+                            )
+                            return stop.value
+                        observe_plan_adoption()
+                        yielded_chunk = True
+                        yield chunk
+                except Exception:
+                    observe_plan_adoption()
+                    raise
+
+            try:
+                try:
+                    gen = agent.run(
+                        prompt,
+                        initial_mode=initial_mode,
+                        plan_path=plan_path,
+                    )
+                except Exception as exc:
+                    terminal = TerminalEvent(
+                        status=TerminalStatus.FAILED,
+                        reason=type(exc).__name__,
+                        text=str(exc),
+                    )
+                else:
+                    terminal = _consume_agent_run(
+                        tracked_gen(gen),
+                        self._chunk_queue.put,
+                        cancel_event=self._abort_flag,
+                    )
+                cleanup_warning = self._cleanup_unadopted_workspace(
+                    workspace_directory,
+                    plan_path,
+                    adopted_plan_path,
+                )
+                payload = terminal.to_dict()
+                if cleanup_warning:
+                    payload["data"] = self._terminal_data_with_cleanup_warning(
+                        payload.get("data"), cleanup_warning
+                    )
+                self._chunk_queue.put(payload)
+            finally:
+                self._release_run_reservation()
+
+        def _cleanup_unadopted_workspace(
+            self,
+            workspace_directory: Optional[str],
+            plan_path: Optional[str],
+            adopted_plan_path: bool,
+        ) -> Optional[str]:
+            """Delete a workspace created by this run until this run adopts it.
+
+            Cleanup is limited to the directory created by this call. Adoption
+            is a run-local fact captured while consuming this run's generator,
+            so a later handler replacement cannot make cleanup delete an
+            adopted workspace or preserve an unadopted one by coincidence.
+            """
+            if not workspace_directory or not plan_path or adopted_plan_path:
+                return None
+            try:
+                shutil.rmtree(workspace_directory)
             except Exception as exc:
-                terminal = TerminalEvent(
-                    status=TerminalStatus.FAILED,
-                    reason=type(exc).__name__,
-                    text=str(exc),
+                message = (
+                    f"failed to clean unadopted plan workspace "
+                    f"{workspace_directory!r}: {exc}"
                 )
-            else:
-                terminal = _consume_agent_run(
-                    gen,
-                    self._chunk_queue.put,
-                    cancel_event=self._abort_flag,
-                )
-            self._chunk_queue.put(terminal.to_dict())
+                try:
+                    warnings.warn(message, RuntimeWarning, stacklevel=2)
+                except Exception:
+                    return message
+            return None
+
+        @staticmethod
+        def _terminal_data_with_cleanup_warning(data: Any, warning: str) -> Any:
+            if data is None:
+                return {"cleanup_warning": warning}
+            if isinstance(data, dict):
+                enriched = dict(data)
+                enriched["cleanup_warning"] = warning
+                return enriched
+            return {"value": data, "cleanup_warning": warning}
+
 
         # ── Chunk polling ──────────────────────────────────────
 
@@ -677,6 +919,8 @@ if _TEXTUAL_AVAILABLE:
 
             if not _PLAN_STATE_AVAILABLE or self.agent is None:
                 return
+            self._maybe_notify_plan_ready()
+
 
 
             plan_content.remove_children()
@@ -721,6 +965,33 @@ if _TEXTUAL_AVAILABLE:
             for content, status in items:
                 glyph = "✓" if status == "done" else "○"
                 plan_content.mount(Static(f"  {glyph} {content[:80]}"))
+
+        def _maybe_notify_plan_ready(self) -> None:
+            """Notify once when the plan becomes ready; never auto-execute.
+
+            A plan is ready only when the live TaskContract is still in PLAN
+            mode and the completion evaluator has certified it. The user must
+            still run ``/plan execute`` themselves.
+            """
+            if self.agent is None:
+                return
+            try:
+                from zero_agent.frontends.commands.slash_commands import (
+                    resolve_ready_plan,
+                )
+                ready = resolve_ready_plan(self.agent)
+            except Exception:
+                return
+            if ready is None:
+                self._plan_ready_notified = False
+                return
+            if self._plan_ready_notified:
+                return
+            self._plan_ready_notified = True
+            self._append_message(
+                "system",
+                "计划已就绪并已通过验证。请输入 /plan execute 开始执行（不会自动执行）。",
+            )
 
         def _refresh_file_tree(self) -> None:
             """Point the directory tree at the workspace."""

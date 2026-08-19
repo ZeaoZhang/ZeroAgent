@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
 import time as _time
 from typing import Optional
@@ -17,7 +18,7 @@ from typing import Optional
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import AgentConfig, default_config_path, load_default_config
 from zero_agent.core.exceptions import LLMError
-from zero_agent.core.types import TerminalEvent, TerminalStatus
+from zero_agent.core.types import TaskMode, TerminalEvent, TerminalStatus
 from zero_agent.runners.agent_runner import _consume_agent_run
 
 
@@ -66,9 +67,16 @@ def _display_terminal(terminal: TerminalEvent) -> None:
     print(f"\n[{label}] {message}", file=stream)
 
 
-def _consume_prompt(agent: ZeroAgent, prompt: str, on_chunk) -> TerminalEvent:
+def _consume_prompt(
+    agent: ZeroAgent,
+    prompt: str,
+    on_chunk,
+    *,
+    initial_mode: TaskMode = TaskMode.OPEN,
+    plan_path: Optional[str] = None,
+) -> TerminalEvent:
     try:
-        gen = agent.run(prompt)
+        gen = agent.run(prompt, initial_mode=initial_mode, plan_path=plan_path)
     except Exception as exc:
         return TerminalEvent(
             status=TerminalStatus.FAILED,
@@ -456,6 +464,91 @@ def _build_resume_prompt(agent: ZeroAgent) -> str:
     return "\n".join(lines)
 
 
+_PLAN_USAGE = (
+    "  用法:\n"
+    "    /plan <task>      创建计划工作区并进入 plan 模式\n"
+    "    /plan execute     执行已就绪的计划\n"
+)
+
+
+def _is_plan_command(cmd: str) -> bool:
+    """Return True when *cmd* is a ``/plan`` command."""
+    stripped = cmd.strip()
+    parts = stripped[1:].split(maxsplit=1) if stripped.startswith("/") else []
+    return bool(parts) and parts[0].lower() == "plan"
+
+
+def _agent_owns_plan(agent: ZeroAgent, plan_path: str) -> bool:
+    """Return True when the agent's current contract references *plan_path*."""
+    handler = getattr(agent, "handler", None)
+    contract = getattr(handler, "task_contract", None)
+    return bool(contract and getattr(contract, "plan_path", None) == plan_path)
+
+
+def _handle_plan_slash(cmd: str, agent: ZeroAgent) -> None:
+    """Handle ``/plan <task>`` and ``/plan execute`` for the REPL."""
+    from zero_agent.frontends.commands.slash_commands import (
+        has_active_plan,
+        resolve_pending_plan,
+        resolve_ready_plan,
+    )
+    from zero_agent.frontends.plan_command import create_plan_workspace
+
+    rest = cmd.strip()[1:]
+    parts = rest.split(maxsplit=1)
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if not arg:
+        print(_PLAN_USAGE)
+        return
+
+    if getattr(agent, "_is_running_task", False):
+        print("  当前有任务正在运行，请先等待完成后再执行 /plan")
+        return
+
+    if arg.lower() == "execute":
+        pending = resolve_pending_plan(agent)
+        if pending is not None:
+            task, mode, plan_path = pending
+        else:
+            ready = resolve_ready_plan(agent)
+            if ready is None:
+                print("  没有就绪的计划可执行（先 /plan <task> 完成规划）")
+                return
+            task, plan_path = ready
+            mode = TaskMode.EXECUTING
+        terminal = _consume_prompt(
+            agent,
+            task,
+            _display_chunk,
+            initial_mode=mode,
+            plan_path=plan_path,
+        )
+        _display_terminal(terminal)
+        return
+
+    if has_active_plan(agent):
+        print("  已存在活动计划，请先 /plan execute 完成后再创建新计划")
+        return
+
+    workspace = create_plan_workspace(agent.config.workspace_dir, arg)
+    terminal = _consume_prompt(
+        agent,
+        arg,
+        _display_chunk,
+        initial_mode=TaskMode.PLAN,
+        plan_path=workspace.path,
+    )
+    # A startup failure means the agent never adopted this workspace; clean up
+    # only the directory this call created.
+    if (
+        terminal.status in _ERROR_TERMINAL_STATUSES
+        and not _agent_owns_plan(agent, workspace.path)
+    ):
+        shutil.rmtree(workspace.directory, ignore_errors=True)
+    _display_terminal(terminal)
+
+
 def _handle_slash_cmd(cmd: str, agent: ZeroAgent) -> bool:
     """处理 /slash 命令.
 
@@ -471,6 +564,10 @@ def _handle_slash_cmd(cmd: str, agent: ZeroAgent) -> bool:
     if is_exit_command(cmd):
         print("Bye.")
         return True
+
+    if _is_plan_command(cmd):
+        _handle_plan_slash(cmd, agent)
+        return False
 
     try:
         result = handle_command(cmd, agent)
