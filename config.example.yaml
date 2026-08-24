@@ -133,3 +133,9 @@ llm_backends:
   #   stream: true
   #   extra_headers:
   #     X-Custom-Header: value
+
+# Optional Langfuse tracing. Replace placeholders locally; never commit secrets.
+# langfuse:
+#   public_key: pk-lf-REPLACE_ME
+#   secret_key: sk-lf-REPLACE_ME
+#   host: https://us.cloud.langfuse.com

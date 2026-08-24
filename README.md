@@ -299,12 +299,35 @@ pytest tests/ -v
 
 ## Langfuse tracing
 
-设置以下环境变量后，Langfuse 插件可读取配置并注册 tracing hooks:
+Langfuse tracing is configured from the `langfuse` section in the project-local
+`config.yaml`:
+
+```yaml
+langfuse:
+  public_key: pk-lf-...
+  secret_key: sk-lf-...
+  host: https://us.cloud.langfuse.com
+```
+
+Install the optional dependency when tracing is needed:
+
+```bash
+pip install -e ".[monitoring]"
+```
+
+ZeroAgent creates one Langfuse client per Agent and traces every concrete
+LiteLLM call, including streaming, non-streaming, Vision, failover, and error
+paths. The active `config.yaml` is ignored by Git; do not commit real
+credentials.
+
+When `langfuse` is missing or the YAML section is absent/incomplete, tracing is
+a no-op and Agent execution continues normally. For direct plugin callers that
+do not provide an `AgentConfig`, the compatibility fallback reads:
 
 ```bash
 export LANGFUSE_PUBLIC_KEY=pk-xxx
 export LANGFUSE_SECRET_KEY=sk-xxx
-export LANGFUSE_HOST=https://cloud.langfuse.com
+export LANGFUSE_HOST=https://us.cloud.langfuse.com
 ```
 
 ## License
