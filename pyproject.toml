@@ -35,7 +35,7 @@ bots = [
     "wecom-aibot-sdk>=1.0",
     "dingtalk-stream>=0.20",
 ]
-monitoring = ["langfuse>=2.0"]
+monitoring = ["langfuse>=4.0"]
 all-extras = ["zero-agent[ui,browser,memory,plot,bots,monitoring]"]
 
 [project.scripts]

@@ -240,6 +240,7 @@ class LangfuseTracer:
         if token is not None:
             self._active_agent.reset(token)
             self._agent_token.set(None)
+        self.flush()
         if self._pending_config_set:
             pending = self._pending_config
             self._pending_config = None

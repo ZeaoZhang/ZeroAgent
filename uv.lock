@@ -3877,7 +3877,7 @@ requires-dist = [
     { name = "bottle", marker = "extra == 'browser'", specifier = ">=0.12" },
     { name = "dingtalk-stream", marker = "extra == 'bots'", specifier = ">=0.20" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.3" },
-    { name = "langfuse", marker = "extra == 'monitoring'", specifier = ">=2.0" },
+    { name = "langfuse", marker = "extra == 'monitoring'", specifier = ">=4.0" },
     { name = "lark-oapi", marker = "extra == 'bots'", specifier = ">=1.0" },
     { name = "litellm", specifier = ">=1.50" },
     { name = "matplotlib", marker = "extra == 'plot'", specifier = ">=3.7" },

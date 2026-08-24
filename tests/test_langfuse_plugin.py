@@ -231,6 +231,7 @@ class TestLangfusePlugin:
         }
         assert "sensitive response" not in str(agent.updates[-1])
         assert tool is recorded_tool
+        assert client.flush_count == 1
 
     def test_reconfigure_disable_applies_after_active_agent(self, monkeypatch) -> None:
         FakeLangfuse.instances.clear()
