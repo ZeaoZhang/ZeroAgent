@@ -10,6 +10,28 @@ from pathlib import Path
 from typing import Optional
 
 
+def resolve_workspace_path(path: str, workspace_dir: str) -> str:
+    """Resolve a path under ``workspace_dir`` and reject traversal escapes.
+
+    This helper is intentionally stricter than the legacy file-tool resolver:
+    it is used for executable script references, where an absolute or ``..``
+    path must never escape the agent workspace.
+    """
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("path must be a non-empty string")
+
+    root = Path(workspace_dir).expanduser().resolve()
+    candidate = Path(path).expanduser()
+    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"path must stay inside workspace: {path} -> {resolved}"
+        ) from exc
+    return str(resolved)
+
+
 def consume_file(directory: Optional[str], filename: str) -> Optional[str]:
     """原子读取文件内容并删除文件.
 

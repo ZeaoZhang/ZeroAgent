@@ -219,6 +219,32 @@ class TestBaseHandlerDispatch:
 
         assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "second"
 
+    def test_file_write_creates_parent_for_temporary_script(
+        self,
+        mock_config,
+        tmp_path,
+    ) -> None:
+        """临时脚本路径的父目录由 file_write 自动创建."""
+        mock_config.workspace_dir = str(tmp_path)
+        handler = BaseHandler(
+            registry=ToolRegistry.with_builtins(mock_config),
+            cwd=str(tmp_path),
+        )
+
+        result = _exhaust(handler.dispatch(
+            "file_write",
+            {
+                "path": "scripts/za_tmp.py",
+                "content": "print('temporary')\n",
+            },
+            None,
+        ))
+
+        assert result.data["status"] == "success"
+        assert (tmp_path / "scripts" / "za_tmp.py").read_text(encoding="utf-8") == (
+            "print('temporary')\n"
+        )
+
     def test_file_write_repeated_append_and_prepend_are_not_deduplicated(
         self,
         mock_config,
@@ -267,9 +293,9 @@ class TestBaseHandlerDispatch:
             MockResponse(content="我准备运行代码。"),
         ))
 
-        assert result.data == (
-            "[Error] Code missing. Must use reply code block or 'script' arg."
-        )
+        assert "Code missing" in result.data
+        assert "file_write" in result.data
+        assert "script_path" in result.data
         assert result.next_prompt == "\n"
 
     @pytest.mark.parametrize("fence", [
@@ -310,10 +336,190 @@ class TestBaseHandlerDispatch:
             MockResponse(content="我准备运行代码。"),
         ))
 
-        assert result.data == (
-            "[Error] Code missing. Must use reply code block or 'script' arg."
-        )
+        assert "Code missing" in result.data
+        assert "file_write" in result.data
+        assert "script_path" in result.data
         assert result.next_prompt == "\n"
+
+    def test_code_run_missing_arguments_are_bounded(self, mock_config) -> None:
+        """缺少代码参数不能无限返回 CONTINUE."""
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
+
+        results = [
+            _exhaust(handler.dispatch(
+                "code_run",
+                {"cwd": "."},
+                MockResponse(content="执行检查。"),
+            ))
+            for _ in range(4)
+        ]
+
+        assert [result.action for result in results[:3]] == [
+            StepAction.CONTINUE,
+            StepAction.CONTINUE,
+            StepAction.CONTINUE,
+        ]
+        assert results[3].action is StepAction.FAIL
+        assert results[3].reason == "code_run_argument_retry_limit"
+        assert results[3].terminal_status is TerminalStatus.PROTOCOL_ERROR
+
+    def test_bad_json_arguments_are_bounded(self, mock_handler: BaseHandler) -> None:
+        """工具参数 JSON 持续损坏时也必须在独立预算后停止."""
+        results = [
+            _exhaust(mock_handler.dispatch(
+                "bad_json",
+                {"msg": "unterminated"},
+                MockResponse(content=""),
+            ))
+            for _ in range(4)
+        ]
+
+        assert [result.action for result in results[:3]] == [
+            StepAction.CONTINUE,
+            StepAction.CONTINUE,
+            StepAction.CONTINUE,
+        ]
+        assert results[3].action is StepAction.FAIL
+        assert results[3].reason == "bad_json_arguments_retry_limit"
+        assert results[3].terminal_status is TerminalStatus.PROTOCOL_ERROR
+
+    def test_successful_tool_resets_bad_json_budget(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """成功工具调用后，下一次 bad_json 从第一次数起算."""
+        for _ in range(2):
+            _exhaust(mock_handler.dispatch(
+                "bad_json",
+                {"msg": "bad"},
+                MockResponse(content=""),
+            ))
+        _exhaust(mock_handler.dispatch(
+            "echo",
+            {"message": "valid"},
+            MockResponse(content=""),
+        ))
+
+        result = _exhaust(mock_handler.dispatch(
+            "bad_json",
+            {"msg": "bad again"},
+            MockResponse(content=""),
+        ))
+
+        assert result.action is StepAction.CONTINUE
+
+    def test_code_run_script_path_executes_workspace_file(
+        self,
+        mock_config,
+        tmp_path,
+    ) -> None:
+        """script_path 只传短路径，工具侧读取并执行脚本文件."""
+        mock_config.workspace_dir = str(tmp_path)
+        script = tmp_path / "scripts" / "hello.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("print('from script path')\n", encoding="utf-8")
+        handler = BaseHandler(
+            registry=ToolRegistry.with_builtins(mock_config),
+            cwd=str(tmp_path),
+        )
+
+        result = _exhaust(handler.dispatch(
+            "code_run",
+            {"type": "python", "script_path": "scripts/hello.py"},
+            MockResponse(content=""),
+        ))
+
+        assert result.action is StepAction.CONTINUE
+        assert result.data["status"] == "success"
+        assert "from script path" in result.data["stdout"]
+
+    def test_code_run_script_path_rejects_workspace_escape(
+        self,
+        mock_config,
+        tmp_path,
+    ) -> None:
+        """script_path 不能越过 workspace 根目录读取文件."""
+        mock_config.workspace_dir = str(tmp_path / "workspace")
+        outside = tmp_path / "outside.py"
+        outside.write_text("print('outside')\n", encoding="utf-8")
+        handler = BaseHandler(
+            registry=ToolRegistry.with_builtins(mock_config),
+            cwd=mock_config.workspace_dir,
+        )
+
+        result = _exhaust(handler.dispatch(
+            "code_run",
+            {"script_path": "../outside.py"},
+            MockResponse(content=""),
+        ))
+
+        assert result.action is StepAction.CONTINUE
+        assert result.reason == "code_run_invalid_script_path"
+        assert "workspace" in str(result.data).lower()
+
+    def test_code_run_script_path_requires_existing_file(
+        self,
+        mock_config,
+        tmp_path,
+    ) -> None:
+        """script_path 指向不存在文件时返回可重试的协议错误."""
+        mock_config.workspace_dir = str(tmp_path)
+        handler = BaseHandler(
+            registry=ToolRegistry.with_builtins(mock_config),
+            cwd=str(tmp_path),
+        )
+
+        result = _exhaust(handler.dispatch(
+            "code_run",
+            {"script_path": "scripts/missing.py"},
+            MockResponse(content=""),
+        ))
+
+        assert result.action is StepAction.CONTINUE
+        assert result.reason == "code_run_invalid_script_path"
+        assert "regular file" in str(result.data)
+
+    def test_code_run_script_and_script_path_are_mutually_exclusive(
+        self,
+        mock_config,
+    ) -> None:
+        """同时传 inline script 和 script_path 时不得猜测执行内容."""
+        handler = BaseHandler(
+            registry=ToolRegistry.with_builtins(mock_config),
+            cwd=mock_config.workspace_dir,
+        )
+
+        result = _exhaust(handler.dispatch(
+            "code_run",
+            {"script": "print('inline')", "script_path": "scripts/x.py"},
+            MockResponse(content=""),
+        ))
+
+        assert result.action is StepAction.CONTINUE
+        assert result.reason == "code_run_conflicting_arguments"
+        assert "script_path" in str(result.data)
+
+    def test_code_run_truncated_reply_guides_file_write(
+        self,
+        mock_config,
+    ) -> None:
+        """疑似截断的正文代码块应切换到临时脚本路径流程."""
+        handler = BaseHandler(
+            registry=ToolRegistry.with_builtins(mock_config),
+            cwd=mock_config.workspace_dir,
+        )
+
+        result = _exhaust(handler.dispatch(
+            "code_run",
+            {},
+            MockResponse(content="```python\nprint('partial')\n[!!! 流异常中断"),
+        ))
+
+        assert result.action is StepAction.CONTINUE
+        assert result.reason == "code_run_truncated_input"
+        assert "file_write" in str(result.data)
+        assert "script_path" in str(result.data)
 
     def test_real_registry_file_patch_bad_ref_uses_blank_next_prompt(
         self,
@@ -641,6 +847,26 @@ class TestBaseHandlerDoNoTool:
         result = _exhaust(gen)
         assert result.next_prompt is not None
         assert "max_tokens" in result.next_prompt.lower()
+
+    def test_interruption_retry_budget_exits_on_fourth_attempt(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """重复流中断在三次纠正后受控退出，不再无限重试."""
+        response = MockResponse(content="partial [!!! 流异常中断")
+        results = [
+            _exhaust(mock_handler.do_no_tool({}, response))
+            for _ in range(4)
+        ]
+
+        assert [result.action for result in results[:3]] == [
+            StepAction.CONTINUE,
+            StepAction.CONTINUE,
+            StepAction.CONTINUE,
+        ]
+        assert results[3].action is StepAction.FAIL
+        assert results[3].reason == "interruption:incomplete_limit"
+        assert results[3].terminal_status is TerminalStatus.BUDGET_EXHAUSTED
 
     def test_code_block_without_tool_triggers_prompt(self, mock_handler: BaseHandler) -> None:
         """大代码块未调用工具时提示 LLM 调用工具."""

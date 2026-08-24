@@ -306,9 +306,14 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         name="file_write",
         description=_t(
             "用于文件的新建、全量覆盖或追加写入。对于精细的代码修改，应优先使用 file_patch。"
+            "长代码或临时脚本请写入 scripts/（如 scripts/za_tmp.py），内容很长时分块并用 append，"
+            "随后用 code_run 的 script_path 执行。"
             "必须在原生工具参数 content 中提供完整写入内容；不会从回复正文、代码块或标签中提取内容。"
             "写入内容支持 {{file:路径:起始行:结束行}} 语法引用文件片段，写入前自动展开",
             "Create/overwrite/append files. HUGE edits ONLY. Provide the complete "
+            "long scripts or temporary programs under scripts/ (for example "
+            "scripts/za_tmp.py), append large content in chunks, then run with "
+            "code_run script_path. "
             "file text in the native content argument; reply-body text, code "
             "fences, or tags are ignored. Supports "
             "{{file:path:startLine:endLine}}, auto-expanded",
@@ -319,7 +324,11 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": _t("文件路径", "File path", lang),
+                    "description": _t(
+                        "文件路径；临时脚本推荐使用 scripts/za_tmp.py",
+                        "File path; use scripts/za_tmp.py for temporary scripts",
+                        lang,
+                    ),
                 },
                 "content": {"type": "string"},
                 "mode": {
@@ -447,6 +456,9 @@ def _make_file_write_handler(config: AgentConfig):
 
         try:
             content = expand_file_refs(content, base_dir=config.workspace_dir)
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             if mode == "prepend":
                 old = open(path, "r", encoding="utf-8").read() if os.path.exists(path) else ""
                 with open(path, "w", encoding="utf-8") as f:

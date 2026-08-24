@@ -98,6 +98,7 @@ class CompletionGate:
         check_plan_completion: Callable[[], Optional[int]],
         protocol_retry_limit: int = 2,
         action_retry_limit: int = 2,
+        interruption_retry_limit: int = 3,
     ) -> None:
         self._retry_prompt_factory = retry_prompt_factory
         self._large_code_prompt_factory = large_code_prompt_factory
@@ -106,6 +107,7 @@ class CompletionGate:
         self._check_plan_completion = check_plan_completion
         self._protocol_retry_limit = protocol_retry_limit
         self._action_retry_limit = action_retry_limit
+        self._interruption_retry_limit = interruption_retry_limit
         self._retry_counts: dict[str, int] = {}
 
     def reset(self) -> None:
@@ -143,14 +145,25 @@ class CompletionGate:
 
         interruption = classify_interruption(response)
         if interruption:
-            return CompletionGateDecision.retry(
+            return self._budgeted_retry(
                 reason=f"interruption:{interruption.kind}",
+                limit=self._interruption_retry_limit,
+                protocol=self._response_protocol(response),
                 prompt=interruption.retry_prompt,
                 message_zh="[Warn] LLM 响应中断，重试...\n",
                 message_en="[Warn] LLM response was interrupted; retrying...\n",
+                exhausted_zh=(
+                    "[Warn] 中断重试已达到上限，停止本轮以避免无效循环。"
+                    "请改用 file_write 写临时脚本文件再执行，或直接给出结论。\n"
+                ),
+                exhausted_en=(
+                    "[Warn] Interruption retry limit reached; stopping this run "
+                    "to avoid an ineffective loop. Write a temporary script file "
+                    "with file_write and execute it, or provide the final answer.\n"
+                ),
                 metadata={
                     "interruption": interruption.kind,
-                    "budgeted": False,
+                    "retry_prompt": interruption.retry_prompt,
                 },
             )
 
@@ -255,6 +268,7 @@ class CompletionGate:
         reason: str,
         limit: int,
         protocol: str,
+        prompt: Optional[str] = None,
         message_zh: str,
         message_en: str,
         exhausted_zh: str,
@@ -279,7 +293,7 @@ class CompletionGate:
             )
         return CompletionGateDecision.retry(
             reason=reason,
-            prompt=self._protocol_retry_prompt(protocol),
+            prompt=prompt or self._protocol_retry_prompt(protocol),
             message_zh=message_zh,
             message_en=message_en,
             metadata=retry_metadata,

@@ -175,6 +175,7 @@ class AgentConfig:
     peer_hint: bool = False
     enable_worldline: bool = False
     litellm_model_cost_map: Optional[str] = None
+    langfuse: Optional[dict] = None
 
     @property
     def resolved_language(self) -> str:
@@ -406,6 +407,7 @@ class AgentConfig:
             peer_hint=data.get("peer_hint", False),
             enable_worldline=data.get("enable_worldline", False),
             litellm_model_cost_map=data.get("litellm_model_cost_map"),
+            langfuse=data.get("langfuse"),
         )
 
 

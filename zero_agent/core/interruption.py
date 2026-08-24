@@ -11,9 +11,13 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 
-INCOMPLETE_RETRY_PROMPT = "[System] Incomplete response. Regenerate and tooluse."
+INCOMPLETE_RETRY_PROMPT = (
+    "[System] Incomplete response. Regenerate and tooluse. "
+    "For long code, use file_write in chunks and code_run(script_path=...)."
+)
 MAX_TOKENS_RETRY_PROMPT = (
-    "[System] max_tokens limit reached. Use multi small steps to do it."
+    "[System] max_tokens limit reached. Use multi small steps; for long code, "
+    "use file_write in chunks and code_run(script_path=...)."
 )
 
 

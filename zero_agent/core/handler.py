@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import TYPE_CHECKING, Any, Dict, Generator, Optional
 
@@ -26,6 +27,16 @@ from zero_agent.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
     from zero_agent.core.agent import ZeroAgent
+
+
+_logger = logging.getLogger("zero_agent.core.handler")
+_TOOL_PROTOCOL_REASONS = {
+    "code_run_missing_input",
+    "code_run_truncated_input",
+    "code_run_invalid_arguments",
+    "code_run_conflicting_arguments",
+    "code_run_invalid_script_path",
+}
 
 
 class BaseHandler:
@@ -70,6 +81,8 @@ class BaseHandler:
         self._done_hooks: list = []
         self._empty_ct: int = 0
         self._completion_rejection_count: int = 0
+        self._tool_protocol_retry_counts: dict[str, int] = {}
+        self.tool_protocol_retry_limit: int = 3
         self.history_info: list = []  # 每轮摘要历史，用于上下文压缩
         self.completion_certificate = None
         self.task_contract = TaskContract(
@@ -108,6 +121,7 @@ class BaseHandler:
         """
         self._empty_ct = 0
         self._completion_rejection_count = 0
+        self._tool_protocol_retry_counts.clear()
         self.completion_certificate = None
         self.completion_gate.reset()
 
@@ -247,6 +261,7 @@ class BaseHandler:
         if hasattr(self, method_name):
             method = getattr(self, method_name)
             ret = yield from self._try_call_generator(method, args, response)
+            ret = self._apply_tool_protocol_budget(tool_name, ret)
             if self._successful_completion_correction(tool_name, ret):
                 self._completion_rejection_count = 0
             self._record_evidence(tool_name, args, ret)
@@ -273,6 +288,7 @@ class BaseHandler:
                 if next_prompt is None:
                     next_prompt = self._default_next_prompt(args)
                 ret = StepOutcome(data, next_prompt=next_prompt, action=StepAction.CONTINUE)
+            ret = self._apply_tool_protocol_budget(tool_name, ret)
             if self._successful_completion_correction(tool_name, ret):
                 self._completion_rejection_count = 0
             self._record_evidence(tool_name, args, ret)
@@ -401,6 +417,7 @@ class BaseHandler:
             {},
             next_prompt=self._bad_json_retry_prompt(msg),
             action=StepAction.CONTINUE,
+            reason="bad_json_arguments",
         )
 
     def _native_tool_retry_prompt(self) -> str:
@@ -455,10 +472,13 @@ class BaseHandler:
         """Prompt after a large bare code block is emitted without tool calls."""
         return self._tl(
             "[System] 检测到你在上一轮回复中主要内容是较大代码块，"
-            "且本轮未调用任何工具。若代码需要执行或写入，请调用实际工具；"
-            "若任务已经完成，请调用 complete_task。",
+            "且本轮未调用任何工具。请不要把长代码放入 code_run 的 script 参数；"
+            "先调用 file_write(path='scripts/za_tmp.py', content=...)（过长时分块 append），"
+            "再调用 code_run(script_path='scripts/za_tmp.py')。若任务已完成，请调用 complete_task。",
             "[System] Your last reply was mainly a large code block without a tool call. "
-            "Call a real tool if it must be executed or written; call complete_task if finished.",
+            "Do not put long code in code_run.script: write scripts/za_tmp.py with file_write "
+            "(append chunks when needed), then call code_run(script_path='scripts/za_tmp.py'). "
+            "Call complete_task if finished.",
         )
 
     # ---- completion control ----
@@ -528,15 +548,22 @@ class BaseHandler:
                 )
             if decision.reason in {
                 "blank_response",
+            }:
+                return self._retry_or_exit(
+                    decision.prompt or "",
+                    "blank_response_limit",
+                )
+            if decision.reason in {
                 "interruption:incomplete",
                 "interruption:max_tokens",
             }:
-                limit_reason = (
-                    "blank_response_limit"
-                    if decision.reason == "blank_response"
-                    else "interruption_retry_limit"
+                # CompletionGate owns the interruption budget; do not apply the
+                # legacy empty-response counter a second time.
+                return StepOutcome(
+                    decision.data,
+                    next_prompt=decision.prompt,
+                    action=StepAction.CONTINUE,
                 )
-                return self._retry_or_exit(decision.prompt or "", limit_reason)
             return StepOutcome(
                 decision.data,
                 next_prompt=decision.prompt,
@@ -742,6 +769,54 @@ class BaseHandler:
         if tool_name in {"complete_task", "ask_user", "bad_json", "no_tool"}:
             return False
         return BaseHandler._evidence_status(tool_name, outcome.data) == "success"
+
+    def _apply_tool_protocol_budget(
+        self,
+        tool_name: str,
+        outcome: Any,
+    ) -> Any:
+        """Bound repeated malformed tool inputs without hiding real execution errors."""
+        if not isinstance(outcome, StepOutcome):
+            return outcome
+
+        reason = str(outcome.reason or "")
+        if tool_name == "bad_json":
+            key = "bad_json_arguments"
+        elif tool_name == "code_run" and reason in _TOOL_PROTOCOL_REASONS:
+            key = "code_run_argument"
+        else:
+            if tool_name == "code_run":
+                self._tool_protocol_retry_counts.pop("code_run_argument", None)
+            if tool_name != "bad_json":
+                self._tool_protocol_retry_counts.pop("bad_json_arguments", None)
+            return outcome
+
+        attempt = self._tool_protocol_retry_counts.get(key, 0) + 1
+        self._tool_protocol_retry_counts[key] = attempt
+        _logger.warning(
+            "tool_protocol_retry tool=%s reason=%s attempt=%d limit=%d",
+            tool_name,
+            reason,
+            attempt,
+            self.tool_protocol_retry_limit,
+        )
+        if attempt <= self.tool_protocol_retry_limit:
+            return outcome
+
+        limit_reason = f"{key}_retry_limit"
+        return StepOutcome(
+            {
+                "status": "error",
+                "reason": limit_reason,
+                "msg": (
+                    f"{tool_name} protocol correction limit reached after "
+                    f"{self.tool_protocol_retry_limit} attempts"
+                ),
+            },
+            action=StepAction.FAIL,
+            reason=limit_reason,
+            terminal_status=TerminalStatus.PROTOCOL_ERROR,
+        )
 
     def _completion_evidence_catalog(self, limit: int = 8) -> str:
         evidence = successful_evidence_refs(self.evidence_ledger, limit=limit)

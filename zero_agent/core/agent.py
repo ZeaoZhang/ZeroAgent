@@ -701,7 +701,7 @@ class ZeroAgent:
         """注册内置插件；缺依赖或缺配置时静默跳过."""
         try:
             from zero_agent.plugins.langfuse_tracing import register
-            register(self.hooks)
+            register(self.hooks, config=self.config)
         except Exception:
             pass
         try:

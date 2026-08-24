@@ -7,6 +7,7 @@ AgentLoop: generator-based 的 agent 执行循环，编排 LLM 调用 → 工具
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from typing import TYPE_CHECKING, Any, Dict, Generator, List, Optional
@@ -19,6 +20,9 @@ from zero_agent.utils.text import smart_format
 
 if TYPE_CHECKING:
     from zero_agent.core.agent import ZeroAgent
+
+
+_logger = logging.getLogger("zero_agent.core.loop")
 
 
 class AgentLoop:
@@ -156,10 +160,52 @@ class AgentLoop:
                             raw_args if isinstance(raw_args, str)
                             else json.dumps(raw_args, ensure_ascii=False, default=self._json_default)
                         )
+                        raw_args_bytes = len(raw_args_text.encode("utf-8"))
                         tool_call_id = tc.id or f"call_{i}"
+                        response_stop_reason = str(
+                            getattr(response, "stop_reason", "") or ""
+                        ).lower()
+                        response_tail = str(
+                            getattr(response, "content", "") or ""
+                        )[-150:]
+                        stream_interrupted = (
+                            response_stop_reason in {
+                                "stream_interrupted",
+                                "interrupted",
+                                "max_tokens",
+                                "length",
+                            }
+                            or "[!!! 流异常中断" in response_tail
+                            or "max_tokens !!!]" in response_tail
+                        )
+                        _logger.info(
+                            "tool_call_arguments_received turn=%d index=%d tool=%s "
+                            "call_id=%s raw_args_bytes=%d stop_reason=%s "
+                            "stream_interrupted=%s",
+                            turn,
+                            i,
+                            tc.function.name,
+                            tool_call_id,
+                            raw_args_bytes,
+                            response_stop_reason,
+                            stream_interrupted,
+                        )
                         try:
                             args = json.loads(raw_args_text)
                         except json.JSONDecodeError as exc:
+                            _logger.warning(
+                                "tool_call_arguments_parse_failed turn=%d index=%d "
+                                "tool=%s call_id=%s raw_args_bytes=%d error_pos=%s "
+                                "stop_reason=%s stream_interrupted=%s",
+                                turn,
+                                i,
+                                tc.function.name,
+                                tool_call_id,
+                                raw_args_bytes,
+                                exc.pos,
+                                response_stop_reason,
+                                stream_interrupted,
+                            )
                             args = {
                                 "msg": (
                                     "Failed to parse tool call JSON arguments: "
@@ -173,6 +219,16 @@ class AgentLoop:
                             })
                             continue
                         if not isinstance(args, dict):
+                            _logger.warning(
+                                "tool_call_arguments_not_object turn=%d index=%d tool=%s "
+                                "call_id=%s raw_args_bytes=%d decoded_type=%s",
+                                turn,
+                                i,
+                                tc.function.name,
+                                tool_call_id,
+                                raw_args_bytes,
+                                self._json_type_name(args),
+                            )
                             args = {
                                 "msg": (
                                     "function.arguments must decode to a JSON object, "
@@ -186,6 +242,16 @@ class AgentLoop:
                             })
                             continue
                         if args.get("_malformed") is True:
+                            _logger.warning(
+                                "tool_call_arguments_marked_malformed turn=%d index=%d "
+                                "tool=%s call_id=%s raw_args_bytes=%d keys=%s",
+                                turn,
+                                i,
+                                tc.function.name,
+                                tool_call_id,
+                                raw_args_bytes,
+                                sorted(str(key) for key in args),
+                            )
                             args = {
                                 "msg": str(
                                     args.get("_error")
@@ -198,6 +264,21 @@ class AgentLoop:
                                 "id": tool_call_id,
                             })
                             continue
+                        script_value = args.get("script")
+                        script_path_value = args.get("script_path")
+                        _logger.info(
+                            "tool_call_arguments_parsed turn=%d index=%d tool=%s "
+                            "call_id=%s raw_args_bytes=%d keys=%s script_len=%s "
+                            "has_script_path=%s",
+                            turn,
+                            i,
+                            tc.function.name,
+                            tool_call_id,
+                            raw_args_bytes,
+                            sorted(str(key) for key in args),
+                            len(script_value) if isinstance(script_value, str) else None,
+                            bool(script_path_value),
+                        )
                         tool_calls.append({
                             "tool_name": tc.function.name,
                             "args": args,

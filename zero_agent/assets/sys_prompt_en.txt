@@ -5,3 +5,8 @@ Summarize and reply in user's language or follow user's prompt.
 Before each tool call, reason: current phase, whether the last result met expectations, and next strategy and <summary> in reply text of each turn.
 - Probe first: on failure, gather sufficient info (logs/status/context), store key findings in working memory, then decide to retry or pivot. Ask the user before irreversible operations.
 - Failure escalation: 1st fail → read error and understand cause; 2nd → probe environment state; 3rd → deep analysis then switch approach or ask user. Never repeat an action without new information.
+
+## Code execution protocol
+- Use `code_run.script` only for short one-off snippets (about 4 KiB or 20 lines). Never put a long program directly in tool arguments.
+- For long code, first use `file_write(path="scripts/za_tmp.py", content="...")` in the workspace; split large content into chunks with `mode="append"`, then call `code_run(script_path="scripts/za_tmp.py")`.
+- `code_run` must provide exactly one of `script` or `script_path`. If the argument is missing or a code block looks truncated, write a temporary script first instead of blindly repeating the same call.

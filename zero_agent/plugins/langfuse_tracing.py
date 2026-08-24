@@ -39,8 +39,23 @@ def _get_langfuse():
         return None
 
 
-def _get_config() -> Optional[dict]:
-    """从 keychain 读取 langfuse_config. 失败返回 None."""
+def _get_config(config: Optional[Any] = None) -> Optional[dict]:
+    """从 config 或 keychain 读取 langfuse_config. 失败返回 None.
+
+    Args:
+        config: AgentConfig 实例，优先从此读取 langfuse 配置段.
+    """
+    # 1. 优先从 AgentConfig.langfuse 读取
+    if config is not None:
+        lf = getattr(config, "langfuse", None)
+        if isinstance(lf, dict):
+            pk = lf.get("public_key") or lf.get("LANGFUSE_PUBLIC_KEY")
+            sk = lf.get("secret_key") or lf.get("LANGFUSE_SECRET_KEY")
+            host = lf.get("host") or lf.get("LANGFUSE_HOST") or "https://cloud.langfuse.com"
+            if pk and sk:
+                return {"public_key": pk, "secret_key": sk, "host": host}
+
+    # 2. 从 keychain 读取
     try:
         from zero_agent.utils.keychain import Keychain
         kc = Keychain()
@@ -52,7 +67,7 @@ def _get_config() -> Optional[dict]:
     except Exception:
         pass
 
-    # fallback: 环境变量
+    # 3. fallback: 环境变量
     pk = os.environ.get("LANGFUSE_PUBLIC_KEY")
     sk = os.environ.get("LANGFUSE_SECRET_KEY")
     host = os.environ.get("LANGFUSE_HOST") or os.environ.get("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
@@ -65,8 +80,12 @@ def _get_config() -> Optional[dict]:
     return None
 
 
-def _ensure_client() -> Optional[Any]:
-    """获取或创建线程本地的 Langfuse 客户端."""
+def _ensure_client(config: Optional[Any] = None) -> Optional[Any]:
+    """获取或创建线程本地的 Langfuse 客户端.
+
+    Args:
+        config: AgentConfig 实例，优先从此读取 langfuse 配置段.
+    """
     if hasattr(_local, "client"):
         return _local.client
 
@@ -74,7 +93,7 @@ def _ensure_client() -> Optional[Any]:
     if Langfuse is None:
         return None
 
-    cfg = _get_config()
+    cfg = _get_config(config)
     if cfg is None:
         return None
 
@@ -90,7 +109,8 @@ def _ensure_client() -> Optional[Any]:
 
 def _on_agent_before(ctx: dict) -> None:
     """agent 启动时创建 Trace."""
-    client = _ensure_client()
+    cfg = ctx.get("_langfuse_config")
+    client = _ensure_client(cfg)
     if client is None:
         return
     task = ctx.get("task", "unknown")
@@ -204,7 +224,7 @@ _HANDLERS = {
 }
 
 
-def register(hook_system: Any) -> bool:
+def register(hook_system: Any, config: Optional[Any] = None) -> bool:
     """在 HookSystem 上注册所有 LangFuse 回调.
 
     仅当 langfuse 包可用且配置存在时才注册。
@@ -215,14 +235,19 @@ def register(hook_system: Any) -> bool:
 
     Args:
         hook_system: HookSystem 实例.
+        config: AgentConfig 实例，优先从此读取 langfuse 配置段.
 
     Returns:
         True 如果注册成功，False 如果跳过.
     """
     if _get_langfuse() is None:
         return False
-    if _get_config() is None:
+    if _get_config(config) is None:
         return False
+
+    # 将 config 注入钩子上下文，供 _on_agent_before 使用
+    if config is not None:
+        hook_system.register("_langfuse_config", config)
 
     for event, callback in _HANDLERS.items():
         hook_system.register(event, callback)

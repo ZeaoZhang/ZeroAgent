@@ -598,6 +598,53 @@ class TestZeroAgentHooks:
         assert "after abort" in tool_result
         assert '"status": "success"' in tool_result
 
+    def test_repeated_code_run_missing_args_fail_with_protocol_error(
+        self,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        """模型反复漏传 script 时，loop 必须在预算耗尽后受控结束."""
+        config = AgentConfig(
+            llm_backends={
+                "default": LLMBackendConfig(
+                    name="default",
+                    provider="openai",
+                    api_key="test-key",
+                    api_base="https://api.openai.com/v1",
+                    model="test-model",
+                ),
+            },
+            default_backend="default",
+            max_turns=10,
+            workspace_dir=str(tmp_path / "workspace"),
+            memory_dir=str(tmp_path / "memory"),
+        )
+        missing_code = MockResponse(
+            content="执行检查。",
+            tool_calls=[MockToolCall(
+                function=MockFunction(
+                    name="code_run",
+                    arguments='{"cwd": "."}',
+                ),
+                id="call_missing",
+            )],
+        )
+        fake_client = _FakeClient(
+            config.llm_backends["default"],
+            [missing_code, missing_code, missing_code, missing_code],
+        )
+        monkeypatch.setattr(
+            "zero_agent.core.agent.LLMFactory.create_all_sessions",
+            lambda _config: {"default": fake_client},
+        )
+
+        agent = ZeroAgent(config=config)
+        terminal = _exhaust(agent.run("inspect the project"))
+
+        assert terminal.status is TerminalStatus.PROTOCOL_ERROR
+        assert terminal.reason == "code_run_argument_retry_limit"
+        assert fake_client._call_count == 4
+
     def test_run_creates_fresh_handler_and_ages_key_info(
         self,
         tmp_path,

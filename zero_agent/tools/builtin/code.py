@@ -6,6 +6,7 @@ Bash/PowerShell 模式直接通过 -c 参数执行，适合单行系统命令.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -20,7 +21,13 @@ from typing import Any, Dict, Generator, List, Optional
 from zero_agent.core.config import AgentConfig
 from zero_agent.core.types import StepAction, StepOutcome
 from zero_agent.tools.registry import ToolRegistry
+from zero_agent.utils.files import resolve_workspace_path
 from zero_agent.utils.text import smart_format
+
+
+_logger = logging.getLogger("zero_agent.tools.code")
+_VALID_CODE_TYPES = {"python", "py", "powershell", "bash", "sh", "shell", "ps1", "pwsh"}
+_INLINE_SCRIPT_WARN_CHARS = 4096
 
 
 def _t(zh: str, en: str, lang: str) -> str:
@@ -201,27 +208,39 @@ def register_code_tools(registry: ToolRegistry, config: AgentConfig) -> None:
     registry.register(ToolDefinition(
         name="code_run",
         description=_t(
-            "代码执行器。优先使用python。支持Multi-call，并行时用script参数。"
-            "无script参数时正文代码块会被执行，单次调用优先使用以免转义。禁硬编码大量数据",
-            "Code executor. Prefer python. Multi-call OK, use script param. "
-            "Reply code block is executed if no script arg; prefer for single call "
-            "to avoid escaping. No hardcoding bulk data",
+            "代码执行器。长代码或大量数据先用 file_write 写入 scripts/，再用 script_path 执行；"
+            "script 仅用于短代码（约 4 KiB/20 行以内）。无参数但正文含完整代码块时兼容执行。",
+            "Code executor. For long code or bulk data, use file_write into scripts/ and then "
+            "run it with script_path. Use script only for short snippets (about 4 KiB/20 lines). "
+            "A complete reply code block remains a compatibility fallback when no path/script is given.",
             lang,
         ),
         parameters={
             "type": "object",
             "properties": {
+                "script_path": {
+                    "type": "string",
+                    "description": _t(
+                        "推荐：workspace 内脚本路径，例如 scripts/za_tmp.py。工具侧读取，避免传输长代码。"
+                        "与 script 互斥。",
+                        "Preferred: path to a script inside the workspace, e.g. scripts/za_tmp.py. "
+                        "The tool reads it server-side; mutually exclusive with script.",
+                        lang,
+                    ),
+                },
                 "script": {
                     "type": "string",
                     "description": _t(
-                        "[Optional] 要执行的代码。为免转义建议留空，改用正文代码块（与此参数互斥）",
-                        "[Mutually exclusive] NEVER use this param when use reply code block.",
+                        "短代码参数（约 4 KiB/20 行以内）。长代码先 file_write 到 scripts/，再用 script_path。"
+                        "与 script_path 互斥。",
+                        "Short code only (about 4 KiB/20 lines). For long code use file_write + script_path. "
+                        "Mutually exclusive with script_path.",
                         lang,
                     ),
                 },
                 "type": {
                     "type": "string",
-                    "enum": ["python", "powershell"],
+                    "enum": ["python", "bash", "powershell"],
                     "description": _t("代码类型", "Code type", lang),
                     "default": "python",
                 },
@@ -257,6 +276,20 @@ def register_code_tools(registry: ToolRegistry, config: AgentConfig) -> None:
     ))
 
 
+def _code_run_error(reason: str, message: str) -> StepOutcome:
+    """Return a typed, retry-budget-aware code_run input error."""
+    _logger.warning(
+        "code_run_input_validation source=invalid_args reason=%s",
+        reason,
+    )
+    return StepOutcome(
+        message,
+        next_prompt="\n",
+        action=StepAction.CONTINUE,
+        reason=reason,
+    )
+
+
 def _make_code_run_handler(config: AgentConfig):
     """创建 code_run 的 ToolHandler 适配器.
 
@@ -269,7 +302,7 @@ def _make_code_run_handler(config: AgentConfig):
     Returns:
         ToolHandler 函数.
     """
-    def _handler(
+    def _legacy_handler(
         args: Dict[str, Any],
         _response: Any,
         handler: Any,
@@ -280,6 +313,26 @@ def _make_code_run_handler(config: AgentConfig):
             # 回退：从 LLM 响应代码块中提取。
             code = handler._extract_code_block(_response, code_type)
             if not code:
+                # 截断检测：检查响应内容是否含中断标记或未闭合的代码块
+                response_text = (getattr(_response, "content", "") or "") + "\n" + (getattr(_response, "thinking", "") or "")
+                tail = response_text[-150:]
+                has_truncation_marker = (
+                    "[!!! 流异常中断" in tail
+                    or "!!!Error:" in tail
+                    or "max_tokens !!!]" in tail
+                    or "[Error:" in tail
+                )
+                # 检查是否有未闭合的代码块（``` 开头但无闭合）
+                backtick_count = response_text.count("```")
+                unclosed_code_block = (backtick_count % 2 == 1)
+                if has_truncation_marker or unclosed_code_block:
+                    return StepOutcome(
+                        "[Error] 代码块疑似被截断（检测到中断标记或未闭合代码块）。"
+                        "请改用 file_write 将代码写入 scripts/za_tmp.py，"
+                        "然后通过 code_run(script_path='scripts/za_tmp.py') 执行。",
+                        next_prompt="\n",
+                        action=StepAction.CONTINUE,
+                    )
                 return StepOutcome(
                     "[Error] Code missing. Must use reply code block or 'script' arg.",
                     next_prompt="\n",
@@ -330,5 +383,176 @@ def _make_code_run_handler(config: AgentConfig):
             maxlen=maxlen,
             stop_signal=stop_signal,
         ))
+
+    def _handler(
+        args: Dict[str, Any],
+        _response: Any,
+        handler: Any,
+    ) -> Generator[str, None, dict]:
+        """Validate code_run inputs before delegating to the legacy executor."""
+        if not isinstance(args, dict):
+            return _code_run_error(
+                "code_run_invalid_arguments",
+                "[Error] code_run arguments must be a JSON object.",
+            )
+
+        raw_type = args.get("type", "python")
+        if not isinstance(raw_type, str) or not raw_type.strip():
+            return _code_run_error(
+                "code_run_invalid_arguments",
+                "[Error] code_run type must be a non-empty string.",
+            )
+        code_type = raw_type.strip().lower()
+        if code_type not in _VALID_CODE_TYPES | {"inline_eval"}:
+            return _code_run_error(
+                "code_run_invalid_arguments",
+                f"[Error] Unsupported code type: {code_type}.",
+            )
+
+        raw_timeout = args.get("timeout", 60)
+        if isinstance(raw_timeout, bool):
+            return _code_run_error(
+                "code_run_invalid_arguments",
+                "[Error] code_run timeout must be an integer.",
+            )
+        try:
+            timeout = max(1, min(int(raw_timeout), 600))
+        except (TypeError, ValueError):
+            return _code_run_error(
+                "code_run_invalid_arguments",
+                "[Error] code_run timeout must be an integer.",
+            )
+
+        raw_cwd = args.get("cwd", "./")
+        if raw_cwd is None:
+            raw_cwd = "./"
+        if not isinstance(raw_cwd, str):
+            return _code_run_error(
+                "code_run_invalid_arguments",
+                "[Error] code_run cwd must be a string.",
+            )
+
+        raw_script = args.get("script")
+        raw_script_path = args.get("script_path")
+        if raw_script is not None and not isinstance(raw_script, str):
+            return _code_run_error(
+                "code_run_invalid_arguments",
+                "[Error] code_run script must be a string.",
+            )
+        if raw_script_path is not None and not isinstance(raw_script_path, str):
+            return _code_run_error(
+                "code_run_invalid_arguments",
+                "[Error] code_run script_path must be a string.",
+            )
+
+        script = raw_script.strip() if isinstance(raw_script, str) else ""
+        script_path = raw_script_path.strip() if isinstance(raw_script_path, str) else ""
+        if script and script_path:
+            return _code_run_error(
+                "code_run_conflicting_arguments",
+                "[Error] code_run script and script_path are mutually exclusive.",
+            )
+
+        normalized = dict(args)
+        normalized.update({"type": code_type, "timeout": timeout, "cwd": raw_cwd})
+        source = "missing"
+        if script_path:
+            try:
+                resolved = resolve_workspace_path(script_path, config.workspace_dir)
+            except ValueError as exc:
+                return _code_run_error(
+                    "code_run_invalid_script_path",
+                    f"[Error] Invalid script_path: {exc}",
+                )
+            if not os.path.isfile(resolved):
+                return _code_run_error(
+                    "code_run_invalid_script_path",
+                    f"[Error] script_path does not name a regular file: {script_path}",
+                )
+            try:
+                with open(resolved, "r", encoding="utf-8") as script_file:
+                    script = script_file.read()
+            except (OSError, UnicodeError) as exc:
+                return _code_run_error(
+                    "code_run_invalid_script_path",
+                    f"[Error] Cannot read script_path {script_path}: {exc}",
+                )
+            if not script.strip():
+                return _code_run_error(
+                    "code_run_invalid_script_path",
+                    f"[Error] script_path is empty: {script_path}",
+                )
+            source = "script_path"
+            normalized["script"] = script
+            normalized.pop("script_path", None)
+            _logger.info(
+                "code_run_input_validation source=%s path=%s script_len=%d",
+                source,
+                script_path,
+                len(script),
+            )
+        elif script:
+            source = "inline_script"
+            normalized["script"] = script
+            normalized.pop("script_path", None)
+            _logger.info(
+                "code_run_input_validation source=%s script_len=%d oversized=%s",
+                source,
+                len(script),
+                len(script) > _INLINE_SCRIPT_WARN_CHARS,
+            )
+        else:
+            code = handler._extract_code_block(_response, code_type) or ""
+            if code:
+                source = "reply_code_block"
+                normalized["script"] = code
+            else:
+                response_text = (
+                    (getattr(_response, "content", "") or "")
+                    + "\n"
+                    + (getattr(_response, "thinking", "") or "")
+                )
+                tail = response_text[-150:]
+                stop_reason = str(getattr(_response, "stop_reason", "") or "").lower()
+                has_truncation_marker = (
+                    "[!!! 流异常中断" in tail
+                    or "!!!error:" in tail.lower()
+                    or "[error:" in tail.lower()
+                    or "max_tokens !!!]" in tail
+                    or stop_reason in {
+                        "stream_interrupted",
+                        "interrupted",
+                        "max_tokens",
+                        "length",
+                    }
+                )
+                unclosed_code_block = response_text.count("```") % 2 == 1
+                if has_truncation_marker or unclosed_code_block:
+                    source = "truncated_code_block"
+                    _logger.warning(
+                        "code_run_input_validation source=%s response_len=%d stop_reason=%s",
+                        source,
+                        len(response_text),
+                        stop_reason,
+                    )
+                    return _code_run_error(
+                        "code_run_truncated_input",
+                        "[Error] 代码块疑似被截断。请先用 file_write 将代码写入 "
+                        "scripts/za_tmp.py（长内容分块 append），再用 "
+                        "code_run(script_path='scripts/za_tmp.py') 执行。",
+                    )
+                _logger.warning(
+                    "code_run_input_validation source=%s response_len=%d",
+                    source,
+                    len(response_text),
+                )
+                return _code_run_error(
+                    "code_run_missing_input",
+                    "[Error] Code missing. Must use reply code block or 'script' arg. "
+                    "For long code, use file_write(path='scripts/za_tmp.py', content=...) "
+                    "then code_run(script_path='scripts/za_tmp.py').",
+                )
+
+        return (yield from _legacy_handler(normalized, _response, handler))
 
     return _handler
