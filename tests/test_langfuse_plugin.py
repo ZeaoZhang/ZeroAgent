@@ -1,96 +1,269 @@
-"""Tests for plugins/langfuse_tracing.py — LangFuse tracing integration."""
+"""Tests for Langfuse tracing configuration and lifecycle."""
 
-import pytest
+from __future__ import annotations
 
+from types import SimpleNamespace
+
+import litellm
+
+import zero_agent.plugins.langfuse_tracing as plugin
 from zero_agent.core.hooks import HookSystem
-from zero_agent.plugins.langfuse_tracing import register, _get_config, _get_langfuse
+
+
+class FakeObservation:
+    _next_id = 0
+
+    def __init__(self, name, as_type, **kwargs):
+        type(self)._next_id += 1
+        self.id = f"obs-{type(self)._next_id}"
+        self.trace_id = "trace-1"
+        self.name = name
+        self.as_type = as_type
+        self.kwargs = kwargs
+        self.updates = []
+        self.ended = False
+
+    def update(self, **kwargs):
+        self.updates.append(kwargs)
+
+    def end(self):
+        self.ended = True
+
+
+class FakeLangfuse:
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.observations = []
+        self.flush_count = 0
+        type(self).instances.append(self)
+
+    def start_observation(self, **kwargs):
+        observation = FakeObservation(**kwargs)
+        self.observations.append(observation)
+        return observation
+
+    def flush(self):
+        self.flush_count += 1
+
+
+class RecordingTracer:
+    enabled = True
+
+    def __init__(self):
+        self.agent_contexts = []
+        self.tool_contexts = []
+
+    def start_agent(self, context):
+        self.agent_contexts.append(context)
+
+    def finish_agent(self, context):
+        self.agent_contexts.append(context)
+
+    def start_turn_metadata(self, context):
+        return None
+
+    def finish_turn_metadata(self, context):
+        return None
+
+    def start_tool(self, context):
+        self.tool_contexts.append(("before", context))
+        return object()
+
+    def finish_tool(self, observation, context):
+        self.tool_contexts.append(("after", context))
+
+
+def _config() -> SimpleNamespace:
+    return SimpleNamespace(
+        langfuse={
+            "public_key": "pk-config",
+            "secret_key": "sk-config",
+            "host": "https://us.cloud.langfuse.com",
+        }
+    )
 
 
 class TestLangfusePlugin:
-    """LangFuse tracing plugin 测试."""
+    """Langfuse tracing behavior."""
 
-    def test_register_succeeds_with_mock(self, monkeypatch) -> None:
-        """Mock langfuse 可用时注册成功."""
-        # mock langfuse package
-        mock_langfuse = type("Langfuse", (), {})
-        monkeypatch.setattr(
-            "zero_agent.plugins.langfuse_tracing._get_langfuse",
-            lambda: mock_langfuse,
+    def test_explicit_config_wins_over_environment(self, monkeypatch) -> None:
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-env")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-env")
+
+        config = plugin._get_config(_config())
+
+        assert config == {
+            "public_key": "pk-config",
+            "secret_key": "sk-config",
+            "host": "https://us.cloud.langfuse.com",
+        }
+
+    def test_tracer_uses_yaml_credentials_and_current_sdk_api(self, monkeypatch) -> None:
+        FakeLangfuse.instances.clear()
+        monkeypatch.setattr(plugin, "_get_langfuse", lambda: FakeLangfuse)
+
+        tracer = plugin.LangfuseTracer.from_config(_config())
+
+        assert FakeLangfuse.instances[0].kwargs == {
+            "public_key": "pk-config",
+            "secret_key": "sk-config",
+            "host": "https://us.cloud.langfuse.com",
+        }
+        tracer.start_agent({"task": "inspect"})
+        assert FakeLangfuse.instances[0].observations[0].as_type == "agent"
+
+    def test_generation_observation_is_nested_and_maps_usage(self, monkeypatch) -> None:
+        FakeLangfuse.instances.clear()
+        monkeypatch.setattr(plugin, "_get_langfuse", lambda: FakeLangfuse)
+        tracer = plugin.LangfuseTracer.from_config(_config())
+
+        tracer.start_agent({"task": "inspect"})
+        generation = tracer.start_generation(
+            name="llm-call",
+            model="gpt-test",
+            input={"messages": [{"role": "user", "content": "hi"}]},
+            model_parameters={"stream": False},
         )
-        monkeypatch.setattr(
-            "zero_agent.plugins.langfuse_tracing._get_config",
-            lambda: {"public_key": "pk", "secret_key": "sk"},
+        tracer.finish_generation(
+            generation,
+            output={"content": "hello"},
+            usage={
+                "input_tokens": 12,
+                "output_tokens": 7,
+                "cache_read_tokens": 3,
+                "cache_creation_tokens": 2,
+            },
         )
 
+        client = FakeLangfuse.instances[0]
+        agent, recorded_generation = client.observations
+        assert recorded_generation.as_type == "generation"
+        assert recorded_generation.kwargs["trace_context"]["trace_id"] == agent.trace_id
+        assert recorded_generation.kwargs["trace_context"]["parent_span_id"] == agent.id
+        assert recorded_generation.updates[-1]["usage_details"] == {
+            "prompt_tokens": 12,
+            "completion_tokens": 7,
+            "total_tokens": 19,
+            "input_cached": 3,
+            "input_cache_creation": 2,
+        }
+        assert recorded_generation.ended is True
+
+    def test_registers_only_valid_events_and_keeps_litellm_callbacks_unchanged(
+        self, monkeypatch
+    ) -> None:
+        tracer = RecordingTracer()
         hooks = HookSystem()
-        result = register(hooks)
+        sentinel_success = ["existing-success"]
+        sentinel_failure = ["existing-failure"]
+        sentinel_callbacks = ["existing-callback"]
+        monkeypatch.setattr(litellm, "success_callback", sentinel_success)
+        monkeypatch.setattr(litellm, "failure_callback", sentinel_failure)
+        monkeypatch.setattr(litellm, "callbacks", sentinel_callbacks, raising=False)
+
+        result = plugin.register(hooks, config=_config(), tracer=tracer)
+
         assert result is True
-        # 6 个核心事件已注册
-        events_with_handlers = [
-            e for e, callbacks in hooks._handlers.items() if callbacks
-        ]
-        assert len(events_with_handlers) == 8
+        assert set(event for event, handlers in hooks._handlers.items() if handlers) == {
+            "agent_before",
+            "turn_before",
+            "tool_before",
+            "tool_after",
+            "turn_after",
+            "agent_after",
+        }
+        assert litellm.success_callback is sentinel_success
+        assert litellm.failure_callback is sentinel_failure
+        assert litellm.callbacks is sentinel_callbacks
 
-    def test_register_returns_false_when_no_langfuse(self) -> None:
-        """langfuse 包缺失时返回 False."""
+        hooks.trigger("agent_before", {"task": "inspect"})
+        hooks.trigger("tool_before", {"tool_name": "file_read", "args": {}})
+        hooks.trigger("tool_after", {"tool_name": "file_read", "result": "ok"})
+        hooks.trigger("agent_after", {"turns": 1})
+        assert len(tracer.agent_contexts) == 2
+        assert len(tracer.tool_contexts) == 2
+
+    def test_register_is_idempotent_for_same_tracer(self) -> None:
+        tracer = RecordingTracer()
         hooks = HookSystem()
-        # _get_langfuse 默认返回 None（未安装时）
-        result = register(hooks)
-        assert result is False
 
-    def test_register_returns_false_when_no_config(self, monkeypatch) -> None:
-        """无配置时返回 False."""
-        mock_langfuse = type("Langfuse", (), {})
-        monkeypatch.setattr(
-            "zero_agent.plugins.langfuse_tracing._get_langfuse",
-            lambda: mock_langfuse,
+        assert plugin.register(hooks, config=_config(), tracer=tracer) is True
+        assert plugin.register(hooks, config=_config(), tracer=tracer) is True
+
+        assert {
+            event: len(callbacks)
+            for event, callbacks in hooks._handlers.items()
+            if callbacks
+        } == {
+            "agent_before": 1,
+            "turn_before": 1,
+            "tool_before": 1,
+            "tool_after": 1,
+            "turn_after": 1,
+            "agent_after": 1,
+        }
+
+    def test_finish_agent_closes_pending_tools_and_sanitizes_terminal(self, monkeypatch) -> None:
+        FakeLangfuse.instances.clear()
+        monkeypatch.setattr(plugin, "_get_langfuse", lambda: FakeLangfuse)
+        tracer = plugin.LangfuseTracer.from_config(_config())
+
+        tracer.start_agent({"task": "inspect"})
+        tool = tracer.start_tool({"tool_name": "file_read", "args": {}})
+        terminal = SimpleNamespace(
+            status="failed",
+            reason="tool_error",
+            text="sensitive response",
+            data={"secret": "sensitive"},
         )
-        monkeypatch.setattr(
-            "zero_agent.plugins.langfuse_tracing._get_config",
-            lambda: None,
-        )
+        tracer.finish_agent({"turns": 1, "terminal": terminal})
+
+        client = FakeLangfuse.instances[0]
+        agent, recorded_tool = client.observations
+        assert recorded_tool.ended is True
+        assert recorded_tool.updates[-1]["level"] == "ERROR"
+        assert agent.updates[-1]["output"] == {
+            "turns": 1,
+            "status": "failed",
+            "reason": "tool_error",
+        }
+        assert "sensitive response" not in str(agent.updates[-1])
+        assert tool is recorded_tool
+
+    def test_missing_sdk_or_client_failure_is_noop(self, monkeypatch) -> None:
+        monkeypatch.setattr(plugin, "_get_langfuse", lambda: None)
+        tracer = plugin.LangfuseTracer.from_config(_config())
+        tracer.start_agent({"task": "inspect"})
+        tracer.finish_agent({"turns": 1})
+        tracer.flush()
+
+        class BrokenLangfuse:
+            def __init__(self, **kwargs):
+                raise RuntimeError("client unavailable")
+
+        monkeypatch.setattr(plugin, "_get_langfuse", lambda: BrokenLangfuse)
+        tracer = plugin.LangfuseTracer.from_config(_config())
+        tracer.start_agent({"task": "inspect"})
+        tracer.finish_agent({"turns": 1})
+
+    def test_register_returns_false_without_langfuse_or_config(self, monkeypatch) -> None:
         hooks = HookSystem()
-        result = register(hooks)
-        assert result is False
+        monkeypatch.setattr(plugin, "_get_langfuse", lambda: None)
+        assert plugin.register(hooks) is False
 
-    def test_get_langfuse_returns_none_when_not_installed(self) -> None:
-        """langfuse 未安装时 _get_langfuse 返回 None."""
-        # 正常情况下 langfuse 未安装
-        lf = _get_langfuse()
-        # 可能返回 None 或 Langfuse 类（如果已安装）
-        # 不抛异常即可
-        assert lf is None or callable(lf)
+        monkeypatch.setattr(plugin, "_get_langfuse", lambda: FakeLangfuse)
+        monkeypatch.setattr(plugin, "_get_config", lambda *args: None)
+        assert plugin.register(hooks) is False
 
-    def test_get_config_uses_env_vars(self, monkeypatch) -> None:
-        """_get_config 从环境变量读取配置."""
-        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
-        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    def test_environment_fallback_without_explicit_config(self, monkeypatch) -> None:
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-env")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-env")
         monkeypatch.delenv("LANGFUSE_HOST", raising=False)
-        cfg = _get_config()
-        if cfg is not None:
-            assert cfg["public_key"] == "pk-test"
-            assert cfg["secret_key"] == "sk-test"
 
-    def test_hook_callbacks_do_not_crash_without_client(self) -> None:
-        """未初始化客户端时回调不崩溃."""
-        from zero_agent.plugins.langfuse_tracing import (
-            _on_agent_before,
-            _on_agent_after,
-            _on_llm_before,
-            _on_llm_after,
-            _on_tool_before,
-            _on_tool_after,
-        )
-        # 清理线程状态
-        import threading
-        _local = threading.local()
-        import zero_agent.plugins.langfuse_tracing as p
-        p._local = _local
+        config = plugin._get_config()
 
-        _on_agent_before({"task": "test"})
-        _on_llm_before({"model": "test"})
-        _on_llm_after({"usage": {}})
-        _on_tool_before({"tool_name": "file_read"})
-        _on_tool_after({"tool_name": "file_read", "result": "ok"})
-        _on_agent_after({"turns": 1})
-        # 不抛异常
+        assert config is not None
+        assert config["public_key"] == "pk-env"
+        assert config["secret_key"] == "sk-env"
