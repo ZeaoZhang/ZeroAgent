@@ -36,6 +36,27 @@ def test_create_all_sessions_accepts_text_protocol_backup_in_failover() -> None:
     assert sessions["backup"] is primary.backups[0]
 
 
+def test_tracer_is_shared_by_native_text_and_failover_sessions() -> None:
+    config = AgentConfig(
+        llm_backends={
+            "primary": _backend("primary"),
+            "backup": _backend("backup", tool_protocol="text"),
+        },
+        default_backend="primary",
+        failover_backends=["backup"],
+    )
+    tracer = object()
+
+    sessions = LLMFactory.create_all_sessions(config, tracer=tracer)
+
+    primary = sessions["primary"]
+    backup = sessions["backup"]
+    assert isinstance(primary, AutoFailoverSession)
+    assert isinstance(backup, TextToolSession)
+    assert primary.primary._tracer is tracer
+    assert backup.backend._tracer is tracer
+    assert primary.backups[0].backend._tracer is tracer
+
 
 def test_factory_rejects_invalid_default_before_constructing_sessions(monkeypatch) -> None:
     config = AgentConfig(llm_backends={"defined": _backend("defined")}, default_backend="missing")

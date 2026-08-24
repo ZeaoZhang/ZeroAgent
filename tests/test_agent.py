@@ -60,6 +60,98 @@ class TestZeroAgentBackends:
         assert "backend_a" in agent._sessions
         assert "backend_b" in agent._sessions
 
+    def test_all_sessions_share_the_configured_langfuse_tracer(
+        self,
+        multi_backend_config: AgentConfig,
+        monkeypatch,
+    ) -> None:
+        class FakeTracer:
+            enabled = True
+
+            def __init__(self) -> None:
+                self.reconfigured = []
+
+            def reconfigure(self, config) -> None:
+                self.reconfigured.append(config)
+
+        tracer = FakeTracer()
+        monkeypatch.setattr(
+            "zero_agent.plugins.langfuse_tracing.LangfuseTracer.from_config",
+            lambda config: tracer,
+        )
+        monkeypatch.setattr(
+            "zero_agent.plugins.langfuse_tracing.register",
+            lambda hooks, **kwargs: True,
+        )
+        from zero_agent.llm.factory import LLMFactory
+
+        original_create_all = LLMFactory.create_all_sessions
+        captured = []
+
+        def create_all(config, **kwargs):
+            captured.append(kwargs["tracer"])
+            return original_create_all(config, **kwargs)
+
+        monkeypatch.setattr(
+            "zero_agent.core.agent.LLMFactory.create_all_sessions",
+            create_all,
+        )
+
+        agent = ZeroAgent(config=multi_backend_config)
+
+        assert captured == [tracer]
+        assert all(
+            getattr(session, "_tracer", None) is tracer
+            for session in agent._sessions.values()
+        )
+
+
+    def test_config_reload_reconfigures_existing_langfuse_tracer(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        config_path = tmp_path / "config.yaml"
+        _write_reload_config(config_path, workspace=tmp_path / "workspace", model="model-a")
+        config = AgentConfig.from_yaml(config_path)
+
+        class FakeTracer:
+            enabled = True
+
+            def __init__(self) -> None:
+                self.reconfigured = []
+
+            def reconfigure(self, new_config) -> None:
+                self.reconfigured.append(new_config)
+
+        tracer = FakeTracer()
+        monkeypatch.setattr(
+            "zero_agent.plugins.langfuse_tracing.LangfuseTracer.from_config",
+            lambda current: tracer,
+        )
+        monkeypatch.setattr(
+            "zero_agent.plugins.langfuse_tracing.register",
+            lambda hooks, **kwargs: True,
+        )
+        monkeypatch.setattr(
+            "zero_agent.core.agent.LLMFactory.create_all_sessions",
+            lambda current, **kwargs: {
+                "primary": _ReloadClient(current.llm_backends["primary"]),
+            },
+        )
+        agent = ZeroAgent(config=config)
+        baseline = _config_mtime[str(config_path)]
+
+        _write_reload_config(
+            config_path,
+            workspace=tmp_path / "workspace",
+            model="model-b",
+        )
+        _bump_mtime(config_path, baseline)
+
+        assert agent.reload_config() is True
+        assert tracer.reconfigured == [agent.config]
+
     def test_list_backends(self, multi_backend_config: AgentConfig) -> None:
         """list_backends 返回正确的后端列表."""
         agent = ZeroAgent(config=multi_backend_config)
@@ -173,6 +265,87 @@ class TestZeroAgentBackends:
 
 class TestZeroAgentConfigReload:
     """Atomic hot reload and task-boundary runtime config tests."""
+
+    def test_reload_enabling_langfuse_wires_sessions_and_hooks(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        import zero_agent.plugins.langfuse_tracing as langfuse_plugin
+
+        config_path = tmp_path / "config.yaml"
+        _write_reload_config(config_path, workspace=tmp_path / "workspace")
+        config = AgentConfig.from_yaml(config_path)
+
+        class FakeTracer:
+            enabled = False
+
+            def __init__(self) -> None:
+                self.reconfigured = []
+
+            def reconfigure(self, new_config) -> None:
+                self.reconfigured.append(new_config)
+                self.enabled = bool(new_config.langfuse)
+
+            def start_agent(self, context) -> None:
+                pass
+
+            def finish_agent(self, context) -> None:
+                pass
+
+            def start_turn_metadata(self, context) -> None:
+                pass
+
+            def finish_turn_metadata(self, context) -> None:
+                pass
+
+            def start_tool(self, context):
+                return None
+
+            def finish_tool(self, observation, context) -> None:
+                pass
+
+        tracer = FakeTracer()
+        register_results = []
+        original_register = langfuse_plugin.register
+
+        def register(hooks, **kwargs):
+            result = original_register(hooks, **kwargs)
+            register_results.append(result)
+            return result
+
+        monkeypatch.setattr(
+            "zero_agent.plugins.langfuse_tracing.LangfuseTracer.from_config",
+            lambda current: tracer,
+        )
+        monkeypatch.setattr("zero_agent.plugins.langfuse_tracing.register", register)
+        factory_tracers = []
+        monkeypatch.setattr(
+            "zero_agent.core.agent.LLMFactory.create_all_sessions",
+            lambda current, **kwargs: (
+                factory_tracers.append(kwargs.get("tracer"))
+                or {"primary": _ReloadClient(current.llm_backends["primary"])}
+            ),
+        )
+
+        agent = ZeroAgent(config=config)
+        baseline = _config_mtime[str(config_path)]
+
+        config_path.write_text(
+            config_path.read_text(encoding="utf-8")
+            + "\nlangfuse:\n"
+            + "  public_key: pk-reload\n"
+            + "  secret_key: sk-reload\n"
+            + "  host: https://us.cloud.langfuse.com\n",
+            encoding="utf-8",
+        )
+        _bump_mtime(config_path, baseline)
+
+        assert agent.reload_config() is True
+        assert factory_tracers == [None, tracer]
+        assert tracer.reconfigured == [agent.config]
+        assert register_results == [False, True]
+        assert getattr(tracer, "_hook_handlers", None) is not None
 
     def test_invalid_yaml_and_factory_failure_roll_back_all_state(
         self,

@@ -232,6 +232,39 @@ class TestLangfusePlugin:
         assert "sensitive response" not in str(agent.updates[-1])
         assert tool is recorded_tool
 
+    def test_reconfigure_disable_applies_after_active_agent(self, monkeypatch) -> None:
+        FakeLangfuse.instances.clear()
+        monkeypatch.setattr(plugin, "_get_langfuse", lambda: FakeLangfuse)
+        tracer = plugin.LangfuseTracer.from_config(_config())
+
+        tracer.start_agent({"task": "inspect"})
+        tracer.reconfigure(SimpleNamespace(langfuse=None))
+
+        assert tracer.enabled is True
+        tracer.finish_agent({"turns": 1})
+        assert tracer.enabled is False
+
+    def test_latest_pending_reconfigure_wins(self, monkeypatch) -> None:
+        FakeLangfuse.instances.clear()
+        monkeypatch.setattr(plugin, "_get_langfuse", lambda: FakeLangfuse)
+        tracer = plugin.LangfuseTracer.from_config(_config())
+        tracer.start_agent({"task": "inspect"})
+
+        tracer.reconfigure(
+            SimpleNamespace(
+                langfuse={
+                    "public_key": "pk-next",
+                    "secret_key": "sk-next",
+                    "host": "https://us.cloud.langfuse.com",
+                }
+            )
+        )
+        tracer.reconfigure(_config())
+        tracer.finish_agent({"turns": 1})
+
+        assert tracer.enabled is True
+        assert len(FakeLangfuse.instances) == 1
+
     def test_missing_sdk_or_client_failure_is_noop(self, monkeypatch) -> None:
         monkeypatch.setattr(plugin, "_get_langfuse", lambda: None)
         tracer = plugin.LangfuseTracer.from_config(_config())

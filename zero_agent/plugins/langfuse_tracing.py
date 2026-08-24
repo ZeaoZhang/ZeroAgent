@@ -137,13 +137,18 @@ class LangfuseTracer:
             f"langfuse_tools_{id(self)}", default={}
         )
         self._pending_config: Optional[dict[str, str]] = None
+        self._pending_config_set = False
         self._hook_handlers: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_config(cls, config: Optional[Any] = None) -> "LangfuseTracer":
         """Build an enabled tracer or a no-op tracer from configuration."""
-        normalized = _get_config(config)
-        client_type = _get_langfuse()
+        try:
+            normalized = _get_config(config)
+            client_type = _get_langfuse()
+        except Exception:
+            _logger.warning("Langfuse configuration discovery failed", exc_info=True)
+            return cls()
         if normalized is None or client_type is None:
             return cls()
         try:
@@ -235,11 +240,12 @@ class LangfuseTracer:
         if token is not None:
             self._active_agent.reset(token)
             self._agent_token.set(None)
-        self.flush()
-        if self._pending_config is not None:
+        if self._pending_config_set:
             pending = self._pending_config
             self._pending_config = None
-            self._replace_client(pending)
+            self._pending_config_set = False
+            if pending != self._config:
+                self._replace_client(pending)
 
     def start_turn_metadata(self, context: dict) -> None:
         """Reserve the turn hook for future metadata without creating extra spans."""
@@ -373,10 +379,13 @@ class LangfuseTracer:
     def reconfigure(self, config: Optional[Any]) -> None:
         """Apply new config after the current Agent observation completes."""
         normalized = _get_config(config)
-        if normalized == self._config:
-            return
         if self._active_agent.get() is not None:
             self._pending_config = normalized
+            self._pending_config_set = True
+            return
+        if normalized == self._config:
+            self._pending_config = None
+            self._pending_config_set = False
             return
         self._replace_client(normalized)
 
@@ -439,9 +448,9 @@ def register(
     config: Optional[Any] = None,
     tracer: Optional[LangfuseTracer] = None,
 ) -> bool:
-    """Register Langfuse lifecycle hooks when a real client is configured."""
+    """Register Langfuse lifecycle hooks when tracing is configured."""
     active_tracer = tracer or LangfuseTracer.from_config(config)
-    if not active_tracer.enabled:
+    if not active_tracer.enabled and not getattr(active_tracer, "_pending_config_set", False):
         return False
     for event, callback in _handler_map(active_tracer).items():
         if not hook_system.has(event, callback):

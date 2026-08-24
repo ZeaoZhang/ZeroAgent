@@ -32,10 +32,24 @@ from zero_agent.tools.registry import ToolRegistry
 
 class _LLMFactoryProxy:
     """Lazy proxy so CLI config is loaded before importing LiteLLM."""
-    def create_all_sessions(self, config: AgentConfig, session_log_path: str | None = None):
+
+    def create_all_sessions(
+        self,
+        config: AgentConfig,
+        session_log_path: str | None = None,
+        *,
+        tracer: Any | None = None,
+    ):
         from zero_agent.llm.factory import LLMFactory as RealLLMFactory
 
-        return RealLLMFactory.create_all_sessions(config, session_log_path=session_log_path)
+        kwargs: dict[str, Any] = {}
+        if tracer is not None:
+            kwargs["tracer"] = tracer
+        return RealLLMFactory.create_all_sessions(
+            config,
+            session_log_path=session_log_path,
+            **kwargs,
+        )
 
 
 LLMFactory = _LLMFactoryProxy()
@@ -246,18 +260,29 @@ class ZeroAgent:
         self._session_log_path = session_log_path
         self._response_log_retired = False
         self.hooks = hooks or HookSystem()
-        self._register_builtin_plugins()
+        from zero_agent.plugins.langfuse_tracing import LangfuseTracer
+
+        try:
+            self._langfuse_tracer = LangfuseTracer.from_config(self.config)
+        except Exception:
+            self._langfuse_tracer = LangfuseTracer()
+        self._register_builtin_plugins(self._langfuse_tracer)
 
         # 1. 工具注册中心
         self.registry = registry or ToolRegistry.with_builtins(self.config)
 
-        self._sessions = (
-            LLMFactory.create_all_sessions(
-                self.config,
-                session_log_path=self._session_log_path,
-            )
-            if self._session_log_path is not None
-            else LLMFactory.create_all_sessions(self.config)
+        session_kwargs: dict[str, Any] = {}
+        if self._session_log_path is not None:
+            session_kwargs["session_log_path"] = self._session_log_path
+        if getattr(self._langfuse_tracer, "enabled", False) or getattr(
+            self.config,
+            "langfuse",
+            None,
+        ):
+            session_kwargs["tracer"] = self._langfuse_tracer
+        self._sessions = LLMFactory.create_all_sessions(
+            self.config,
+            **session_kwargs,
         )
         default_name = self.config.default_backend
         self.client = self._sessions.get(default_name)
@@ -342,13 +367,18 @@ class ZeroAgent:
         old_active_name = self._get_active_backend_name()
 
         try:
-            new_sessions = (
-                LLMFactory.create_all_sessions(
-                    new_config,
-                    session_log_path=self._session_log_path,
-                )
-                if self._session_log_path is not None
-                else LLMFactory.create_all_sessions(new_config)
+            session_kwargs: dict[str, Any] = {}
+            if self._session_log_path is not None:
+                session_kwargs["session_log_path"] = self._session_log_path
+            if getattr(self._langfuse_tracer, "enabled", False) or getattr(
+                new_config,
+                "langfuse",
+                None,
+            ):
+                session_kwargs["tracer"] = self._langfuse_tracer
+            new_sessions = LLMFactory.create_all_sessions(
+                new_config,
+                **session_kwargs,
             )
             if self._response_log_retired:
                 for session in new_sessions.values():
@@ -402,6 +432,17 @@ class ZeroAgent:
             self._config_path,
             mtime=getattr(new_config, "_source_mtime_ns", None),
         )
+
+        try:
+            self._langfuse_tracer.reconfigure(new_config)
+            self._register_builtin_plugins(self._langfuse_tracer)
+        except Exception:
+            import logging
+
+            logging.getLogger("zero_agent").warning(
+                "reload_config: Langfuse reconfiguration failed",
+                exc_info=True,
+            )
 
         import logging
         logging.getLogger("zero_agent").info(
@@ -697,11 +738,12 @@ class ZeroAgent:
         if self.handler is not None:
             self.handler.client = self.client
 
-    def _register_builtin_plugins(self) -> None:
+    def _register_builtin_plugins(self, tracer: Any = None) -> None:
         """注册内置插件；缺依赖或缺配置时静默跳过."""
         try:
             from zero_agent.plugins.langfuse_tracing import register
-            register(self.hooks, config=self.config)
+
+            register(self.hooks, config=self.config, tracer=tracer)
         except Exception:
             pass
         try:
