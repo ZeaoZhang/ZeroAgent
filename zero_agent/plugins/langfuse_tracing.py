@@ -1,261 +1,449 @@
-"""LangFuse 追踪插件 — 通过钩子系统记录 agent 全生命周期.
-
-自动激活: 若 keychain 中包含 langfuse_config，import 时自动注册钩子。
-Span 层级: Agent Trace → LLM Generation → Tool Span.
-
-缺失 langfuse 包或配置时静默跳过，不影响 agent 正常运行。
-"""
+"""Optional Langfuse tracing for Agent, tool, and LLM lifecycles."""
 
 from __future__ import annotations
 
+import json
+import logging
 import os
-import threading
-import time
+from contextvars import ContextVar
 from typing import Any, Dict, Optional
-
-import litellm
 
 from zero_agent.core.hooks import (
     EVENT_AGENT_AFTER,
     EVENT_AGENT_BEFORE,
-    EVENT_LLM_AFTER,
-    EVENT_LLM_BEFORE,
     EVENT_TOOL_AFTER,
     EVENT_TOOL_BEFORE,
     EVENT_TURN_AFTER,
     EVENT_TURN_BEFORE,
 )
 
-# 线程本地状态，隔离并发 session
-_local = threading.local()
+
+_logger = logging.getLogger("zero_agent.plugins.langfuse")
 
 
-def _get_langfuse():
-    """延迟导入 langfuse，缺失时返回 None."""
+def _get_langfuse() -> Any:
+    """Return the Langfuse client class when the optional package is installed."""
     try:
         from langfuse import Langfuse
-        return Langfuse
     except ImportError:
         return None
+    return Langfuse
 
 
-def _get_config(config: Optional[Any] = None) -> Optional[dict]:
-    """从 config 或 keychain 读取 langfuse_config. 失败返回 None.
+def _normalize_config(value: Any) -> Optional[dict[str, str]]:
+    """Normalize a Langfuse mapping without exposing credentials."""
+    if not isinstance(value, dict):
+        return None
+    public_key = value.get("public_key") or value.get("LANGFUSE_PUBLIC_KEY")
+    secret_key = value.get("secret_key") or value.get("LANGFUSE_SECRET_KEY")
+    host = (
+        value.get("host")
+        or value.get("base_url")
+        or value.get("LANGFUSE_HOST")
+        or value.get("LANGFUSE_BASE_URL")
+        or "https://cloud.langfuse.com"
+    )
+    if not isinstance(public_key, str) or not public_key.strip():
+        return None
+    if not isinstance(secret_key, str) or not secret_key.strip():
+        return None
+    if not isinstance(host, str) or not host.strip():
+        return None
+    return {
+        "public_key": public_key,
+        "secret_key": secret_key,
+        "host": host,
+    }
 
-    Args:
-        config: AgentConfig 实例，优先从此读取 langfuse 配置段.
-    """
-    # 1. 优先从 AgentConfig.langfuse 读取
+
+def _get_config(config: Optional[Any] = None) -> Optional[dict[str, str]]:
+    """Read Langfuse settings, preferring an explicitly supplied AgentConfig."""
     if config is not None:
-        lf = getattr(config, "langfuse", None)
-        if isinstance(lf, dict):
-            pk = lf.get("public_key") or lf.get("LANGFUSE_PUBLIC_KEY")
-            sk = lf.get("secret_key") or lf.get("LANGFUSE_SECRET_KEY")
-            host = lf.get("host") or lf.get("LANGFUSE_HOST") or "https://cloud.langfuse.com"
-            if pk and sk:
-                return {"public_key": pk, "secret_key": sk, "host": host}
+        return _normalize_config(getattr(config, "langfuse", None))
 
-    # 2. 从 keychain 读取
     try:
         from zero_agent.utils.keychain import Keychain
-        kc = Keychain()
-        cfg = kc.langfuse_config
-        if hasattr(cfg, "use"):
-            import json
-            return json.loads(cfg.use())
-        return None
-    except Exception:
-        pass
 
-    # 3. fallback: 环境变量
-    pk = os.environ.get("LANGFUSE_PUBLIC_KEY")
-    sk = os.environ.get("LANGFUSE_SECRET_KEY")
-    host = os.environ.get("LANGFUSE_HOST") or os.environ.get("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
-    if pk and sk:
-        return {
-            "public_key": pk,
-            "secret_key": sk,
-            "host": host,
+        stored = Keychain().langfuse_config
+        if hasattr(stored, "use"):
+            parsed = json.loads(stored.use())
+            normalized = _normalize_config(parsed)
+            if normalized is not None:
+                return normalized
+    except Exception:
+        _logger.debug("Unable to read Langfuse settings from keychain", exc_info=True)
+
+    return _normalize_config(
+        {
+            "public_key": os.environ.get("LANGFUSE_PUBLIC_KEY"),
+            "secret_key": os.environ.get("LANGFUSE_SECRET_KEY"),
+            "host": os.environ.get("LANGFUSE_HOST")
+            or os.environ.get("LANGFUSE_BASE_URL"),
         }
-    return None
-
-
-def _ensure_client(config: Optional[Any] = None) -> Optional[Any]:
-    """获取或创建线程本地的 Langfuse 客户端.
-
-    Args:
-        config: AgentConfig 实例，优先从此读取 langfuse 配置段.
-    """
-    if hasattr(_local, "client"):
-        return _local.client
-
-    Langfuse = _get_langfuse()
-    if Langfuse is None:
-        return None
-
-    cfg = _get_config(config)
-    if cfg is None:
-        return None
-
-    _local.client = Langfuse(
-        public_key=cfg.get("public_key", ""),
-        secret_key=cfg.get("secret_key", ""),
-        host=cfg.get("host", "https://cloud.langfuse.com"),
-    )
-    return _local.client
-
-
-# ---- 钩子回调 ----
-
-def _on_agent_before(ctx: dict) -> None:
-    """agent 启动时创建 Trace."""
-    cfg = ctx.get("_langfuse_config")
-    client = _ensure_client(cfg)
-    if client is None:
-        return
-    task = ctx.get("task", "unknown")
-    _local.trace = client.trace(
-        name="zero-agent-task",
-        input=task[:500],
-    )
-    _local.trace_id = _local.trace.id
-    _local.gen_spans = []
-    _local.start_time = time.time()
-
-
-def _on_turn_before(ctx: dict) -> None:
-    """每轮开始时记录."""
-    pass
-
-
-def _on_llm_before(ctx: dict) -> None:
-    """LLM 调用前创建 Generation span."""
-    if not hasattr(_local, "trace"):
-        return
-    model = ctx.get("model", "unknown")
-    span = _local.trace.span(
-        name="llm-call",
-        input={"model": model, "turn": ctx.get("turn", 0)},
-    )
-    span._start_time = time.time()
-    _local._current_llm_span = span
-
-
-def _on_llm_after(ctx: dict) -> None:
-    """LLM 调用后结束 Generation span."""
-    span = getattr(_local, "_current_llm_span", None)
-    if span is None:
-        return
-    usage = ctx.get("usage", {})
-    span.end(
-        output={
-            "stop_reason": ctx.get("stop_reason", ""),
-            "tool_calls": len(ctx.get("tool_calls", [])),
-        },
-        usage={
-            "input": usage.get("input_tokens", 0),
-            "output": usage.get("output_tokens", 0),
-        },
-    )
-    _local._current_llm_span = None
-
-
-def _on_tool_before(ctx: dict) -> None:
-    """工具调用前创建 Tool span."""
-    if not hasattr(_local, "trace"):
-        return
-    tool_name = ctx.get("tool_name", "unknown")
-    span = _local.trace.span(
-        name=f"tool:{tool_name}",
-        input={"args": str(ctx.get("args", {}))[:500]},
-    )
-    span._start_time = time.time()
-    if not hasattr(_local, "_current_tool_spans"):
-        _local._current_tool_spans = {}
-    _local._current_tool_spans[tool_name] = span
-
-
-def _on_tool_after(ctx: dict) -> None:
-    """工具调用后结束 Tool span."""
-    spans = getattr(_local, "_current_tool_spans", {})
-    tool_name = ctx.get("tool_name", "unknown")
-    span = spans.pop(tool_name, None)
-    if span is None:
-        return
-    result = ctx.get("result", "")
-    span.end(
-        output=str(result)[:500],
     )
 
 
-def _on_turn_after(ctx: dict) -> None:
-    """每轮结束."""
-    pass
-
-
-def _on_agent_after(ctx: dict) -> None:
-    """agent 结束时 flush trace."""
-    if hasattr(_local, "trace"):
-        duration = time.time() - getattr(_local, "start_time", time.time())
-        _local.trace.update(
-            output={"turns": ctx.get("turns", 0), "duration_s": duration}
-        )
-        if hasattr(_local, "client") and hasattr(_local.client, "flush"):
-            _local.client.flush()
-    # 清理线程状态
-    for attr in (
-        "trace", "trace_id", "gen_spans", "start_time",
-        "_current_llm_span", "_current_tool_spans", "client",
-    ):
-        if hasattr(_local, attr):
-            delattr(_local, attr)
-
-
-# 钩子 → 回调映射
-_HANDLERS = {
-    EVENT_AGENT_BEFORE: _on_agent_before,
-    EVENT_TURN_BEFORE: _on_turn_before,
-    EVENT_LLM_BEFORE: _on_llm_before,
-    EVENT_LLM_AFTER: _on_llm_after,
-    EVENT_TOOL_BEFORE: _on_tool_before,
-    EVENT_TOOL_AFTER: _on_tool_after,
-    EVENT_TURN_AFTER: _on_turn_after,
-    EVENT_AGENT_AFTER: _on_agent_after,
-}
-
-
-def register(hook_system: Any, config: Optional[Any] = None) -> bool:
-    """在 HookSystem 上注册所有 LangFuse 回调.
-
-    仅当 langfuse 包可用且配置存在时才注册。
-    注册失败时静默跳过，不影响 agent 正常运行。
-
-    同时激活 litellm 内置 Langfuse 回调（litellm.success_callback），
-    与自定义钩子共存：litellm 回调追踪 token/span，自定义钩子追踪 agent 生命周期。
-
-    Args:
-        hook_system: HookSystem 实例.
-        config: AgentConfig 实例，优先从此读取 langfuse 配置段.
-
-    Returns:
-        True 如果注册成功，False 如果跳过.
-    """
-    if _get_langfuse() is None:
-        return False
-    if _get_config(config) is None:
-        return False
-
-    # 将 config 注入钩子上下文，供 _on_agent_before 使用
-    if config is not None:
-        hook_system.register("_langfuse_config", config)
-
-    for event, callback in _HANDLERS.items():
-        hook_system.register(event, callback)
-
-    # 激活 litellm 内置 Langfuse 回调（自动 token 追踪 + span 嵌套）
+def _usage_details(usage: Any) -> dict[str, int]:
+    """Map ZeroAgent's canonical usage fields to Langfuse fields."""
     try:
-        litellm.success_callback = ["langfuse"]
-    except Exception:
-        pass
+        from zero_agent.llm.base import extract_usage_metrics
 
+        metrics = extract_usage_metrics(usage)
+    except Exception:
+        metrics = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+        }
+    if isinstance(usage, dict):
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_creation_tokens",
+        ):
+            if key in usage:
+                try:
+                    metrics[key] = max(int(usage[key]), 0)
+                except (TypeError, ValueError, OverflowError):
+                    pass
+
+    details = {
+        "prompt_tokens": metrics["input_tokens"],
+        "completion_tokens": metrics["output_tokens"],
+        "total_tokens": metrics["input_tokens"] + metrics["output_tokens"],
+    }
+    if metrics["cache_read_tokens"]:
+        details["input_cached"] = metrics["cache_read_tokens"]
+    if metrics["cache_creation_tokens"]:
+        details["input_cache_creation"] = metrics["cache_creation_tokens"]
+    return details
+
+
+class LangfuseTracer:
+    """Best-effort Langfuse 4.x observation manager."""
+
+    def __init__(self, client: Any = None, config: Optional[dict[str, str]] = None) -> None:
+        self._client = client
+        self._config = config
+        self._active_agent: ContextVar[Any] = ContextVar(
+            f"langfuse_agent_{id(self)}", default=None
+        )
+        self._agent_token: ContextVar[Any] = ContextVar(
+            f"langfuse_agent_token_{id(self)}", default=None
+        )
+        self._active_tools: ContextVar[dict[str, list[Any]]] = ContextVar(
+            f"langfuse_tools_{id(self)}", default={}
+        )
+        self._pending_config: Optional[dict[str, str]] = None
+        self._hook_handlers: Optional[Dict[str, Any]] = None
+
+    @classmethod
+    def from_config(cls, config: Optional[Any] = None) -> "LangfuseTracer":
+        """Build an enabled tracer or a no-op tracer from configuration."""
+        normalized = _get_config(config)
+        client_type = _get_langfuse()
+        if normalized is None or client_type is None:
+            return cls()
+        try:
+            client = client_type(
+                public_key=normalized["public_key"],
+                secret_key=normalized["secret_key"],
+                host=normalized["host"],
+            )
+        except Exception:
+            _logger.warning("Langfuse client initialization failed", exc_info=True)
+            return cls()
+        return cls(client, normalized)
+
+    @property
+    def enabled(self) -> bool:
+        """Whether this tracer has an active Langfuse client."""
+        return self._client is not None
+
+    def _start_observation(self, **kwargs: Any) -> Any:
+        if self._client is None:
+            return None
+        try:
+            return self._client.start_observation(**kwargs)
+        except Exception:
+            _logger.warning("Langfuse observation creation failed", exc_info=True)
+            return None
+
+    @staticmethod
+    def _update(observation: Any, **kwargs: Any) -> None:
+        if observation is None:
+            return
+        try:
+            observation.update(**kwargs)
+        except Exception:
+            _logger.warning("Langfuse observation update failed", exc_info=True)
+
+    @staticmethod
+    def _end(observation: Any) -> None:
+        if observation is None:
+            return
+        try:
+            observation.end()
+        except Exception:
+            _logger.warning("Langfuse observation end failed", exc_info=True)
+
+    def start_agent(self, context: dict) -> None:
+        """Start the root Agent observation for the current execution context."""
+        if not self.enabled:
+            return
+        observation = self._start_observation(
+            name="zero-agent-task",
+            as_type="agent",
+            input=str(context.get("task") or context.get("user_input") or "")[:500],
+            metadata={"model": context.get("model", "unknown")},
+        )
+        if observation is None:
+            return
+        token = self._active_agent.set(observation)
+        self._agent_token.set(token)
+
+    def finish_agent(self, context: dict) -> None:
+        """Finish the root Agent observation and flush completed data."""
+        for stack in self._active_tools.get().values():
+            for tool_observation in reversed(stack):
+                if tool_observation is not None:
+                    self._update(
+                        tool_observation,
+                        level="ERROR",
+                        status_message="tool observation closed with agent",
+                    )
+                    self._end(tool_observation)
+        self._active_tools.set({})
+
+        observation = self._active_agent.get()
+        if observation is not None:
+            terminal = context.get("terminal")
+            status = getattr(terminal, "status", "")
+            reason = getattr(terminal, "reason", "")
+            self._update(
+                observation,
+                output={
+                    "turns": context.get("turns", 0),
+                    "status": str(getattr(status, "value", status)),
+                    "reason": str(getattr(reason, "value", reason)),
+                },
+            )
+            self._end(observation)
+        token = self._agent_token.get()
+        if token is not None:
+            self._active_agent.reset(token)
+            self._agent_token.set(None)
+        self.flush()
+        if self._pending_config is not None:
+            pending = self._pending_config
+            self._pending_config = None
+            self._replace_client(pending)
+
+    def start_turn_metadata(self, context: dict) -> None:
+        """Reserve the turn hook for future metadata without creating extra spans."""
+
+    def finish_turn_metadata(self, context: dict) -> None:
+        """Reserve the turn hook for future metadata without creating extra spans."""
+
+    def start_tool(self, context: dict) -> Any:
+        """Start a child Tool observation under the active Agent."""
+        parent = self._active_agent.get()
+        if not self.enabled or parent is None:
+            return None
+        tool_name = str(context.get("tool_name") or "unknown")
+        observation = self._start_observation(
+            trace_context=self._trace_context(parent),
+            name=f"tool:{tool_name}",
+            as_type="tool",
+            input={"args": str(context.get("args", {}))[:500]},
+        )
+        key = str(context.get("id") or tool_name)
+        stacks = {
+            stack_key: list(stack)
+            for stack_key, stack in self._active_tools.get().items()
+        }
+        stacks.setdefault(key, []).append(observation)
+        self._active_tools.set(stacks)
+        return observation
+
+    def finish_tool(self, observation: Any, context: dict) -> None:
+        """Finish a child Tool observation."""
+        if observation is not None:
+            self._update(observation, output=str(context.get("result", ""))[:500])
+            self._end(observation)
+        key = str(context.get("id") or context.get("tool_name") or "unknown")
+        stacks = {
+            stack_key: list(stack)
+            for stack_key, stack in self._active_tools.get().items()
+        }
+        stack = stacks.get(key)
+        if stack:
+            stack.pop()
+            if not stack:
+                stacks.pop(key, None)
+            self._active_tools.set(stacks)
+
+    @staticmethod
+    def _trace_context(parent: Any) -> Any:
+        values = {
+            "trace_id": getattr(parent, "trace_id", ""),
+            "parent_span_id": getattr(parent, "id", ""),
+        }
+        try:
+            from langfuse.types import TraceContext
+
+            return TraceContext(**values)
+        except Exception:
+            return values
+
+    def start_generation(
+        self,
+        *,
+        name: str,
+        model: str,
+        input: Any,
+        model_parameters: dict[str, Any],
+    ) -> Any:
+        """Start one generation observation for one concrete LLM request."""
+        parent = self._active_agent.get()
+        kwargs: dict[str, Any] = {
+            "name": name,
+            "as_type": "generation",
+            "input": input,
+            "model": model,
+            "model_parameters": model_parameters,
+        }
+        if parent is not None:
+            kwargs["trace_context"] = self._trace_context(parent)
+        return self._start_observation(**kwargs)
+
+    def finish_generation(
+        self,
+        observation: Any,
+        *,
+        output: Any = None,
+        usage: Any = None,
+        level: Optional[str] = None,
+        status_message: Optional[str] = None,
+    ) -> None:
+        """Update and end one generation observation."""
+        if observation is None:
+            return
+        updates: dict[str, Any] = {
+            "output": output,
+            "usage_details": _usage_details(usage),
+        }
+        if level is not None:
+            updates["level"] = level
+        if status_message is not None:
+            updates["status_message"] = status_message
+        self._update(observation, **updates)
+        self._end(observation)
+
+    def flush(self) -> None:
+        """Flush the Langfuse client without affecting agent execution."""
+        if self._client is None:
+            return
+        try:
+            self._client.flush()
+        except Exception:
+            _logger.warning("Langfuse flush failed", exc_info=True)
+
+    def _replace_client(self, config: Optional[dict[str, str]]) -> None:
+        """Replace the client used for future observations."""
+        self.flush()
+        self._client = None
+        self._config = config
+        if config is None:
+            return
+        client_type = _get_langfuse()
+        if client_type is None:
+            return
+        try:
+            self._client = client_type(
+                public_key=config["public_key"],
+                secret_key=config["secret_key"],
+                host=config["host"],
+            )
+        except Exception:
+            _logger.warning("Langfuse client reconfiguration failed", exc_info=True)
+
+    def reconfigure(self, config: Optional[Any]) -> None:
+        """Apply new config after the current Agent observation completes."""
+        normalized = _get_config(config)
+        if normalized == self._config:
+            return
+        if self._active_agent.get() is not None:
+            self._pending_config = normalized
+            return
+        self._replace_client(normalized)
+
+
+def _handler_map(tracer: LangfuseTracer) -> Dict[str, Any]:
+    cached_handlers = getattr(tracer, "_hook_handlers", None)
+    if cached_handlers is not None:
+        return cached_handlers
+    tool_observations: ContextVar[dict[str, list[Any]]] = ContextVar(
+        f"langfuse_hook_tools_{id(tracer)}", default={}
+    )
+
+    def on_agent_before(context: dict) -> None:
+        tool_observations.set({})
+        tracer.start_agent(context)
+
+    def on_agent_after(context: dict) -> None:
+        tool_observations.set({})
+        tracer.finish_agent(context)
+
+    def on_tool_before(context: dict) -> None:
+        observation = tracer.start_tool(context)
+        key = str(context.get("id") or context.get("tool_name") or "unknown")
+        stacks = {
+            stack_key: list(stack)
+            for stack_key, stack in tool_observations.get().items()
+        }
+        stacks.setdefault(key, []).append(observation)
+        tool_observations.set(stacks)
+
+    def on_tool_after(context: dict) -> None:
+        key = str(context.get("id") or context.get("tool_name") or "unknown")
+        stacks = {
+            stack_key: list(stack)
+            for stack_key, stack in tool_observations.get().items()
+        }
+        stack = stacks.get(key, [])
+        observation = stack.pop() if stack else None
+        if stack:
+            stacks[key] = stack
+        else:
+            stacks.pop(key, None)
+        tool_observations.set(stacks)
+        tracer.finish_tool(observation, context)
+
+    handlers = {
+        EVENT_AGENT_BEFORE: on_agent_before,
+        EVENT_TURN_BEFORE: tracer.start_turn_metadata,
+        EVENT_TOOL_BEFORE: on_tool_before,
+        EVENT_TOOL_AFTER: on_tool_after,
+        EVENT_TURN_AFTER: tracer.finish_turn_metadata,
+        EVENT_AGENT_AFTER: on_agent_after,
+    }
+    setattr(tracer, "_hook_handlers", handlers)
+    return handlers
+
+
+def register(
+    hook_system: Any,
+    config: Optional[Any] = None,
+    tracer: Optional[LangfuseTracer] = None,
+) -> bool:
+    """Register Langfuse lifecycle hooks when a real client is configured."""
+    active_tracer = tracer or LangfuseTracer.from_config(config)
+    if not active_tracer.enabled:
+        return False
+    for event, callback in _handler_map(active_tracer).items():
+        if not hook_system.has(event, callback):
+            hook_system.register(event, callback)
     return True
