@@ -79,9 +79,15 @@ class TestZeroAgentBackends:
             "zero_agent.plugins.langfuse_tracing.LangfuseTracer.from_config",
             lambda config: tracer,
         )
+        registered = []
+
+        def register(hooks, **kwargs):
+            registered.append(kwargs["tracer"])
+            return True
+
         monkeypatch.setattr(
             "zero_agent.plugins.langfuse_tracing.register",
-            lambda hooks, **kwargs: True,
+            register,
         )
         from zero_agent.llm.factory import LLMFactory
 
@@ -98,6 +104,9 @@ class TestZeroAgentBackends:
         )
 
         agent = ZeroAgent(config=multi_backend_config)
+
+        assert registered == [tracer]
+
 
         assert captured == [tracer]
         assert all(
