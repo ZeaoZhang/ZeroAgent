@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Union
+from typing import Any, Dict, Union
 
 from zero_agent.core.config import AgentConfig, LLMBackendConfig
 from zero_agent.core.exceptions import ConfigError
@@ -32,6 +32,8 @@ class LLMFactory:
         log_dir: str | None = None,
         sessions_dir: str | None = None,
         session_log_path: str | None = None,
+        *,
+        tracer: Any | None = None,
     ) -> LiteLLMSession | TextToolSession:
         """创建 LLM 会话.
 
@@ -58,6 +60,7 @@ class LLMFactory:
             log_dir=log_dir,
             sessions_dir=sessions_dir,
             session_log_path=session_log_path,
+            tracer=tracer,
         )
         if getattr(backend_config, "tool_protocol", "native") == "text":
             session = TextToolSession(session, auto_save_tokens=True)
@@ -67,21 +70,33 @@ class LLMFactory:
     def create_from_config(
         config: AgentConfig,
         session_log_path: str | None = None,
+        *,
+        tracer: Any | None = None,
     ) -> Union[LiteLLMSession, TextToolSession, AutoFailoverSession]:
         """Create the primary session from validated configuration."""
         config.validate()
         register_model_cost_map(config.litellm_model_cost_map)
-        primary_session = LLMFactory._get_primary_session(config, session_log_path=session_log_path)
+        primary_session = LLMFactory._get_primary_session(
+            config,
+            session_log_path=session_log_path,
+            tracer=tracer,
+        )
         if config.failover_backends:
             return LLMFactory._wrap_failover(
-                primary_session, config, session_log_path=session_log_path
+                primary_session,
+                config,
+                session_log_path=session_log_path,
+                tracer=tracer,
             )
         return primary_session
+
 
     @staticmethod
     def create_all_sessions(
         config: AgentConfig,
         session_log_path: str | None = None,
+        *,
+        tracer: Any | None = None,
     ) -> Dict[str, Union[LiteLLMSession, TextToolSession, AutoFailoverSession]]:
         """Create every configured backend session."""
         config.validate()
@@ -93,6 +108,7 @@ class LLMFactory:
                 log_dir=config.log_dir,
                 sessions_dir=config.sessions_dir,
                 session_log_path=session_log_path,
+                tracer=tracer,
             )
 
         if config.failover_backends:
@@ -113,10 +129,13 @@ class LLMFactory:
                     )
         return sessions
 
+
     @staticmethod
     def _get_primary_session(
         config: AgentConfig,
         session_log_path: str | None = None,
+        *,
+        tracer: Any | None = None,
     ) -> Union[LiteLLMSession, TextToolSession]:
         backend_cfg = config.llm_backends[config.default_backend]
         return LLMFactory.create_session(
@@ -124,13 +143,17 @@ class LLMFactory:
             log_dir=config.log_dir,
             sessions_dir=config.sessions_dir,
             session_log_path=session_log_path,
+            tracer=tracer,
         )
+
 
     @staticmethod
     def _wrap_failover(
         primary: Union[LiteLLMSession, TextToolSession],
         config: AgentConfig,
         session_log_path: str | None = None,
+        *,
+        tracer: Any | None = None,
     ) -> AutoFailoverSession:
         backups: list[LiteLLMSession | TextToolSession] = []
         for name in config.failover_backends:
@@ -144,6 +167,7 @@ class LLMFactory:
                 log_dir=config.log_dir,
                 sessions_dir=config.sessions_dir,
                 session_log_path=session_log_path,
+                tracer=tracer,
             ))
         return AutoFailoverSession(
             primary=primary,

@@ -44,6 +44,23 @@ def _redact_error(value: Any, secret: str = "") -> str:
     return text[:1000]
 
 
+def _trace_response_output(response: MockResponse) -> dict[str, Any]:
+    """Build one consistent response payload for Langfuse."""
+    return {
+        "content": response.content,
+        "thinking": response.thinking,
+        "tool_calls": [
+            {
+                "name": tc.function.name,
+                "arguments": tc.function.arguments,
+                "id": tc.id,
+            }
+            for tc in response.tool_calls
+        ],
+        "stop_reason": response.stop_reason,
+    }
+
+
 def _usage_from_chunk(chunk: Any) -> Any:
     """Return usage for a stream chunk, restoring cache fields if possible.
 
@@ -253,6 +270,7 @@ class LiteLLMSession:
         log_dir: Optional[str] = None,
         sessions_dir: Optional[str] = None,
         session_log_path: Optional[str] = None,
+        tracer: Any | None = None,
     ) -> None:
         """初始化 LLM 会话.
 
@@ -260,8 +278,10 @@ class LiteLLMSession:
             config: 单个 LLM 后端的配置.
             log_dir: LLM 调用日志输出目录，None 时不记录.
             sessions_dir: 会话历史日志目录，None 时不记录.
+            tracer: Optional Langfuse tracer for concrete completion calls.
         """
         self.config = config
+        self._tracer = tracer
         self.history: List[Dict[str, Any]] = []
         self.lock = threading.Lock()
         self.system = ""
@@ -292,6 +312,58 @@ class LiteLLMSession:
         # DeepSeek 模型有更大的上下文窗口
         if "deepseek" in config.model.lower():
             self._context_window = max(self._context_window, 70000)
+
+    def _start_generation(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        *,
+        stream: bool,
+        model: Optional[str] = None,
+        input_value: Any = None,
+    ) -> Any:
+        """Start one best-effort generation observation."""
+        if self._tracer is None:
+            return None
+        try:
+            return self._tracer.start_generation(
+                name="llm-call",
+                model=model or self.config.model,
+                input=input_value
+                if input_value is not None
+                else {"messages": messages, "tools": tools or []},
+                model_parameters={
+                    "temperature": self.config.temperature,
+                    "stream": stream,
+                    "max_tokens": self.config.max_tokens,
+                },
+            )
+        except Exception:
+            _logger.warning("Langfuse generation creation failed", exc_info=True)
+            return None
+
+    def _finish_generation(
+        self,
+        observation: Any,
+        *,
+        output: Any,
+        usage: Any,
+        level: Optional[str] = None,
+        status_message: Optional[str] = None,
+    ) -> None:
+        """Finish one best-effort generation observation."""
+        if observation is None or self._tracer is None:
+            return
+        try:
+            self._tracer.finish_generation(
+                observation,
+                output=output,
+                usage=usage,
+                level=level,
+                status_message=status_message,
+            )
+        except Exception:
+            _logger.warning("Langfuse generation finalization failed", exc_info=True)
 
     def reset_tool_protocol_cache(self) -> None:
         """Clear the text-tool protocol marker."""
@@ -428,8 +500,9 @@ class LiteLLMSession:
             聚合后的 MockResponse.
         """
         kwargs = self._build_completion_kwargs(messages, tools, stream=True)
-        response = litellm.completion(**kwargs)
-
+        generation = self._start_generation(messages, tools, stream=True)
+        generation_finished = False
+        stream_error: Optional[BaseException] = None
         collected_content = ""
         collected_thinking = ""
         collected_tool_calls: Dict[int, Dict[str, Any]] = {}
@@ -437,112 +510,179 @@ class LiteLLMSession:
         final_stop_reason: Any = None
         stream_interrupted = False
         stream_chunks: List[Any] = []
+
+        def finish_generation(
+            output: Any,
+            usage: Any,
+            level: Optional[str] = None,
+            status_message: Optional[str] = None,
+        ) -> None:
+            nonlocal generation_finished
+            if generation_finished:
+                return
+            generation_finished = True
+            self._finish_generation(
+                generation,
+                output=output,
+                usage=usage,
+                level=level,
+                status_message=status_message,
+            )
+
         try:
-            for chunk in response:
-                stream_chunks.append(chunk)
-                final_response = chunk
-                try:
-                    choice = chunk.choices[0]
-                    delta = choice.delta if hasattr(choice, "delta") and choice.delta else None
-
-                    if delta:
-                        # 文本内容
-                        if hasattr(delta, "content") and delta.content:
-                            collected_content += delta.content
-                            yield delta.content
-
-                        # reasoning/thinking 内容
-                        if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                            collected_thinking += delta.reasoning_content
-
-                        # 工具调用 delta
-                        if hasattr(delta, "tool_calls") and delta.tool_calls:
-                            for tc_delta in delta.tool_calls:
-                                idx = tc_delta.index if hasattr(tc_delta, "index") else 0
-                                if idx not in collected_tool_calls:
-                                    collected_tool_calls[idx] = {
-                                        "id": "",
-                                        "name": "",
-                                        "arguments": "",
-                                    }
-                                tc = collected_tool_calls[idx]
-                                if hasattr(tc_delta, "id") and tc_delta.id:
-                                    tc["id"] = tc_delta.id
-                                if hasattr(tc_delta, "function") and tc_delta.function:
-                                    if hasattr(tc_delta.function, "name") and tc_delta.function.name:
-                                        tc["name"] = tc_delta.function.name
-                                    if hasattr(tc_delta.function, "arguments") and tc_delta.function.arguments:
-                                        tc["arguments"] += tc_delta.function.arguments
-
-                    if hasattr(choice, "finish_reason") and choice.finish_reason:
-                        final_stop_reason = choice.finish_reason
-                except (AttributeError, IndexError):
-                    continue
-        except Exception:
-            # 流中断：标记部分内容，使上层感知并处理
-            stream_interrupted = True
-            if collected_content:
-                collected_content += "\n[!!! 流异常中断"
-
-        # 构建最终响应 - 注入累积内容使 from_litellm_response 能正确解析
-        if collected_content and final_response:
+            response = litellm.completion(**kwargs)
             try:
-                if not final_response.choices[0].message:
-                    # 对于某些 provider，最终 chunk 的 message 可能为 None
+                for chunk in response:
+                    stream_chunks.append(chunk)
+                    final_response = chunk
+                    try:
+                        choice = chunk.choices[0]
+                        delta = (
+                            choice.delta
+                            if hasattr(choice, "delta") and choice.delta
+                            else None
+                        )
+
+                        if delta:
+                            if hasattr(delta, "content") and delta.content:
+                                collected_content += delta.content
+                                yield delta.content
+
+                            if (
+                                hasattr(delta, "reasoning_content")
+                                and delta.reasoning_content
+                            ):
+                                collected_thinking += delta.reasoning_content
+
+                            if hasattr(delta, "tool_calls") and delta.tool_calls:
+                                for tc_delta in delta.tool_calls:
+                                    idx = (
+                                        tc_delta.index
+                                        if hasattr(tc_delta, "index")
+                                        else 0
+                                    )
+                                    if idx not in collected_tool_calls:
+                                        collected_tool_calls[idx] = {
+                                            "id": "",
+                                            "name": "",
+                                            "arguments": "",
+                                        }
+                                    tc = collected_tool_calls[idx]
+                                    if hasattr(tc_delta, "id") and tc_delta.id:
+                                        tc["id"] = tc_delta.id
+                                    if (
+                                        hasattr(tc_delta, "function")
+                                        and tc_delta.function
+                                    ):
+                                        if (
+                                            hasattr(tc_delta.function, "name")
+                                            and tc_delta.function.name
+                                        ):
+                                            tc["name"] = tc_delta.function.name
+                                        if (
+                                            hasattr(tc_delta.function, "arguments")
+                                            and tc_delta.function.arguments
+                                        ):
+                                            tc["arguments"] += tc_delta.function.arguments
+
+                        if hasattr(choice, "finish_reason") and choice.finish_reason:
+                            final_stop_reason = choice.finish_reason
+                    except (AttributeError, IndexError):
+                        continue
+            except Exception as exc:
+                stream_error = exc
+                stream_interrupted = True
+                if collected_content:
+                    collected_content += "\n[!!! 流异常中断"
+
+            if collected_content and final_response:
+                try:
+                    if not final_response.choices[0].message:
+                        pass
+                except Exception:
                     pass
-            except Exception:
-                pass
 
-        mock = MockResponse.from_litellm_response(final_response, streamed_text=collected_content)
+            mock = MockResponse.from_litellm_response(
+                final_response,
+                streamed_text=collected_content,
+            )
+            if stream_interrupted:
+                if not mock.content:
+                    mock.content = ""
+                mock.content = append_interruption_marker(mock.content, "incomplete")
+                mock.stop_reason = "stream_interrupted"
+            else:
+                interruption = classify_interruption(mock)
+                if interruption:
+                    mock.content = append_interruption_marker(
+                        mock.content,
+                        interruption.kind,
+                    )
 
-        # 如果流中断，在 content 末尾附加标记供 do_no_tool 检测
-        if stream_interrupted:
-            if not mock.content:
-                mock.content = ""
-            mock.content = append_interruption_marker(mock.content, "incomplete")
-            mock.stop_reason = "stream_interrupted"
-        else:
-            interruption = classify_interruption(mock)
-            if interruption:
-                mock.content = append_interruption_marker(
-                    mock.content,
-                    interruption.kind,
+            if not mock.thinking and collected_thinking:
+                mock.thinking = collected_thinking
+
+            if not mock.tool_calls and collected_tool_calls:
+                from zero_agent.llm.base import MockFunction, MockToolCall
+
+                mock.tool_calls = [
+                    MockToolCall(
+                        function=MockFunction(
+                            name=tc["name"],
+                            arguments=tc["arguments"],
+                        ),
+                        id=tc["id"],
+                    )
+                    for _, tc in sorted(collected_tool_calls.items())
+                ]
+                if not classify_interruption(mock):
+                    mock.stop_reason = "tool_use"
+
+            if not stream_interrupted:
+                has_tool_calls = bool(mock.tool_calls)
+                stop_source = final_stop_reason or mock.stop_reason
+                mock.stop_reason = normalize_stop_reason(
+                    stop_source,
+                    has_tool_calls=has_tool_calls,
                 )
+            mock.usage = next(
+                (
+                    usage
+                    for usage in (
+                        _usage_from_chunk(chunk)
+                        for chunk in reversed(stream_chunks)
+                    )
+                    if usage
+                ),
+                _usage_from_chunk(final_response),
+            )
+            mock.tool_protocol = "native"
 
-        # 如果流式解析丢失了 thinking 或 tool_calls，从累积数据补全
-        if not mock.thinking and collected_thinking:
-            mock.thinking = collected_thinking
+            finish_generation(
+                output=_trace_response_output(mock),
+                usage=mock.usage,
+                level="ERROR" if stream_error is not None else None,
+                status_message=(
+                    _redact_error(stream_error, self.config.api_key)
+                    if stream_error is not None
+                    else None
+                ),
+            )
 
-        if not mock.tool_calls and collected_tool_calls:
-            from zero_agent.llm.base import MockFunction, MockToolCall
-            mock.tool_calls = [
-                MockToolCall(
-                    function=MockFunction(name=tc["name"], arguments=tc["arguments"]),
-                    id=tc["id"],
-                )
-                for _, tc in sorted(collected_tool_calls.items())
-            ]
-            if not classify_interruption(mock):
-                mock.stop_reason = "tool_use"
-
-        if not stream_interrupted:
-            has_tool_calls = bool(mock.tool_calls)
-            stop_source = final_stop_reason or mock.stop_reason
-            mock.stop_reason = normalize_stop_reason(stop_source, has_tool_calls=has_tool_calls)
-        mock.usage = next(
-            (usage for usage in (_usage_from_chunk(chunk) for chunk in reversed(stream_chunks)) if usage),
-            _usage_from_chunk(final_response),
-        )
-        mock.tool_protocol = "native"
-
-        # 将助手消息追加到历史
-        self._record_usage(
-            mock.usage,
-            streamed_text=collected_content,
-        )
-        self._record_assistant(mock)
-
-        return mock
+            self._record_usage(
+                mock.usage,
+                streamed_text=collected_content,
+            )
+            self._record_assistant(mock)
+            return mock
+        except BaseException as exc:
+            finish_generation(
+                output={"content": collected_content} if collected_content else None,
+                usage=_usage_from_chunk(final_response),
+                level="ERROR",
+                status_message=_redact_error(exc, self.config.api_key),
+            )
+            raise
 
     def _sync_chat(
         self,
@@ -551,15 +691,31 @@ class LiteLLMSession:
     ) -> Generator[str, None, MockResponse]:
         """非流式调用 LLM."""
         kwargs = self._build_completion_kwargs(messages, tools, stream=False)
-        response = litellm.completion(**kwargs)
-        mock = MockResponse.from_litellm_response(response)
-        interruption = classify_interruption(mock)
-        if interruption:
-            mock.content = append_interruption_marker(mock.content, interruption.kind)
-        yield mock.content
-        self._record_usage(mock.usage)
-        self._record_assistant(mock)
-        return mock
+        generation = self._start_generation(messages, tools, stream=False)
+        try:
+            response = litellm.completion(**kwargs)
+            mock = MockResponse.from_litellm_response(response)
+            interruption = classify_interruption(mock)
+            if interruption:
+                mock.content = append_interruption_marker(mock.content, interruption.kind)
+            self._finish_generation(
+                generation,
+                output=_trace_response_output(mock),
+                usage=mock.usage,
+            )
+            yield mock.content
+            self._record_usage(mock.usage)
+            self._record_assistant(mock)
+            return mock
+        except Exception as exc:
+            self._finish_generation(
+                generation,
+                output=None,
+                usage=None,
+                level="ERROR",
+                status_message=_redact_error(exc, self.config.api_key),
+            )
+            raise
 
     def vision(
         self,
@@ -612,12 +768,20 @@ class LiteLLMSession:
             self.config.provider,
         )
         kwargs = self._build_completion_kwargs(messages, tools=None, stream=False)
-        kwargs["model"] = self.config.vision_model or self.config.model
+        vision_model = self.config.vision_model or self.config.model
+        kwargs["model"] = vision_model
         if self.config.vision_max_tokens:
             kwargs["max_tokens"] = self.config.vision_max_tokens
         if timeout is not None:
             kwargs["timeout"] = timeout
 
+        generation = self._start_generation(
+            messages,
+            None,
+            stream=False,
+            model=vision_model,
+            input_value={"messages": messages},
+        )
         try:
             response = litellm.completion(**kwargs)
             message = response.choices[0].message
@@ -630,9 +794,22 @@ class LiteLLMSession:
                 )
             if not text:
                 raise ValueError("vision response did not contain text")
-            return str(text)
+            result = str(text)
+            self._finish_generation(
+                generation,
+                output={"content": result},
+                usage=getattr(response, "usage", None),
+            )
+            return result
         except Exception as exc:
             safe_error = _redact_error(exc, self.config.api_key)
+            self._finish_generation(
+                generation,
+                output=None,
+                usage=None,
+                level="ERROR",
+                status_message=safe_error,
+            )
             raise LLMError(f"Vision call failed [{self.name}]: {safe_error}") from exc
 
     def _build_completion_kwargs(

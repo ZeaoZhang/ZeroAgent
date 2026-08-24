@@ -219,6 +219,38 @@ def test_stream_interruption_finishes_generation_as_error(monkeypatch) -> None:
     assert len(tracer.finished) == 1
     assert tracer.finished[0]["level"] == "ERROR"
 
+def test_abandoned_stream_finishes_generation_on_close(monkeypatch) -> None:
+    def endless_stream():
+        while True:
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content="partial",
+                            reasoning_content="",
+                            tool_calls=None,
+                        ),
+                        message=None,
+                        finish_reason=None,
+                    )
+                ],
+                usage=None,
+            )
+
+    monkeypatch.setattr(
+        "zero_agent.llm.sessions.litellm.completion",
+        lambda **kwargs: endless_stream(),
+    )
+    tracer = RecordingTracer()
+    session = LiteLLMSession(_config(stream=True), tracer=tracer)
+    generation = session.chat([{"role": "user", "content": "hi"}], tools=[])
+
+    assert next(generation) == "partial"
+    generation.close()
+
+    assert len(tracer.finished) == 1
+    assert tracer.finished[0]["level"] == "ERROR"
+
 
 def test_session_without_tracer_keeps_existing_behavior(monkeypatch) -> None:
     usage = SimpleNamespace(prompt_tokens=1, completion_tokens=1)
