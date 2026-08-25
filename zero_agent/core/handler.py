@@ -330,7 +330,10 @@ class BaseHandler:
 
         if tool_name in {"complete_task", "ask_user", "bad_json"}:
             return
-        if not hasattr(self, f"do_{tool_name}") and self.registry.get(tool_name) is None:
+        tool_def = self.registry.get(tool_name)
+        if not hasattr(self, f"do_{tool_name}") and tool_def is None:
+            return
+        if tool_def is not None and not tool_def.promotes_task_state:
             return
         if self.task_contract.mode is not TaskMode.OPEN:
             return
@@ -478,14 +481,13 @@ class BaseHandler:
     def _large_code_block_retry_prompt(self) -> str:
         """Prompt after a large bare code block is emitted without tool calls."""
         return self._tl(
-            "[System] 检测到你在上一轮回复中主要内容是较大代码块，"
-            "且本轮未调用任何工具。请不要把长代码放入 code_run 的 script 参数；"
-            "先调用 file_write(path='scripts/za_tmp.py', content=...)（过长时分块 append），"
-            "再调用 code_run(script_path='scripts/za_tmp.py')。若任务已完成，请调用 complete_task。",
-            "[System] Your last reply was mainly a large code block without a tool call. "
-            "Do not put long code in code_run.script: write scripts/za_tmp.py with file_write "
-            "(append chunks when needed), then call code_run(script_path='scripts/za_tmp.py'). "
-            "Call complete_task if finished.",
+            "[System] 上一轮回复主要是较大代码块，但没有调用工具。"
+            "需要落盘或执行代码时，按当前 tools schema 选择并调用合适工具；"
+            "不要在正文中重复工具协议。任务已完成时调用 complete_task。",
+            "[System] The previous reply was mainly a large code block without a tool call. "
+            "When code must be persisted or executed, select and call the appropriate tool "
+            "according to the current tools schema; do not restate tool protocols in prose. "
+            "Call complete_task if the task is finished.",
         )
 
     # ---- completion control ----

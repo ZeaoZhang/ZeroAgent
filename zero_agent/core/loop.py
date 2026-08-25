@@ -10,7 +10,7 @@ import json
 import logging
 import os
 import re
-from typing import TYPE_CHECKING, Any, Dict, Generator, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Generator, List, Optional
 
 from zero_agent.core.hooks import HookSystem
 from zero_agent.core.interfaces import LLMClient, ToolDispatcher
@@ -74,6 +74,7 @@ class AgentLoop:
         system_prompt: str,
         user_input: str,
         initial_user_content: Optional[str] = None,
+        system_prompt_factory: Optional[Callable[[], str]] = None,
     ) -> Generator[Any, None, TerminalEvent]:
         """Execute the agent loop and return one typed terminal event."""
 
@@ -116,6 +117,9 @@ class AgentLoop:
                     if self._agent.reload_config():
                         self.client = self._agent.client
                         self.handler.client = self.client
+
+                if system_prompt_factory is not None:
+                    self.client.system = system_prompt_factory()
 
                 if self.verbose:
                     yield f"\n\n**LLM Running (Turn {turn}) ...**\n\n"

@@ -20,7 +20,6 @@ from zero_agent.core.hooks import HookSystem
 from zero_agent.core.localization import (
     PROMPT_PEER_HINT,
     PROMPT_REPLY_LANGUAGE,
-    PROMPT_TASK_CONTROL,
     PROMPT_TODAY_LABEL,
     WEEKDAY_MESSAGE_IDS,
     PromptLocalizer,
@@ -37,6 +36,7 @@ from zero_agent.core.types import (
 )
 from zero_agent.memory.manager import MemoryManager
 from zero_agent.tools.registry import ToolRegistry
+
 
 
 class _LLMFactoryProxy:
@@ -535,8 +535,9 @@ class ZeroAgent:
                 user_input,
             )
 
-        # 构建系统提示词
+        # 默认提示词按每轮实际任务状态重建；显式覆盖保持调用方原有语义。
         prompt = system_prompt or self._build_system_prompt()
+        prompt_factory = None if system_prompt else self._build_system_prompt
 
         # 创建 AgentLoop
         tools_schema = self.registry.generate_openai_schema()
@@ -557,6 +558,7 @@ class ZeroAgent:
                 system_prompt=prompt,
                 user_input=user_input,
                 initial_user_content=effective_initial_content,
+                system_prompt_factory=prompt_factory,
             )
             self._update_pending_task_state(terminal)
             return terminal
@@ -834,10 +836,10 @@ class ZeroAgent:
         return "unknown"
 
     def _build_system_prompt(self) -> str:
-        """构建默认系统提示词.
+        """构建本地化、状态感知的默认系统提示词.
 
-        拼接顺序：资产文本、回复语言、日期、全局记忆上下文和任务协议。
-
+        拼接顺序：稳定核心、回复语言、日期、全局记忆、当前任务协议、
+        后端附加提示和可选 peer 提示。
         Returns:
             系统提示词字符串.
         """
@@ -852,7 +854,8 @@ class ZeroAgent:
         weekday = localizer.text(WEEKDAY_MESSAGE_IDS[now.tm_wday])
         prompt += f"\n{localizer.text(PROMPT_TODAY_LABEL)} {date} {weekday}\n"
         prompt += self.memory.get_global_memory_context()
-        prompt += f"\n{localizer.text(PROMPT_TASK_CONTROL)}\n"
+        task_mode = self.handler.task_contract.mode
+        prompt += f"\n{localizer.task_control(task_mode)}\n"
 
         extra_sys = getattr(self.client, "extra_sys_prompt", "")
         if extra_sys:

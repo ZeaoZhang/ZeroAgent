@@ -279,16 +279,16 @@ class TestZeroAgentSystemPrompt:
             (
                 "zh",
                 (
-                    "按用户的语言回复，或遵循用户明确指定的语言。",
-                    "## 任务控制协议",
-                    "每个新任务从 OPEN 状态开始",
+                    "使用用户当前使用的语言回复，除非用户明确指定其他语言。",
+                    '<task_control state="open">',
+                    "无需工具即可完整回答时可直接给出最终答复。",
                     "今天：",
                     "[Peer] 用户提及其他会话/后台任务状态时:",
                 ),
                 (
-                    "Summarize and reply in user's language or follow user's prompt.",
-                    "## Task control protocol",
-                    "Each new task starts in OPEN state",
+                    "Reply in the language the user is currently using",
+                    '<task_control state="executing">',
+                    '<task_control state="plan">',
                     "Today:",
                     "[Peer] When the user mentions other sessions",
                 ),
@@ -296,16 +296,16 @@ class TestZeroAgentSystemPrompt:
             (
                 "en",
                 (
-                    "Summarize and reply in user's language or follow user's prompt.",
-                    "## Task control protocol",
-                    "Each new task starts in OPEN state",
+                    "Reply in the language the user is currently using unless",
+                    '<task_control state="open">',
+                    "When no tools are needed, provide the complete final answer directly.",
                     "Today:",
                     "[Peer] When the user mentions other sessions",
                 ),
                 (
-                    "按用户的语言回复，或遵循用户明确指定的语言。",
-                    "## 任务控制协议",
-                    "每个新任务从 OPEN 状态开始",
+                    "使用用户当前使用的语言回复",
+                    '<task_control state="executing">',
+                    '<task_control state="plan">',
                     "今天：",
                     "[Peer] 用户提及其他会话/后台任务状态时:",
                 ),
@@ -329,14 +329,35 @@ class TestZeroAgentSystemPrompt:
             assert text in prompt
         for text in forbidden:
             assert text not in prompt
-        for identifier in (
-            "complete_task",
-            "evidence_refs",
-            "ask_user",
-            "OPEN",
-            "EXECUTING",
+
+    @pytest.mark.parametrize("language", ["zh", "en"])
+    def test_core_prompt_keeps_protocol_structure_without_tool_specific_rules(
+        self,
+        multi_backend_config: AgentConfig,
+        language: str,
+    ) -> None:
+        multi_backend_config.language = language
+        agent = ZeroAgent(config=multi_backend_config)
+
+        prompt = agent._build_system_prompt()
+
+        for tag in (
+            "<role>",
+            "</role>",
+            "<operating_contract>",
+            "</operating_contract>",
+            "<interaction_protocol>",
+            "</interaction_protocol>",
         ):
-            assert identifier in prompt
+            assert tag in prompt
+        for duplicated_tool_detail in (
+            "script_path",
+            "scripts/za_tmp.py",
+            "4 KiB",
+            "20 行",
+            "provider-native",
+        ):
+            assert duplicated_tool_detail not in prompt
 
     def test_build_system_prompt_auto_uses_resolved_language(
         self,
@@ -352,8 +373,8 @@ class TestZeroAgentSystemPrompt:
 
         prompt = agent._build_system_prompt()
 
-        assert "## 任务控制协议" in prompt
-        assert "Each new task starts in OPEN state" not in prompt
+        assert "使用用户当前使用的语言回复" in prompt
+        assert "Reply in the language the user is currently using" not in prompt
 
 
 class TestZeroAgentConfigReload:
@@ -812,6 +833,9 @@ class TestZeroAgentHooks:
         assert event_names[-1] == "agent_after"
         tool_after_ctx = next(ctx for event, ctx in events if event == "tool_after")
         assert tool_after_ctx["result"] == "content from config.py"
+        assert '<task_control state="open">' in fake_client.system_snapshots[0]
+        assert '<task_control state="executing">' in fake_client.system_snapshots[1]
+        assert '<task_control state="open">' not in fake_client.system_snapshots[1]
 
     def test_abort_signal_does_not_poison_next_code_run(self, tmp_path, monkeypatch) -> None:
         """一次 abort 不应让后续任务的 code_run 被立刻杀死."""
@@ -1253,13 +1277,15 @@ class TestZeroAgentInitialMode:
                 self.handler = handler
                 self.max_turns = max_turns
 
-            def run(self, **_kwargs):
+            def run(self, **kwargs):
                 seen["mode"] = self.handler.task_contract.mode
                 seen["plan_path"] = self.handler.task_contract.plan_path
                 seen["task_id"] = self.handler.task_contract.task_id
                 seen["plan_verify_status"] = self.handler.plan_verify_status
+                seen["system_prompt_factory"] = kwargs["system_prompt_factory"]
                 seen["ledger_records"] = list(self.handler.evidence_ledger.records)
                 seen["loop_max_turns"] = self.max_turns
+                seen["system_prompt"] = kwargs["system_prompt"]
                 if False:
                     yield None
                 return TerminalEvent(status=TerminalStatus.FAILED, reason="blocked")
@@ -1277,20 +1303,36 @@ class TestZeroAgentInitialMode:
         assert seen["task_id"].startswith("task-")
         assert seen["plan_verify_status"] == "missing"
         assert seen["ledger_records"] == []
+        assert callable(seen["system_prompt_factory"])
         assert seen["loop_max_turns"] == 120
+        assert '<task_control state="plan">' in seen["system_prompt"]
+        assert '<task_control state="open">' not in seen["system_prompt"]
 
     def test_executing_contract_sets_mode_and_path(self, tmp_path, monkeypatch) -> None:
         agent, seen = self._capture_loop(tmp_path, monkeypatch)
         _exhaust(agent.run("execute the plan", initial_mode=TaskMode.EXECUTING, plan_path="plan.md"))
         assert seen["mode"] is TaskMode.EXECUTING
         assert seen["plan_path"] == "plan.md"
+        assert callable(seen["system_prompt_factory"])
         assert seen["loop_max_turns"] == 5
+        assert '<task_control state="executing">' in seen["system_prompt"]
+        assert '<task_control state="open">' not in seen["system_prompt"]
 
     def test_open_default_contract_unchanged(self, tmp_path, monkeypatch) -> None:
         agent, seen = self._capture_loop(tmp_path, monkeypatch)
         _exhaust(agent.run("hello"))
+        assert callable(seen["system_prompt_factory"])
         assert seen["mode"] is TaskMode.OPEN
         assert seen["plan_path"] is None
+        assert '<task_control state="open">' in seen["system_prompt"]
+
+    def test_explicit_system_prompt_remains_static(self, tmp_path, monkeypatch) -> None:
+        agent, seen = self._capture_loop(tmp_path, monkeypatch)
+
+        _exhaust(agent.run("hello", system_prompt="custom system"))
+
+        assert seen["system_prompt"] == "custom system"
+        assert seen["system_prompt_factory"] is None
 
     @pytest.mark.parametrize("mode", [TaskMode.PLAN, TaskMode.EXECUTING])
     def test_missing_plan_path_rejected(self, tmp_path, monkeypatch, mode) -> None:
@@ -1314,8 +1356,10 @@ class _FakeClient:
         self._responses = list(responses)
         self._call_count = 0
         self.calls = []
+        self.system_snapshots = []
 
     def chat(self, messages, tools=None):
+        self.system_snapshots.append(self.system)
         self.calls.append(messages)
         if self._call_count >= len(self._responses):
             yield "Done."

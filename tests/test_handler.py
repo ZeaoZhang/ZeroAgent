@@ -754,6 +754,21 @@ class TestBaseHandlerDispatch:
 
         assert mock_handler.task_contract.mode is TaskMode.EXECUTING
 
+    def test_internal_memory_tool_does_not_promote_open_task(
+        self,
+        mock_config,
+    ) -> None:
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
+
+        _exhaust(handler.dispatch(
+            "update_working_checkpoint",
+            {"key_info": "keep this context"},
+            MockResponse(),
+        ))
+
+        assert handler.task_contract.mode is TaskMode.OPEN
+
     def test_unknown_tool_does_not_promote_open_state(
         self,
         mock_handler: BaseHandler,
@@ -893,9 +908,10 @@ class TestBaseHandlerDoNoTool:
         )
         gen = mock_handler.do_no_tool({}, MockResponse(content=content))
         result = _exhaust(gen)
-        # 应该触发提示
         assert result.next_prompt is not None
-        assert "代码" in result.next_prompt
+        assert "tools schema" in result.next_prompt
+        for duplicated_detail in ("script_path", "scripts/za_tmp.py", "mode=\"append\""):
+            assert duplicated_detail not in result.next_prompt
 
     def test_text_tool_protocol_without_native_call_retries(
         self,

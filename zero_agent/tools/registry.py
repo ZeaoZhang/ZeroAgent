@@ -35,6 +35,7 @@ class ToolDefinition:
         parameters: JSON Schema 格式的参数定义（properties + required）.
         handler: 工具执行函数，是一个 generator，yield 状态信息，return 结果.
         category: 工具分类标签，用于分组管理.
+        promotes_task_state: 成功分发前是否将 OPEN 任务推进到 EXECUTING.
     """
 
     name: str
@@ -42,6 +43,7 @@ class ToolDefinition:
     parameters: dict
     handler: ToolHandler
     category: str = "general"
+    promotes_task_state: bool = True
 
 
 @dataclass

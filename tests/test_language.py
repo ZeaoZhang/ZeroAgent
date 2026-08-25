@@ -7,11 +7,8 @@ import pytest
 
 from zero_agent.core.config import AgentConfig, LLMBackendConfig
 from zero_agent.core.exceptions import ConfigError
-from zero_agent.core.localization import (
-    PROMPT_REPLY_LANGUAGE,
-    PROMPT_TASK_CONTROL,
-    PromptLocalizer,
-)
+from zero_agent.core.localization import PROMPT_REPLY_LANGUAGE, PromptLocalizer
+from zero_agent.core.types import TaskMode
 from zero_agent.tools.registry import ToolRegistry
 
 
@@ -40,26 +37,104 @@ def test_prompt_localizer_rejects_corrupt_requested_catalog(monkeypatch) -> None
         PromptLocalizer("zh")
 
 
-def test_prompt_localizer_uses_chinese_catalog() -> None:
+def test_prompt_localizer_falls_back_per_message_to_english(monkeypatch) -> None:
+    class FakeTranslations:
+        def __init__(self, messages: dict[str, str]) -> None:
+            self.messages = messages
+            self.fallback = None
+
+        def add_fallback(self, fallback) -> None:
+            self.fallback = fallback
+
+        def gettext(self, message_id: str) -> str:
+            if message_id in self.messages:
+                return self.messages[message_id]
+            if self.fallback is not None:
+                return self.fallback.gettext(message_id)
+            return message_id
+
+    class FakeResource:
+        def __init__(self, language: str) -> None:
+            self.language = language
+
+        def open(self, mode: str = "rb") -> io.BytesIO:
+            return io.BytesIO(self.language.encode())
+
+    class FakeTraversable:
+        def joinpath(self, *parts: str) -> FakeResource:
+            return FakeResource(parts[1])
+
+    catalogs = {
+        "zh": FakeTranslations({"known": "已翻译"}),
+        "en": FakeTranslations({"known": "translated", "new": "English fallback"}),
+    }
+    monkeypatch.setattr(resources, "files", lambda _package: FakeTraversable())
+    monkeypatch.setattr(
+        "zero_agent.core.localization.gettext.GNUTranslations",
+        lambda stream: catalogs[stream.read().decode()],
+    )
+
     localizer = PromptLocalizer("zh")
 
-    assert localizer.text(PROMPT_REPLY_LANGUAGE) == (
-        "按用户的语言回复，或遵循用户明确指定的语言。"
-    )
-    protocol = localizer.text(PROMPT_TASK_CONTROL)
-    assert protocol.startswith("## 任务控制协议")
-    assert (
-        "调用过任何真实工具后，任务处于 EXECUTING 状态，"
-        "必须在任务完成时调用 provider-native"
-    ) in protocol
+    assert localizer.text("known") == "已翻译"
+    assert localizer.text("new") == "English fallback"
+
+
+@pytest.mark.parametrize(
+    ("language", "reply_text", "state_text"),
+    [
+        (
+            "zh",
+            "使用用户当前使用的语言回复，除非用户明确指定其他语言。",
+            "无需工具即可完整回答时可直接给出最终答复。",
+        ),
+        (
+            "en",
+            "Reply in the language the user is currently using unless they explicitly request another.",
+            "When no tools are needed, provide the complete final answer directly.",
+        ),
+    ],
+)
+
+def test_prompt_localizer_uses_language_consistent_task_contracts(
+    language: str,
+    reply_text: str,
+    state_text: str,
+) -> None:
+    localizer = PromptLocalizer(language)
+
+    assert localizer.text(PROMPT_REPLY_LANGUAGE) == reply_text
+    protocol = localizer.task_control(TaskMode.OPEN)
+    assert protocol.startswith('<task_control state="open">')
+    assert state_text in protocol
+    assert protocol.endswith("</task_control>")
+
 
 def test_prompt_localizer_uses_english_fallback_for_unknown_language() -> None:
     localizer = PromptLocalizer("fr-FR")
 
-    assert localizer.text(PROMPT_REPLY_LANGUAGE) == (
-        "Summarize and reply in user's language or follow user's prompt."
+    assert localizer.text(PROMPT_REPLY_LANGUAGE).startswith("Reply in the language")
+    assert localizer.task_control(TaskMode.OPEN).startswith(
+        '<task_control state="open">'
     )
-    assert localizer.text(PROMPT_TASK_CONTROL).startswith("## Task control protocol")
+
+
+@pytest.mark.parametrize(
+    ("mode", "state"),
+    [
+        (TaskMode.OPEN, "open"),
+        (TaskMode.EXECUTING, "executing"),
+        (TaskMode.PLAN, "plan"),
+    ],
+)
+def test_task_control_catalogs_keep_machine_identifiers_in_english(
+    mode: TaskMode,
+    state: str,
+) -> None:
+    for language in ("zh", "en"):
+        protocol = PromptLocalizer(language).task_control(mode)
+        assert protocol.startswith(f'<task_control state="{state}">')
+        assert protocol.endswith("</task_control>")
 
 
 class TestResolvedLanguage:
