@@ -277,21 +277,28 @@ class BaseHandler:
         tool_def = self.registry.get(tool_name)
         if tool_def is not None:
             data = yield from tool_def.handler(args, response, self)
-            if isinstance(data, StepOutcome):
-                ret = data
-            else:
+            plain_data = not isinstance(data, StepOutcome)
+            if plain_data:
                 next_prompt = (
                     data.pop("_za_next_prompt", None)
                     if isinstance(data, dict)
                     else None
                 )
-                if next_prompt is None:
-                    next_prompt = self._default_next_prompt(args)
-                ret = StepOutcome(data, next_prompt=next_prompt, action=StepAction.CONTINUE)
+                ret = StepOutcome(
+                    data,
+                    next_prompt=next_prompt,
+                    action=StepAction.CONTINUE,
+                )
+            else:
+                ret = data
+
             ret = self._apply_tool_protocol_budget(tool_name, ret)
             if self._successful_completion_correction(tool_name, ret):
                 self._completion_rejection_count = 0
             self._record_evidence(tool_name, args, ret)
+
+            if plain_data and ret.next_prompt is None:
+                ret.next_prompt = self._default_next_prompt(args)
             self._trigger_hook("tool_after", {
                 "tool_name": tool_name,
                 "args": args,

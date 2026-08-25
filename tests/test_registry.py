@@ -117,6 +117,18 @@ class TestToolRegistry:
         assert len(schema) == 1
         assert schema[0]["type"] == "function"
         assert schema[0]["function"]["name"] == "echo"
+    def test_complete_task_schema_requires_evidence_refs(self, mock_config) -> None:
+        registry = ToolRegistry.with_builtins(mock_config)
+        complete_schema = next(
+            item["function"]
+            for item in registry.generate_openai_schema()
+            if item["function"]["name"] == "complete_task"
+        )
+
+        assert complete_schema["parameters"]["required"] == [
+            "answer",
+            "evidence_refs",
+        ]
 
     def test_generate_claude_schema(self) -> None:
         registry = ToolRegistry()

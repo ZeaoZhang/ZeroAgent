@@ -43,16 +43,20 @@ def _make_mock_client(responses: List[MockResponse]):
 
     return MockClient()
 
-def _complete_response(answer: str, evidence_refs: list[int]) -> MockResponse:
+def _complete_response(answer: str, evidence_refs: list[int] | None) -> MockResponse:
+    payload = {"answer": answer}
+    if evidence_refs is not None:
+        payload["evidence_refs"] = evidence_refs
     return MockResponse(
         tool_calls=[MockToolCall(
             function=MockFunction(
                 name="complete_task",
-                arguments=json.dumps({"answer": answer, "evidence_refs": evidence_refs}),
+                arguments=json.dumps(payload),
             ),
             id="call_complete",
         )],
     )
+
 
 
 def _set_open_contract(handler: BaseHandler) -> None:
@@ -209,6 +213,37 @@ class TestAgentLoop:
         assert terminal.status is TerminalStatus.PROTOCOL_ERROR
         assert terminal.reason == "complete_task_retry_limit"
 
+
+    def test_missing_completion_evidence_retries_then_completes(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        _set_execution_contract(mock_handler)
+        _add_success_evidence(mock_handler)
+        client = _make_recording_client([
+            _complete_response("accepted answer", None),
+            _complete_response("accepted answer", [1]),
+        ])
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=10,
+            verbose=True,
+        )
+
+        chunks, terminal = _drain(loop.run("system prompt", "task"))
+        visible = "".join(chunk for chunk in chunks if isinstance(chunk, str))
+
+        assert len(client.calls) == 2
+        assert terminal.status is TerminalStatus.COMPLETED
+        assert terminal.text == "accepted answer"
+        assert client.calls[1][0]["tool_results"] == [
+            {"tool_use_id": "call_complete", "content": "{}"},
+        ]
+        assert "Available successful evidence_refs:" in client.calls[1][0]["content"]
+        assert "ref=1" in client.calls[1][0]["content"]
+        assert visible.count("accepted answer") == 1
     def test_wait_for_user_tool(self, mock_handler: BaseHandler) -> None:
         """WAIT_FOR_USER returns the original payload as a waiting terminal."""
 

@@ -37,6 +37,21 @@ class TestBaseHandlerDispatch:
         result = _exhaust(gen)
         assert result.data == {"result": "hello"}
 
+    def test_registry_tool_prompt_includes_new_evidence_record(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        result = _exhaust(mock_handler.dispatch(
+            "echo",
+            {"message": "hello"},
+            MockResponse(),
+        ))
+
+        assert result.next_prompt is not None
+        assert "recent_evidence:" in result.next_prompt
+        assert "ref=1" in result.next_prompt
+        assert "tool=echo" in result.next_prompt
+        assert "recent_evidence: none" not in result.next_prompt
     def test_dispatch_unknown_tool(self, mock_handler: BaseHandler) -> None:
         """未知工具返回错误提示."""
         gen = mock_handler.dispatch(
