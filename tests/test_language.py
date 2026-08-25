@@ -1,9 +1,65 @@
 """Tests for language switching — AgentConfig.resolved_language and tool descriptions."""
 
-import os
+import io
+from importlib import resources
+
+import pytest
 
 from zero_agent.core.config import AgentConfig, LLMBackendConfig
+from zero_agent.core.exceptions import ConfigError
+from zero_agent.core.localization import (
+    PROMPT_REPLY_LANGUAGE,
+    PROMPT_TASK_CONTROL,
+    PromptLocalizer,
+)
 from zero_agent.tools.registry import ToolRegistry
+
+
+def test_prompt_localizer_rejects_corrupt_requested_catalog(monkeypatch) -> None:
+    original_files = resources.files
+
+    class FakeResource:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+
+        def open(self, mode: str = "rb") -> io.BytesIO:
+            return io.BytesIO(self._data)
+
+    class FakeTraversable:
+        def joinpath(self, *parts: str) -> object:
+            path = "/".join(parts)
+            if path == "locale/zh/LC_MESSAGES/zero_agent.mo":
+                return FakeResource(b"not a GNU mo file")
+            if path == "locale/en/LC_MESSAGES/zero_agent.mo":
+                return original_files("zero_agent.assets").joinpath(path)
+            raise FileNotFoundError(path)
+
+    monkeypatch.setattr(resources, "files", lambda package: FakeTraversable())
+
+    with pytest.raises(ConfigError):
+        PromptLocalizer("zh")
+
+
+def test_prompt_localizer_uses_chinese_catalog() -> None:
+    localizer = PromptLocalizer("zh")
+
+    assert localizer.text(PROMPT_REPLY_LANGUAGE) == (
+        "按用户的语言回复，或遵循用户明确指定的语言。"
+    )
+    protocol = localizer.text(PROMPT_TASK_CONTROL)
+    assert protocol.startswith("## 任务控制协议")
+    assert (
+        "调用过任何真实工具后，任务处于 EXECUTING 状态，"
+        "必须在任务完成时调用 provider-native"
+    ) in protocol
+
+def test_prompt_localizer_uses_english_fallback_for_unknown_language() -> None:
+    localizer = PromptLocalizer("fr-FR")
+
+    assert localizer.text(PROMPT_REPLY_LANGUAGE) == (
+        "Summarize and reply in user's language or follow user's prompt."
+    )
+    assert localizer.text(PROMPT_TASK_CONTROL).startswith("## Task control protocol")
 
 
 class TestResolvedLanguage:

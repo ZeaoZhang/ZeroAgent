@@ -1,0 +1,47 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: zh\n"
+
+msgid "prompt.reply_language"
+msgstr "按用户的语言回复，或遵循用户明确指定的语言。"
+
+msgid "prompt.task_control_protocol"
+msgstr ""
+"## 任务控制协议\n"
+"每个新任务从 OPEN 状态开始；不要根据措辞推断它是聊天还是执行任务。\n"
+"只要需要检查或修改外部状态，就调用真实工具。\n"
+"调用过任何真实工具后，任务处于 EXECUTING 状态，"
+"必须在任务完成时调用 provider-native "
+"complete_task(answer, evidence_refs)，并引用相关的成功证据账本记录。\n"
+"仅回答问题的任务可以在没有 evidence_refs 的情况下调用 complete_task。\n"
+"仅在确实需要用户输入时调用 ask_user。\n"
+"已进入执行状态后，不要只用普通文本结束任务。"
+
+msgid "prompt.today_label"
+msgstr "今天："
+
+msgid "prompt.peer_hint"
+msgstr "[Peer] 用户提及其他会话/后台任务状态时: temp/model_responses/ (只找近期修改的文件尾部)"
+
+msgid "weekday.monday"
+msgstr "周一"
+
+msgid "weekday.tuesday"
+msgstr "周二"
+
+msgid "weekday.wednesday"
+msgstr "周三"
+
+msgid "weekday.thursday"
+msgstr "周四"
+
+msgid "weekday.friday"
+msgstr "周五"
+
+msgid "weekday.saturday"
+msgstr "周六"
+
+msgid "weekday.sunday"
+msgstr "周日"

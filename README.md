@@ -25,8 +25,11 @@ cd ZeroAgent
 
 python -m venv .venv
 source .venv/bin/activate
+./scripts/compile_prompt_catalogs.sh
 pip install -e .
 ```
+
+源码 checkout、测试和打包前需要 GNU gettext 提供 `msgfmt`；`.mo` 是编译生成文件，已被 Git 忽略，不提交。
 
 运行环境:
 
@@ -282,12 +285,11 @@ docs/          # quickstart、architecture、reflect 文档
 ## 开发
 
 ```bash
-pip install -e ".[all-extras]"
-pip install pytest
+pip install -e ".[all-extras,test]"
 pytest tests/ -v
 ```
 
-本仓库包含 GitHub Actions workflow，会在 push 和 pull request 时使用 Python 3.10、3.11、3.12 运行 pytest。
+本仓库包含 GitHub Actions workflow，会在 push 和 pull request 时使用 Python 3.10、3.11、3.12 运行 pytest。`test` extra 提供 pytest 和 pytest-asyncio；`ui` extra 提供 Streamlit、FastAPI、Pillow 等 UI 测试依赖。
 
 编码约定:
 

@@ -17,7 +17,16 @@ from zero_agent.core.config import AgentConfig, load_default_config
 from zero_agent.core.exceptions import ConfigError
 from zero_agent.core.handler import BaseHandler
 from zero_agent.core.hooks import HookSystem
+from zero_agent.core.localization import (
+    PROMPT_PEER_HINT,
+    PROMPT_REPLY_LANGUAGE,
+    PROMPT_TASK_CONTROL,
+    PROMPT_TODAY_LABEL,
+    WEEKDAY_MESSAGE_IDS,
+    PromptLocalizer,
+)
 from zero_agent.core.loop import AgentLoop
+
 from zero_agent.core.types import (
     EvidenceLedger,
     PendingTaskState,
@@ -827,35 +836,30 @@ class ZeroAgent:
     def _build_system_prompt(self) -> str:
         """构建默认系统提示词.
 
-        拼接顺序：资产文本 + Today 行 + 全局记忆上下文。
+        拼接顺序：资产文本、回复语言、日期、全局记忆上下文和任务协议。
 
         Returns:
             系统提示词字符串.
         """
         lang = self.config.resolved_language
+        localizer = PromptLocalizer(lang)
 
         prompt = self._load_system_prompt_template(lang)
-        prompt += f"\nToday: {time.strftime('%Y-%m-%d %a')}\n"
+        prompt += f"\n{localizer.text(PROMPT_REPLY_LANGUAGE)}\n"
+
+        now = time.localtime()
+        date = time.strftime("%Y-%m-%d", now)
+        weekday = localizer.text(WEEKDAY_MESSAGE_IDS[now.tm_wday])
+        prompt += f"\n{localizer.text(PROMPT_TODAY_LABEL)} {date} {weekday}\n"
         prompt += self.memory.get_global_memory_context()
-        prompt += (
-            "\n## Task control protocol\n"
-            "Each new task starts in OPEN state; do not infer chat/execution from wording. "
-            "Call a real tool whenever external state must be inspected or changed. "
-            "After any real tool call, the task is EXECUTING and must finish with provider-native "
-            "complete_task(answer, evidence_refs), citing relevant successful ledger records. "
-            "Answer-only tasks may call complete_task with no evidence_refs. "
-            "Use ask_user only when user input is required. Do not end an executed task with plain text.\n"
-        )
+        prompt += f"\n{localizer.text(PROMPT_TASK_CONTROL)}\n"
 
         extra_sys = getattr(self.client, "extra_sys_prompt", "")
         if extra_sys:
             prompt += f"\n{extra_sys}"
 
         if getattr(self.config, "peer_hint", False):
-            prompt += (
-                "\n[Peer] 用户提及其他会话/后台任务状态时: "
-                "temp/model_responses/ (只找近期修改的文件尾部)\n"
-            )
+            prompt += f"\n{localizer.text(PROMPT_PEER_HINT)}\n"
 
         return prompt
 

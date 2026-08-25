@@ -272,6 +272,90 @@ class TestZeroAgentBackends:
             ZeroAgent._load_system_prompt_template("zh")
 
 
+class TestZeroAgentSystemPrompt:
+    @pytest.mark.parametrize(
+        ("language", "required", "forbidden"),
+        [
+            (
+                "zh",
+                (
+                    "按用户的语言回复，或遵循用户明确指定的语言。",
+                    "## 任务控制协议",
+                    "每个新任务从 OPEN 状态开始",
+                    "今天：",
+                    "[Peer] 用户提及其他会话/后台任务状态时:",
+                ),
+                (
+                    "Summarize and reply in user's language or follow user's prompt.",
+                    "## Task control protocol",
+                    "Each new task starts in OPEN state",
+                    "Today:",
+                    "[Peer] When the user mentions other sessions",
+                ),
+            ),
+            (
+                "en",
+                (
+                    "Summarize and reply in user's language or follow user's prompt.",
+                    "## Task control protocol",
+                    "Each new task starts in OPEN state",
+                    "Today:",
+                    "[Peer] When the user mentions other sessions",
+                ),
+                (
+                    "按用户的语言回复，或遵循用户明确指定的语言。",
+                    "## 任务控制协议",
+                    "每个新任务从 OPEN 状态开始",
+                    "今天：",
+                    "[Peer] 用户提及其他会话/后台任务状态时:",
+                ),
+            ),
+        ],
+    )
+    def test_build_system_prompt_localizes_framework_text(
+        self,
+        multi_backend_config: AgentConfig,
+        language: str,
+        required: tuple[str, ...],
+        forbidden: tuple[str, ...],
+    ) -> None:
+        multi_backend_config.language = language
+        multi_backend_config.peer_hint = True
+        agent = ZeroAgent(config=multi_backend_config)
+
+        prompt = agent._build_system_prompt()
+
+        for text in required:
+            assert text in prompt
+        for text in forbidden:
+            assert text not in prompt
+        for identifier in (
+            "complete_task",
+            "evidence_refs",
+            "ask_user",
+            "OPEN",
+            "EXECUTING",
+        ):
+            assert identifier in prompt
+
+    def test_build_system_prompt_auto_uses_resolved_language(
+        self,
+        multi_backend_config: AgentConfig,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "locale.getlocale",
+            lambda: ("zh_CN", "UTF-8"),
+        )
+        multi_backend_config.language = "auto"
+        agent = ZeroAgent(config=multi_backend_config)
+
+        prompt = agent._build_system_prompt()
+
+        assert "## 任务控制协议" in prompt
+        assert "Each new task starts in OPEN state" not in prompt
+
+
 class TestZeroAgentConfigReload:
     """Atomic hot reload and task-boundary runtime config tests."""
 

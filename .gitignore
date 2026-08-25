@@ -62,3 +62,4 @@ zero_agent/frontends/desktop/.omc/
 zero_agent/frontends/desktop/.omx/
 zero_agent/frontends/desktop/src-tauri/gen/
 zero_agent/frontends/desktop/src-tauri/target/
+zero_agent/assets/locale/*/LC_MESSAGES/*.mo

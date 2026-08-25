@@ -1,0 +1,47 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: en\n"
+
+msgid "prompt.reply_language"
+msgstr "Summarize and reply in user's language or follow user's prompt."
+
+msgid "prompt.task_control_protocol"
+msgstr ""
+"## Task control protocol\n"
+"Each new task starts in OPEN state; do not infer chat/execution from wording. "
+"Call a real tool whenever external state must be inspected or changed. "
+"After any real tool call, the task is EXECUTING and must finish with "
+"provider-native complete_task(answer, evidence_refs), citing relevant successful "
+"ledger records. Answer-only tasks may call complete_task with no evidence_refs. "
+"Use ask_user only when user input is required. Do not end an executed task with "
+"plain text."
+
+
+msgid "prompt.today_label"
+msgstr "Today:"
+
+msgid "prompt.peer_hint"
+msgstr "[Peer] When the user mentions other sessions or background task status: temp/model_responses/ (only inspect the tails of recently modified files)"
+
+msgid "weekday.monday"
+msgstr "Mon"
+
+msgid "weekday.tuesday"
+msgstr "Tue"
+
+msgid "weekday.wednesday"
+msgstr "Wed"
+
+msgid "weekday.thursday"
+msgstr "Thu"
+
+msgid "weekday.friday"
+msgstr "Fri"
+
+msgid "weekday.saturday"
+msgstr "Sat"
+
+msgid "weekday.sunday"
+msgstr "Sun"
