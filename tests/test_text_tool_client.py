@@ -224,6 +224,32 @@ def test_changed_tools_re_emit():
     assert "write" in inst2
 
 
+def test_file_write_protocol_preserves_canonical_content_argument():
+    """Text mode must expose the same file_write schema as native mode."""
+    tts = _make_tts()
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "file_write",
+            "description": "Write file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    }]
+
+    system = tts._build_protocol_prompt([], tools)[0]["content"]
+
+    assert '"content"' in system
+    assert '"content":{"type":"string"}' in system
+    assert "<file_content>" not in system
+    assert "must be placed in <file_content>" not in system
+
 # ---- _tryparse_json ----
 
 def test_tryparse_plain_json():

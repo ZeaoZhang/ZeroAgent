@@ -168,6 +168,8 @@ globalThis.__testExports = {
   restoreResumeIndex,
   hydrateBridgeSessions,
   applyCommandSuggestion,
+  setActiveSession,
+  setSessionTitleElement: (el) => { sessionTitleEl = el; },
   setMessagesElement: (el) => { messagesEl = el; },
   setInputEl: (el) => { inputEl = el; },
   setEnsureBridgeSession: (fn) => { ensureBridgeSession = fn; },
@@ -201,7 +203,18 @@ function findByClass(el, cls) {
   return null;
 }
 
+function findAllByClass(el, cls, result = []) {
+  if (!el) return result;
+  const names = String(el.className || '').split(/\s+/).filter(Boolean);
+  if (names.includes(cls) || (el.classList && el.classList.contains(cls))) result.push(el);
+  for (const child of el.children || []) findAllByClass(child, cls, result);
+  return result;
+}
 
+function textOf(el) {
+  if (!el) return '';
+  return String(el.textContent || '') + (el.children || []).map(textOf).join('');
+}
 (async () => {
   resetCounters();
 
@@ -280,6 +293,59 @@ function findByClass(el, cls) {
   assert.equal(notifiedSession.planPath, '/notified/plan.md');
   assert.equal(notifiedSession.planStatus, 'executing');
   assert.equal(notifiedSession.planTask, 'notified task');
+
+  // 8. ACP plan updates are stored as a normalized snapshot and rendered as
+  //    explicit progress/state entries instead of generic assistant text.
+  const planSession = t.createLocalSession('local-entries', 'Entries', 'bridge-entries');
+  state.activeId = planSession.id;
+  planSession.planStatus = 'planning';
+  planSession.planTask = 'make the plan readable';
+  t.handleNotification({
+    method: 'session/update',
+    params: {
+      sessionId: 'bridge-entries',
+      update: {
+        sessionUpdate: 'plan',
+        entries: [
+          { content: 'Inspect the UI', status: 'completed' },
+          { content: 'Implement the card', status: 'in_progress' },
+          { content: 'Verify the result', status: 'pending' },
+        ],
+      },
+    },
+  });
+  assert.equal(JSON.stringify(planSession.planEntries), JSON.stringify([
+    { content: 'Inspect the UI', status: 'completed' },
+    { content: 'Implement the card', status: 'in_progress' },
+    { content: 'Verify the result', status: 'pending' },
+  ]));
+  const entriesCard = t.renderPlanStatus(planSession);
+  assert.match(textOf(entriesCard), /规划中/);
+  assert.match(textOf(entriesCard), /1\/3/);
+  assert.equal(findAllByClass(entriesCard, 'plan-entry').length, 3);
+  assert.equal(findAllByClass(entriesCard, 'plan-entry-completed').length, 1);
+  assert.equal(findAllByClass(entriesCard, 'plan-entry-active').length, 1);
+  assert.equal(findAllByClass(entriesCard, 'plan-entry-pending').length, 1);
+
+  // 9. Missing entries render a waiting label, never a fabricated step.
+  const emptyPlanSession = t.createLocalSession('local-empty-plan', 'Empty plan', 'bridge-empty-plan');
+  emptyPlanSession.planStatus = 'planning';
+  emptyPlanSession.planTask = 'waiting for plan';
+  const emptyPlanCard = t.renderPlanStatus(emptyPlanSession);
+  assert.match(textOf(emptyPlanCard), /等待计划步骤/);
+  assert.equal(findAllByClass(emptyPlanCard, 'plan-entry').length, 0);
+
+  // 10. The full title remains available to the topbar element.
+  const titleEl = new FakeElement('h1');
+  t.setSessionTitleElement(titleEl);
+  const titleSession = t.createLocalSession('local-title', 'Title', 'bridge-title');
+  state.activeId = titleSession.id;
+  const longTitle = 'Plan a very long multi-step release workflow without losing detail';
+  titleSession.title = longTitle;
+  t.setActiveSession(titleSession.id);
+  assert.equal(titleEl.textContent, longTitle);
+  assert.equal(titleEl.title, longTitle);
+  assert.equal(titleEl.attributes['aria-label'], longTitle);
 
   // 8. A ready plan renders an execute button but does NOT auto-execute;
   //    only an explicit click calls executePlan exactly once and refreshes.

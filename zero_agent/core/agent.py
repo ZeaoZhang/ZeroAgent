@@ -10,6 +10,7 @@ import copy
 import os
 import re
 import time
+from dataclasses import dataclass
 from importlib import resources
 from typing import Any, Dict, Generator, List, Optional
 
@@ -60,6 +61,36 @@ class _LLMFactoryProxy:
             **kwargs,
         )
 
+
+
+@dataclass(frozen=True)
+class PromptBlock:
+    """One ordered system-prompt block."""
+
+    name: str
+    content: str
+    dynamic: bool = False
+
+
+@dataclass(frozen=True)
+class PromptAssembly:
+    """Ordered prompt blocks with explicit dynamic-state metadata."""
+
+    blocks: tuple[PromptBlock, ...]
+
+    def render(self) -> str:
+        """Render all blocks without changing their authored boundaries."""
+        return "".join(block.content for block in self.blocks)
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Return block names in render order."""
+        return tuple(block.name for block in self.blocks)
+
+    @property
+    def dynamic_names(self) -> tuple[str, ...]:
+        """Return dynamic block names in render order."""
+        return tuple(block.name for block in self.blocks if block.dynamic)
 
 LLMFactory = _LLMFactoryProxy()
 
@@ -278,7 +309,20 @@ class ZeroAgent:
         self._register_builtin_plugins(self._langfuse_tracer)
 
         # 1. 工具注册中心
-        self.registry = registry or ToolRegistry.with_builtins(self.config)
+        self._owns_registry = registry is None
+        if self._owns_registry:
+            schema_backend = self.config.default_backend or next(
+                iter(self.config.llm_backends),
+                "",
+            )
+            self.registry = ToolRegistry.with_builtins(
+                self.config,
+                language=self.config.resolved_tool_language_for_backend(
+                    schema_backend,
+                ),
+            )
+        else:
+            self.registry = registry
 
         session_kwargs: dict[str, Any] = {}
         if self._session_log_path is not None:
@@ -304,6 +348,14 @@ class ZeroAgent:
             cwd=self.config.workspace_dir,
         )
         self._wire_handler(self.handler)
+        handler_registry = getattr(self.handler, "registry", None)
+        if (
+            handler is not None
+            and handler_registry is not None
+            and handler_registry is not self.registry
+        ):
+            self._owns_registry = False
+            self.registry = handler_registry
 
         # 4. 记忆管理器
         self.memory = MemoryManager(
@@ -398,6 +450,23 @@ class ZeroAgent:
             new_client = new_sessions[target_name]
             _migrate_client_state(old_client, new_client, preserve_usage=True)
             runtime_changed = self._runtime_config_changed(old_config, new_config)
+            new_registry = old_registry
+            registry_changed = False
+            if self._owns_registry and not runtime_changed:
+                old_tool_language = (
+                    old_config.resolved_tool_language
+                    if old_active_name == "unknown"
+                    else old_config.resolved_tool_language_for_backend(old_active_name)
+                )
+                new_tool_language = new_config.resolved_tool_language_for_backend(
+                    target_name,
+                )
+                if old_tool_language != new_tool_language:
+                    new_registry = ToolRegistry.with_builtins(
+                        new_config,
+                        language=new_tool_language,
+                    )
+                    registry_changed = True
         except Exception as exc:
             import logging
             logging.getLogger("zero_agent").warning(
@@ -410,12 +479,17 @@ class ZeroAgent:
             self._sessions = new_sessions
             self.client = new_client
             self._config_path = getattr(new_config, "_source_path", self._config_path)
+            self.registry = new_registry
 
             if runtime_changed:
                 self.pending_runtime_config = new_config
 
             self.handler = old_handler
             self.handler.client = self.client
+            if registry_changed:
+                self.handler.registry = self.registry
+                if self.loop is not None:
+                    self.loop.tools_schema = self.registry.generate_openai_schema()
         except Exception as exc:
             self.config = old_config
             self._sessions = old_sessions
@@ -535,9 +609,10 @@ class ZeroAgent:
                 user_input,
             )
 
-        # 默认提示词按每轮实际任务状态重建；显式覆盖保持调用方原有语义。
-        prompt = system_prompt or self._build_system_prompt()
-        prompt_factory = None if system_prompt else self._build_system_prompt
+        # None selects the state-aware default; an empty string is a valid
+        # explicit replacement and must not fall back to the default prompt.
+        prompt = self._build_system_prompt() if system_prompt is None else system_prompt
+        prompt_factory = self._build_system_prompt if system_prompt is None else None
 
         # 创建 AgentLoop
         tools_schema = self.registry.generate_openai_schema()
@@ -686,15 +761,22 @@ class ZeroAgent:
 
         if self.pending_runtime_config is None:
             return
-        new_registry = ToolRegistry.with_builtins(self.config)
+        if self._owns_registry:
+            new_registry = ToolRegistry.with_builtins(
+                self.config,
+                language=self._tool_language_for_backend(),
+            )
+        else:
+            new_registry = self.registry
         new_memory = MemoryManager(
             memory_dir=self.config.memory_dir,
             workspace_dir=self.config.workspace_dir,
             language=self.config.resolved_language,
         )
-        self.registry = new_registry
+        if self._owns_registry:
+            self.registry = new_registry
+            self.handler.registry = self.registry
         self.memory = new_memory
-        self.handler.registry = self.registry
         self.handler.cwd = self.config.workspace_dir
         self.handler.client = self.client
         self.pending_runtime_config = None
@@ -743,11 +825,27 @@ class ZeroAgent:
         old_client = self.client
         if target is old_client:
             return
-
         _migrate_client_state(old_client, target, preserve_usage=False)
         self.client = target
         if self.handler is not None:
             self.handler.client = self.client
+        if self._owns_registry:
+            self.registry = ToolRegistry.with_builtins(
+                self.config,
+                language=self._tool_language_for_backend(name),
+            )
+            if self.handler is not None:
+                self.handler.registry = self.registry
+
+        active_loop = self.loop
+        if active_loop is not None:
+            active_loop.client = self.client
+            active_loop.tools_schema = self.registry.generate_openai_schema()
+            prompt_factory = getattr(active_loop, "system_prompt_factory", None)
+            if callable(prompt_factory):
+                prompt = prompt_factory()
+                if self.client.system != prompt:
+                    self.client.system = prompt
 
     def _register_builtin_plugins(self, tracer: Any = None) -> None:
         """注册内置插件；缺依赖或缺配置时静默跳过."""
@@ -835,36 +933,63 @@ class ZeroAgent:
                 return name
         return "unknown"
 
+    def _tool_language_for_backend(self, backend_name: Optional[str] = None) -> str:
+        """Resolve the tool-schema language for an active backend."""
+        name = backend_name or self._get_active_backend_name()
+        if name == "unknown":
+            return self.config.resolved_tool_language
+        return self.config.resolved_tool_language_for_backend(name)
+
     def _build_system_prompt(self) -> str:
         """构建本地化、状态感知的默认系统提示词.
 
-        拼接顺序：稳定核心、回复语言、日期、全局记忆、当前任务协议、
-        后端附加提示和可选 peer 提示。
         Returns:
             系统提示词字符串.
         """
+        return self._build_prompt_assembly().render()
+
+    def _build_prompt_assembly(self) -> PromptAssembly:
+        """Build the ordered default prompt blocks for the current task state."""
         lang = self.config.resolved_language
         localizer = PromptLocalizer(lang)
-
-        prompt = self._load_system_prompt_template(lang)
-        prompt += f"\n{localizer.text(PROMPT_REPLY_LANGUAGE)}\n"
+        blocks = [
+            PromptBlock("base", self._load_system_prompt_template(lang)),
+            PromptBlock(
+                "reply_language",
+                f"\n{localizer.text(PROMPT_REPLY_LANGUAGE)}\n",
+            ),
+        ]
 
         now = time.localtime()
         date = time.strftime("%Y-%m-%d", now)
         weekday = localizer.text(WEEKDAY_MESSAGE_IDS[now.tm_wday])
-        prompt += f"\n{localizer.text(PROMPT_TODAY_LABEL)} {date} {weekday}\n"
-        prompt += self.memory.get_global_memory_context()
-        task_mode = self.handler.task_contract.mode
-        prompt += f"\n{localizer.task_control(task_mode)}\n"
+        blocks.append(PromptBlock(
+            "date",
+            f"\n{localizer.text(PROMPT_TODAY_LABEL)} {date} {weekday}\n",
+            dynamic=True,
+        ))
+        blocks.append(PromptBlock(
+            "memory",
+            self.memory.get_global_memory_context(),
+            dynamic=True,
+        ))
+        blocks.append(PromptBlock(
+            "task_control",
+            f"\n{localizer.task_control(self.handler.task_contract.mode)}\n",
+            dynamic=True,
+        ))
 
         extra_sys = getattr(self.client, "extra_sys_prompt", "")
         if extra_sys:
-            prompt += f"\n{extra_sys}"
+            blocks.append(PromptBlock("backend_extra", f"\n{extra_sys}", dynamic=True))
 
         if getattr(self.config, "peer_hint", False):
-            prompt += f"\n{localizer.text(PROMPT_PEER_HINT)}\n"
+            blocks.append(PromptBlock(
+                "peer_hint",
+                f"\n{localizer.text(PROMPT_PEER_HINT)}\n",
+            ))
 
-        return prompt
+        return PromptAssembly(tuple(blocks))
 
     @staticmethod
     def _load_system_prompt_template(lang: str) -> str:

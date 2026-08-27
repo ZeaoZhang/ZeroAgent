@@ -8,7 +8,6 @@ APP_NAME="${ZA_APP_NAME:-ZeroAgent}"
 APP_PATH="${ZA_APP_PATH:-/Applications/${APP_NAME}.app}"
 BRIDGE_PORT="${BRIDGE_PORT:-14168}"
 HEALTH_URL="${ZA_HEALTH_URL:-http://127.0.0.1:${BRIDGE_PORT}/status}"
-LOG_DIR="${REPO_ROOT}/temp/restart_logs"
 SETTINGS_PATH="${HOME}/.zero_agent_desktop_settings.json"
 
 DRY_RUN=0
@@ -26,9 +25,9 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [options]
 
-Restart ZeroAgent desktop end to end:
+Install and refresh ZeroAgent desktop end to end:
   1. stop running ZeroAgent desktop/bridge processes
-  2. rebuild the editable Python package with UI extras
+  2. compile prompt catalogs and install the editable Python package with UI extras
   3. build the Tauri desktop app
   4. install the generated app to /Applications/ZeroAgent.app
   5. start the app and verify the bridge health endpoint
@@ -36,7 +35,7 @@ Restart ZeroAgent desktop end to end:
 Options:
   --status              Show current matching processes and bridge status only
   --stop-only           Stop matching ZeroAgent processes and exit
-  --skip-python-build   Skip pip install -e '.[ui]'
+  --skip-python-build   Skip prompt catalog compilation and pip install -e '.[ui]'
   --skip-desktop-build  Skip npm run tauri -- build
   --skip-install        Skip installing the built app bundle
   --no-start            Do not start the app after build/install
@@ -47,11 +46,11 @@ EOF
 }
 
 log() {
-  printf '[restart] %s\n' "$*"
+  printf '[install] %s\n' "$*"
 }
 
 die() {
-  printf '[restart] ERROR: %s\n' "$*" >&2
+  printf '[install] ERROR: %s\n' "$*" >&2
   exit 1
 }
 
@@ -177,7 +176,7 @@ match_pids() {
         $1 = ""
         command = substr($0, 2)
         if (pid == self) next
-        if (index(command, "scripts/restart.sh") > 0) next
+        if (index(command, "scripts/install.sh") > 0) next
         if (command ~ /(^|\/)awk[[:space:]]/) next
         if (index(command, "awk -v app_path=") > 0 ||
             index(command, "awk -v app_path ") > 0) next
@@ -204,7 +203,7 @@ list_matching_processes() {
         $1 = ""
         $2 = ""
         command = substr($0, 3)
-        if (index(command, "scripts/restart.sh") > 0) next
+        if (index(command, "scripts/install.sh") > 0) next
         if (command ~ /(^|\/)awk[[:space:]]/) next
         if (index(command, "awk -v app_path=") > 0 ||
             index(command, "awk -v app_path ") > 0) next
@@ -298,7 +297,7 @@ ensure_bridge_port_free() {
 }
 
 build_python_package() {
-  [[ "${SKIP_PYTHON_BUILD}" -eq 1 ]] && { log "skipping Python package build"; return 0; }
+  [[ "${SKIP_PYTHON_BUILD}" -eq 1 ]] && { log "skipping prompt catalog compilation and Python package build"; return 0; }
   run "${REPO_ROOT}/scripts/compile_prompt_catalogs.sh"
   run "${PYTHON_BIN}" -m pip install -e ".[ui]"
 }

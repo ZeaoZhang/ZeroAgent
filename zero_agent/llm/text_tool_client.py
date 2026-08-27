@@ -11,14 +11,13 @@ from the message history + tool schema. This keeps logging, history, retries,
 cost tracking, and failover behavior inside the existing session stack.
 
 Public API:
-    TextToolSession(backend, auto_save_tokens=True)
+    TextToolSession(backend, auto_save_tokens=True, language="en")
         .chat(messages, tools=None) -> Generator[str, None, MockResponse]
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Any, Dict, Generator, List, Optional
 
@@ -39,13 +38,20 @@ class TextToolSession:
     Attributes:
         backend: The wrapped session (LiteLLMSession / AutoFailoverSession).
         auto_save_tokens: When True, compress repeated tool descriptions.
+        language: Language used for the protocol instructions.
         last_tools: Last emitted tool JSON for staleness detection.
         name / log_path / temperature / max_tokens: delegated to backend.
     """
 
-    def __init__(self, backend: Any, auto_save_tokens: bool = True) -> None:
+    def __init__(
+        self,
+        backend: Any,
+        auto_save_tokens: bool = True,
+        language: str = "en",
+    ) -> None:
         self.backend = backend
         self.auto_save_tokens = auto_save_tokens
+        self.language = "zh" if language == "zh" else "en"
         self.last_tools: str = ""
         self._last_tools_json: str = ""
         self.total_cd_tokens: int = 0
@@ -179,19 +185,8 @@ class TextToolSession:
         """
         # Normalize tools for JSON emission
         tools = json.loads(json.dumps(tools, ensure_ascii=False)) if tools else tools
-
-        # file_write content hint: content goes in <file_content> tags in body, not args
-        if tools:
-            for t in tools:
-                f = t.get("function", {})
-                if f.get("name") == "file_write":
-                    props = f.get("parameters", {}).get("properties", {})
-                    props.pop("content", None)
-                    extra = '. Content must be placed in <file_content> tags in reply body, not in args'
-                    if extra not in f.get("description", ""):
-                        f["description"] = f.get("description", "") + extra
-                    break
-
+        # Keep the registry schema unchanged so native and text handlers share
+        # one authoritative argument contract.
         tool_instruction = self._prepare_tool_instruction(tools)
 
         # Extract system content
@@ -252,7 +247,7 @@ class TextToolSession:
             return ""
 
         tools_json = json.dumps(tools, ensure_ascii=False, separators=(",", ":"))
-        _en = os.environ.get("ZA_LANG") == "en"
+        _en = self.language == "en"
 
         if _en:
             tool_instruction = (

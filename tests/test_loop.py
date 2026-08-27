@@ -13,6 +13,7 @@ import pytest
 from zero_agent.core.handler import BaseHandler
 from zero_agent.core.loop import AgentLoop
 from zero_agent.core.types import StepAction, StepOutcome, TaskContract, TaskMode, TerminalStatus
+from zero_agent.core.hooks import HookSystem
 from zero_agent.llm.base import MockFunction, MockResponse, MockToolCall
 from zero_agent.tools.registry import ToolDefinition, ToolRegistry
 from zero_agent.utils.text import smart_format
@@ -24,6 +25,7 @@ def _make_mock_client(responses: List[MockResponse]):
         def __init__(self):
             self.system = ""
             self.last_tools = ""
+            self.system_snapshots = []
             self._responses = list(responses)
             self._call_count = 0
 
@@ -32,6 +34,7 @@ def _make_mock_client(responses: List[MockResponse]):
             messages: List[Dict[str, Any]],
             tools: Optional[List[Dict[str, Any]]] = None,
         ) -> Generator[str, None, MockResponse]:
+            self.system_snapshots.append(self.system)
             if self._call_count >= len(self._responses):
                 # 默认返回无工具调用的文本响应
                 yield "done"
@@ -105,6 +108,40 @@ class TestAgentLoop:
         gen = loop.run("system prompt", "do something")
         terminal = _exhaust(gen)
         assert terminal.status is TerminalStatus.COMPLETED
+
+    def test_prompt_factory_runs_after_turn_before_hook(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """Per-turn prompt state must include mutations made by turn_before."""
+        _set_open_contract(mock_handler)
+        client = _make_mock_client([
+            MockResponse(content="done"),
+        ])
+        hooks = HookSystem()
+
+        def enter_execution(_context: dict) -> None:
+            _set_execution_contract(mock_handler)
+
+        hooks.register("turn_before", enter_execution)
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=1,
+            verbose=False,
+            hooks=hooks,
+        )
+
+        _exhaust(loop.run(
+            "state={}".format(TaskMode.OPEN.value),
+            "task",
+            system_prompt_factory=lambda: (
+                f"state={mock_handler.task_contract.mode.value}"
+            ),
+        ))
+
+        assert client.system_snapshots == ["state=executing"]
 
     def test_empty_tool_calls_triggers_no_tool(self, mock_handler: BaseHandler) -> None:
         """LLM 不调用工具时自动触发 do_no_tool."""

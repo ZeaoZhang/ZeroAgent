@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-RESTART_SCRIPT = REPO_ROOT / "scripts" / "restart.sh"
+INSTALL_SCRIPT = REPO_ROOT / "scripts" / "install.sh"
 
 
 def write_fake_python(path: Path, version: str, pip_version: str) -> None:
@@ -28,20 +28,20 @@ def write_fake_python(path: Path, version: str, pip_version: str) -> None:
     path.chmod(0o755)
 
 
-class RestartScriptTest(unittest.TestCase):
+class InstallScriptTest(unittest.TestCase):
     def make_script_fixture(self, temp_dir: Path) -> tuple[Path, Path, Path]:
         repo_root = temp_dir / "repo"
         script_dir = repo_root / "scripts"
         desktop_dir = repo_root / "zero_agent" / "frontends" / "desktop"
         script_dir.mkdir(parents=True)
         desktop_dir.mkdir(parents=True)
-        shutil.copy2(RESTART_SCRIPT, script_dir / "restart.sh")
-        return repo_root, desktop_dir, script_dir / "restart.sh"
+        shutil.copy2(INSTALL_SCRIPT, script_dir / "install.sh")
+        return repo_root, desktop_dir, script_dir / "install.sh"
 
-    def test_restart_falls_back_from_incompatible_virtualenv_and_old_python3(self) -> None:
+    def test_install_falls_back_from_incompatible_virtualenv_and_old_python3(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temp_dir = Path(temporary_directory)
-            repo_root, _, restart_script = self.make_script_fixture(temp_dir)
+            repo_root, _, install_script = self.make_script_fixture(temp_dir)
             venv_python = repo_root / ".venv" / "bin" / "python"
             venv_python.parent.mkdir(parents=True)
             write_fake_python(venv_python, "3.9", "21.2.4")
@@ -58,7 +58,7 @@ class RestartScriptTest(unittest.TestCase):
                 "PYTHON": "",
             }
             result = subprocess.run(
-                ["/bin/bash", str(restart_script), "--dry-run", "--stop-only"],
+                ["/bin/bash", str(install_script), "--dry-run", "--stop-only"],
                 cwd=repo_root,
                 env=environment,
                 capture_output=True,
@@ -67,17 +67,17 @@ class RestartScriptTest(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"[restart] python: {bin_dir / 'python3.11'}", result.stdout)
+        self.assertIn(f"[install] python: {bin_dir / 'python3.11'}", result.stdout)
 
-    def test_restart_rejects_supported_python_with_unsupported_pip(self) -> None:
+    def test_install_rejects_supported_python_with_unsupported_pip(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temp_dir = Path(temporary_directory)
-            repo_root, _, restart_script = self.make_script_fixture(temp_dir)
+            repo_root, _, install_script = self.make_script_fixture(temp_dir)
             python = temp_dir / "python3.11"
             write_fake_python(python, "3.11", "21.2.4")
 
             result = subprocess.run(
-                ["/bin/bash", str(restart_script), "--dry-run", "--stop-only"],
+                ["/bin/bash", str(install_script), "--dry-run", "--stop-only"],
                 cwd=repo_root,
                 env=os.environ | {"BRIDGE_PORT": "54168", "HOME": temporary_directory, "PYTHON": str(python)},
                 capture_output=True,
@@ -88,10 +88,10 @@ class RestartScriptTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("pip must support PEP 660 editable installs", result.stderr)
 
-    def test_restart_rejects_explicit_incompatible_python(self) -> None:
+    def test_install_rejects_explicit_incompatible_python(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temp_dir = Path(temporary_directory)
-            repo_root, _, restart_script = self.make_script_fixture(temp_dir)
+            repo_root, _, install_script = self.make_script_fixture(temp_dir)
             bin_dir = temp_dir / "bin"
             bin_dir.mkdir()
             unsupported_python = bin_dir / "python3.9"
@@ -99,7 +99,7 @@ class RestartScriptTest(unittest.TestCase):
             write_fake_python(bin_dir / "python3.11", "3.11", "26.0.1")
 
             result = subprocess.run(
-                ["/bin/bash", str(restart_script), "--dry-run", "--stop-only"],
+                ["/bin/bash", str(install_script), "--dry-run", "--stop-only"],
                 cwd=repo_root,
                 env=os.environ
                 | {
@@ -116,16 +116,16 @@ class RestartScriptTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Python executable must satisfy the project's Python requirement", result.stderr)
 
-    def test_restart_uses_npm_ci_with_lockfile_and_normalizes_tauri_ci(self) -> None:
+    def test_install_uses_npm_ci_with_lockfile_and_normalizes_tauri_ci(self) -> None:
         self.assert_npm_install_command(package_lock=True, expected_command="ci")
 
-    def test_restart_uses_npm_install_without_lockfile(self) -> None:
+    def test_install_uses_npm_install_without_lockfile(self) -> None:
         self.assert_npm_install_command(package_lock=False, expected_command="install")
 
     def assert_npm_install_command(self, *, package_lock: bool, expected_command: str) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temp_dir = Path(temporary_directory)
-            repo_root, desktop_dir, restart_script = self.make_script_fixture(temp_dir)
+            repo_root, desktop_dir, install_script = self.make_script_fixture(temp_dir)
             if package_lock:
                 (desktop_dir / "package-lock.json").write_text("{}\n", encoding="utf-8")
 
@@ -145,7 +145,7 @@ class RestartScriptTest(unittest.TestCase):
             result = subprocess.run(
                 [
                     "/bin/bash",
-                    str(restart_script),
+                    str(install_script),
                     "--skip-python-build",
                     "--skip-install",
                     "--no-start",

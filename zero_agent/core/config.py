@@ -23,6 +23,8 @@ from zero_agent.core.exceptions import ConfigError
 # 配置文件 mtime 缓存，用于热加载检测
 _config_mtime: dict[str, int] = {}
 
+_CHINESE_MODEL_HINTS = ("glm", "minimax", "kimi", "qwen", "deepseek")
+
 
 def _config_path_key(path: str | Path) -> str:
     """Return the stable key used for config mtime tracking."""
@@ -217,11 +219,26 @@ class AgentConfig:
 
         for backend in self.llm_backends.values():
             model_lower = backend.model.lower()
-            if any(
-                k in model_lower
-                for k in ("glm", "minimax", "kimi", "qwen", "deepseek")
-            ):
+            if any(k in model_lower for k in _CHINESE_MODEL_HINTS):
                 return "zh"
+        return "en"
+
+    def resolved_tool_language_for_backend(self, backend_name: str) -> str:
+        """Resolve the tool-protocol language for one configured backend.
+
+        Args:
+            backend_name: Backend name from ``llm_backends``.
+
+        Returns:
+            ``"zh"`` for configured Chinese-model backends, otherwise ``"en"``.
+        """
+        if self.language != "auto":
+            return self.language
+
+        backend = self.llm_backends.get(backend_name)
+        model_lower = (backend.model if backend is not None else "").lower()
+        if any(k in model_lower for k in _CHINESE_MODEL_HINTS):
+            return "zh"
         return "en"
 
     def validate(self) -> None:

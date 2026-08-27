@@ -266,6 +266,30 @@ class TestResolvedToolLanguage:
         )
         assert config.resolved_tool_language == "en"
 
+def test_resolved_tool_language_can_follow_each_backend() -> None:
+    config = AgentConfig(
+        language="auto",
+        llm_backends={
+            "international": LLMBackendConfig(
+                name="international",
+                provider="openai",
+                api_key="k",
+                api_base="https://x.com",
+                model="gpt-4o",
+            ),
+            "chinese": LLMBackendConfig(
+                name="chinese",
+                provider="openai",
+                api_key="k",
+                api_base="https://x.com",
+                model="qwen-max",
+            ),
+        },
+    )
+
+    assert config.resolved_tool_language_for_backend("international") == "en"
+    assert config.resolved_tool_language_for_backend("chinese") == "zh"
+
 
 class TestBilingualTools:
     """Tool descriptions are in correct language based on model type.

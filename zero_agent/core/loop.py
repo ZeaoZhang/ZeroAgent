@@ -68,6 +68,7 @@ class AgentLoop:
         self.hooks = hooks
         self.handler.loop = self
         self._agent = agent
+        self.system_prompt_factory: Optional[Callable[[], str]] = None
 
     def run(
         self,
@@ -76,7 +77,20 @@ class AgentLoop:
         initial_user_content: Optional[str] = None,
         system_prompt_factory: Optional[Callable[[], str]] = None,
     ) -> Generator[Any, None, TerminalEvent]:
-        """Execute the agent loop and return one typed terminal event."""
+        """Execute the agent loop and return one typed terminal event.
+
+        Args:
+            system_prompt: Initial system prompt for the session.
+            user_input: User task text.
+            initial_user_content: Optional first user-message override.
+            system_prompt_factory: Optional callback for per-turn prompts.
+
+        Yields:
+            Turn status dictionaries and user-facing progress text.
+
+        Returns:
+            TerminalEvent describing the task terminal state.
+        """
 
         initial_content = (
             initial_user_content if initial_user_content is not None else user_input
@@ -84,8 +98,8 @@ class AgentLoop:
         messages: List[Dict[str, Any]] = [
             {"role": "user", "content": initial_content},
         ]
+        self.system_prompt_factory = system_prompt_factory
         self.client.system = system_prompt
-
         turn = 0
         terminal: Optional[TerminalEvent] = None
         response: Any = None
@@ -103,6 +117,7 @@ class AgentLoop:
             "task": user_input,
             "user_input": user_input,
             "model": self._model_name(),
+            "system_prompt": self.client.system,
             "messages": messages,
             "tools": self.tools_schema,
             "max_turns": self.handler.max_turns,
@@ -118,9 +133,6 @@ class AgentLoop:
                         self.client = self._agent.client
                         self.handler.client = self.client
 
-                if system_prompt_factory is not None:
-                    self.client.system = system_prompt_factory()
-
                 if self.verbose:
                     yield f"\n\n**LLM Running (Turn {turn}) ...**\n\n"
                 else:
@@ -135,11 +147,16 @@ class AgentLoop:
                     "tools": self.tools_schema,
                     "model": self._model_name(),
                 })
+                if self.system_prompt_factory is not None:
+                    prompt = self.system_prompt_factory()
+                    if self.client.system != prompt:
+                        self.client.system = prompt
                 self._trigger_hook("llm_before", {
                     "turn": turn,
                     "messages": messages,
                     "tools": self.tools_schema,
                     "model": self._model_name(),
+                    "system_prompt": self.client.system,
                 })
                 response_gen = self.client.chat(
                     messages=messages, tools=self.tools_schema,

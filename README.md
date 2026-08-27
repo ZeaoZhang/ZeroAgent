@@ -209,7 +209,7 @@ The Web UI and Tauri desktop app use the same static frontend under
 macOS 上推荐使用仓库脚本完成构建、安装和启动验证:
 
 ```bash
-./scripts/restart.sh
+./scripts/install.sh
 ```
 
 该脚本会停止已运行的 ZeroAgent desktop/bridge 进程，重新安装 editable
@@ -220,7 +220,7 @@ Python 包，执行 Tauri release build，安装最新 DMG 到
 只打包不安装/不启动:
 
 ```bash
-./scripts/restart.sh --skip-install --no-start
+./scripts/install.sh --skip-install --no-start
 ```
 
 手动打包:
@@ -238,7 +238,7 @@ npm run tauri -- build
 - Windows NSIS installer: `zero_agent/frontends/desktop/src-tauri/target/release/bundle/nsis/`
 
 首次启动时，桌面 App 会读取 `~/.zero_agent_desktop_settings.json`
-中的 `python_path` 和 `project_dir` 来启动 Python bridge。`scripts/restart.sh`
+中的 `python_path` 和 `project_dir` 来启动 Python bridge。`scripts/install.sh`
 会自动写入该文件；如果手动打包后看到 Setup 窗口，按提示选择当前项目目录和
 Python 解释器即可。
 

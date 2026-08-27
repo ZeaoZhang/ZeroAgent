@@ -900,6 +900,7 @@ function createLocalSession(id, title, bridgeSessionId = id) {
     planPath: null,
     planStatus: 'inactive',
     planTask: '',
+    planEntries: [],
     untitled: isUntitledSessionTitle(title),
     config: { ...state.defaultConfig },
     diagnostics: [],
@@ -919,6 +920,13 @@ function createLocalSession(id, title, bridgeSessionId = id) {
   renderSessionList();
   return sess;
 }
+function setSessionTitle(title) {
+  if (!sessionTitleEl) return;
+  const fullTitle = String(title || '');
+  sessionTitleEl.textContent = fullTitle;
+  sessionTitleEl.title = fullTitle;
+  sessionTitleEl.setAttribute('aria-label', fullTitle);
+}
 
 function setActiveSession(id) {
   // Save scroll position of current session before switching
@@ -929,7 +937,7 @@ function setActiveSession(id) {
   state.activeId = id;
   const sess = state.sessions.get(id);
   if (!sess) return;
-  sessionTitleEl.textContent = sess.title;
+  setSessionTitle(sess.title);
   renderMessages();
   renderSessionList();
   updateModelStatus();
@@ -1878,10 +1886,8 @@ function handleNotification(msg) {
       appendTurn(sess, 'tool', `[${update.status}] ${update.toolCallId || ''}`, true);
     }
   } else if (kind === 'plan') {
-    const lines = (update.entries || []).map(e =>
-      `- [${e.status || 'pending'}] ${e.content || ''}`
-    ).join('\n');
-    appendTurn(sess, 'plan', lines, false);
+    sess.planEntries = normalizePlanEntries(update.entries);
+    if (isActiveSession(sess)) renderPlanStatus(sess);
   }
 }
 
@@ -2407,7 +2413,7 @@ async function sendPrompt(text, images = [], options = {}) {
   if (sess.untitled || isUntitledSessionTitle(sess.title)) {
     sess.title = displayText.trim().slice(0, 40) + (displayText.trim().length > 40 ? '…' : '');
     sess.untitled = false;
-    sessionTitleEl.textContent = sess.title;
+    setSessionTitle(sess.title);
     renderSessionList();
   }
 
@@ -2805,12 +2811,12 @@ function showSystem(text) {
 
 // ─── Plan command ─────────────────────────────────────────────────────────
 const PLAN_STATUS_TEXT = {
-  inactive: 'inactive',
-  planning: 'planning',
-  ready: 'ready',
-  executing: 'executing',
-  failed: 'failed',
-  cancelled: 'cancelled',
+  inactive: '未开始',
+  planning: '规划中',
+  ready: '待执行',
+  executing: '执行中',
+  failed: '失败',
+  cancelled: '已取消',
 };
 const planStartPromises = new Map();   // localSessionId -> in-flight startPlan Promise
 const planExecutePromises = new Map(); // localSessionId -> in-flight executePlan Promise
@@ -2820,11 +2826,29 @@ function planStatusText(status) {
   return PLAN_STATUS_TEXT[status] || String(status || '');
 }
 
+function normalizePlanEntries(entries) {
+  return (Array.isArray(entries) ? entries : []).map((entry) => ({
+    content: String(entry?.content || entry?.title || '').trim(),
+    status: String(entry?.status || 'pending').trim() || 'pending',
+  }));
+}
+
+function planEntryStatus(status) {
+  if (status === 'completed' || status === 'done') {
+    return { className: 'plan-entry-completed', label: '已完成', marker: '✓' };
+  }
+  if (status === 'in_progress' || status === 'active' || status === 'running') {
+    return { className: 'plan-entry-active', label: '进行中', marker: '•' };
+  }
+  return { className: 'plan-entry-pending', label: '待处理', marker: '○' };
+}
+
 function mergePlanMetadata(sess, meta) {
   if (!sess || !meta) return;
   if (meta.planPath !== undefined) sess.planPath = meta.planPath;
   if (meta.planStatus !== undefined) sess.planStatus = meta.planStatus;
   if (meta.planTask !== undefined) sess.planTask = meta.planTask;
+  if (meta.planEntries !== undefined) sess.planEntries = normalizePlanEntries(meta.planEntries);
 }
 function hasActivePlan(sess) {
   if (!sess) return false;
@@ -2932,7 +2956,7 @@ function renderPlanStatus(sess) {
   header.className = 'turn-header plan-card-header';
   const tag = document.createElement('span');
   tag.className = 'turn-tag';
-  tag.textContent = 'PLAN';
+  tag.textContent = '计划';
   const statusEl = document.createElement('span');
   statusEl.className = 'turn-status';
   statusEl.textContent = planStatusText(status);
@@ -2948,6 +2972,39 @@ function renderPlanStatus(sess) {
     taskEl.textContent = sess.planTask;
     body.appendChild(taskEl);
   }
+
+  const entries = normalizePlanEntries(sess.planEntries);
+  const progressEl = document.createElement('div');
+  progressEl.className = 'plan-progress';
+  if (entries.length) {
+    const completed = entries.filter((entry) => entry.status === 'completed' || entry.status === 'done').length;
+    progressEl.textContent = `进度：${completed}/${entries.length}`;
+  } else {
+    progressEl.textContent = '等待计划步骤';
+  }
+  body.appendChild(progressEl);
+
+  if (entries.length) {
+    const list = document.createElement('div');
+    list.className = 'plan-entries';
+    for (const entry of entries) {
+      const entryState = planEntryStatus(entry.status);
+      const item = document.createElement('div');
+      item.className = `plan-entry ${entryState.className}`;
+      const marker = document.createElement('span');
+      marker.className = 'plan-entry-marker';
+      marker.textContent = entryState.marker;
+      marker.setAttribute('aria-label', entryState.label);
+      const content = document.createElement('span');
+      content.className = 'plan-entry-content';
+      content.textContent = entry.content || entryState.label;
+      item.appendChild(marker);
+      item.appendChild(content);
+      list.appendChild(item);
+    }
+    body.appendChild(list);
+  }
+
   if (sess.planPath) {
     const pathEl = document.createElement('div');
     pathEl.className = 'plan-path';

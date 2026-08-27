@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 from zero_agent.core.config import LLMBackendConfig
-from zero_agent.llm.base import extract_usage_metrics, usage_has_cache_metrics
+from zero_agent.llm.base import MockResponse, extract_usage_metrics, usage_has_cache_metrics
 from zero_agent.llm.sessions import LiteLLMSession
 
 
@@ -34,6 +34,74 @@ def test_build_messages_does_not_duplicate_session_system() -> None:
         {"role": "user", "content": "hello"},
     ]
 
+def test_stamp_cache_markers_recognizes_anthropic_provider() -> None:
+    messages = [
+        {"role": "system", "content": "stable prompt"},
+        {"role": "user", "content": "hello"},
+    ]
+
+    marked = LiteLLMSession._stamp_cache_markers(
+        messages,
+        provider="anthropic",
+    )
+
+    assert marked[0]["content"][0]["cache_control"] == {
+        "type": "persistent",
+    }
+    assert marked[-1]["content"][0]["cache_control"] == {
+        "type": "ephemeral",
+    }
+
+
+
+def test_claude_relay_conversion_preserves_cache_control() -> None:
+    session = _make_session()
+    session.config.model = "claude-3-7-sonnet"
+    session.config.provider = "openai"
+    session.system = "stable prompt"
+    session.history = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "hello"},
+            {
+                "type": "tool_result",
+                "tool_use_id": "call-1",
+                "content": "tool output",
+            },
+        ],
+    }]
+
+    marked = session._build_messages()
+    wire = session._provider_messages(marked)
+    user_message = next(message for message in wire if message["role"] == "user")
+
+    assert user_message["content"][0]["cache_control"] == {
+        "type": "ephemeral",
+    }
+
+def test_prompt_log_contains_bound_system_prompt(tmp_path, monkeypatch) -> None:
+    session = _make_session()
+    session.config.stream = False
+    session._log_dir = str(tmp_path)
+    session.system = "bound system prompt sk-test"
+
+    def fake_sync(_messages, _tools):
+        if False:
+            yield ""
+        return MockResponse(content="ok")
+
+    monkeypatch.setattr(session, "_sync_chat", fake_sync)
+    generator = session.chat([{"role": "user", "content": "hello"}], tools=[])
+    try:
+        while True:
+            next(generator)
+    except StopIteration:
+        pass
+
+    log_path = tmp_path / "default.log"
+    assert "bound system prompt" in log_path.read_text(encoding="utf-8")
+    assert "<redacted-api-key>" in log_path.read_text(encoding="utf-8")
+    assert "sk-test" not in log_path.read_text(encoding="utf-8")
 
 def test_normalize_incoming_tool_results_to_tool_messages() -> None:
     session = _make_session()

@@ -35,6 +35,45 @@ def test_create_all_sessions_accepts_text_protocol_backup_in_failover() -> None:
     assert isinstance(primary.backups[0], TextToolSession)
     assert sessions["backup"] is primary.backups[0]
 
+def test_text_session_uses_configured_tool_language(monkeypatch) -> None:
+    monkeypatch.setenv("ZA_LANG", "en")
+    config = AgentConfig(
+        language="zh",
+        llm_backends={"text": _backend("text", tool_protocol="text")},
+        default_backend="text",
+    )
+
+    session = LLMFactory.create_all_sessions(config)["text"]
+
+    assert isinstance(session, TextToolSession)
+    assert session.language == "zh"
+    instruction = session._prepare_tool_instruction([{
+        "type": "function",
+        "function": {"name": "file_read"},
+    }])
+    assert "交互协议" in instruction
+
+
+def test_text_failover_sessions_keep_per_backend_protocol_languages() -> None:
+    primary_config = _backend("primary", tool_protocol="text")
+    backup_config = _backend("backup", tool_protocol="text")
+    backup_config.model = "qwen-max"
+    config = AgentConfig(
+        language="auto",
+        llm_backends={
+            "primary": primary_config,
+            "backup": backup_config,
+        },
+        default_backend="primary",
+        failover_backends=["backup"],
+    )
+
+    session = LLMFactory.create_all_sessions(config)["primary"]
+
+    assert isinstance(session, AutoFailoverSession)
+    assert isinstance(session.primary, TextToolSession)
+    assert session.primary.language == "en"
+    assert session.backups[0].language == "zh"
 
 def test_tracer_is_shared_by_native_text_and_failover_sessions() -> None:
     config = AgentConfig(

@@ -423,10 +423,13 @@ class LiteLLMSession:
             len(normalized_messages),
             len(tools or []),
         )
-        self._write_llm_log(
-            "Prompt",
-            json.dumps(normalized_messages, ensure_ascii=False, indent=2),
-        )
+        prompt_log = json.dumps(full_messages, ensure_ascii=False, indent=2)
+        if self.config.api_key:
+            prompt_log = prompt_log.replace(
+                self.config.api_key,
+                "<redacted-api-key>",
+            )
+        self._write_llm_log("Prompt", prompt_log)
 
         try:
             if self.config.stream:
@@ -852,8 +855,9 @@ class LiteLLMSession:
         if self.config.max_tokens:
             kwargs["max_tokens"] = self.config.max_tokens
 
-        # Tool schema 缓存：最后一个 tool 标记 ephemeral cache。
-        if tools and "claude" in self.config.provider.lower():
+        # Tool schema 缓存：Anthropic 原生与 Claude relay 都标记最后一个 tool。
+        provider = (self.config.provider or "").lower()
+        if tools and ("anthropic" in provider or "claude" in provider):
             tools = list(tools)
             if tools:
                 tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
@@ -1394,8 +1398,14 @@ class LiteLLMSession:
         if not messages:
             return messages
 
-        is_claude_provider = "claude" in provider.lower()
-        is_oai_claude_relay = not is_claude_provider and LiteLLMSession._has_claude_model_in_messages(messages)
+        provider_lower = provider.lower()
+        is_claude_provider = (
+            "anthropic" in provider_lower or "claude" in provider_lower
+        )
+        is_oai_claude_relay = (
+            not is_claude_provider
+            and LiteLLMSession._has_claude_model_in_messages(messages)
+        )
 
         if not is_claude_provider and not is_oai_claude_relay:
             return messages

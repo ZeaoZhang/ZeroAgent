@@ -2,10 +2,11 @@
 
 import os
 from importlib import resources
+from types import SimpleNamespace
 
 import pytest
-
-from zero_agent.core.agent import ZeroAgent
+from zero_agent.core.agent import PromptAssembly, PromptBlock, ZeroAgent
+from zero_agent.core.handler import BaseHandler
 from zero_agent.core.config import AgentConfig, LLMBackendConfig, _config_mtime
 from zero_agent.core.exceptions import ConfigError
 from zero_agent.core.hooks import HookSystem
@@ -183,6 +184,125 @@ class TestZeroAgentBackends:
         assert agent.client is not old_client
         assert agent.client is agent._sessions["backend_b"]
 
+    def test_tool_schema_language_follows_active_backend(self) -> None:
+        config = AgentConfig(
+            language="auto",
+            llm_backends={
+                "international": LLMBackendConfig(
+                    name="international",
+                    provider="openai",
+                    api_key="key-a",
+                    api_base="https://api.a.invalid",
+                    model="gpt-4o",
+                ),
+                "chinese": LLMBackendConfig(
+                    name="chinese",
+                    provider="openai",
+                    api_key="key-b",
+                    api_base="https://api.b.invalid",
+                    model="qwen-max",
+                ),
+            },
+            default_backend="international",
+            workspace_dir="/tmp/zero-agent-schema-workspace",
+            memory_dir="/tmp/zero-agent-schema-memory",
+        )
+        agent = ZeroAgent(config=config)
+        agent.loop = SimpleNamespace(
+            client=agent.client,
+            tools_schema=agent.registry.generate_openai_schema(),
+        )
+
+        international_schema = agent.loop.tools_schema
+        assert any(
+            tool["function"]["name"] == "code_run"
+            and "Code executor" in tool["function"]["description"]
+            for tool in international_schema
+        )
+
+        agent.switch_backend("chinese")
+
+        chinese_schema = agent.loop.tools_schema
+        assert any(
+            tool["function"]["name"] == "code_run"
+            and "执行" in tool["function"]["description"]
+            for tool in chinese_schema
+        )
+
+    def test_live_loop_switch_updates_schema_without_replacing_custom_prompt(
+        self,
+    ) -> None:
+        config = AgentConfig(
+            language="auto",
+            llm_backends={
+                "international": LLMBackendConfig(
+                    name="international",
+                    provider="openai",
+                    api_key="key-a",
+                    api_base="https://api.a.invalid",
+                    model="gpt-4o",
+                ),
+                "chinese": LLMBackendConfig(
+                    name="chinese",
+                    provider="openai",
+                    api_key="key-b",
+                    api_base="https://api.b.invalid",
+                    model="qwen-max",
+                ),
+            },
+            default_backend="international",
+            workspace_dir="/tmp/zero-agent-live-workspace",
+            memory_dir="/tmp/zero-agent-live-memory",
+        )
+        agent = ZeroAgent(config=config)
+        agent.client.system = "custom prompt"
+        agent.loop = SimpleNamespace(
+            client=agent.client,
+            tools_schema=agent.registry.generate_openai_schema(),
+            system_prompt_factory=None,
+        )
+
+        agent.switch_backend("chinese")
+
+        assert agent.client.system == "custom prompt"
+        assert agent.loop.client is agent.client
+        assert any(
+            tool["function"]["name"] == "code_run"
+            and "执行" in tool["function"]["description"]
+            for tool in agent.loop.tools_schema
+        )
+
+    def test_switch_backend_updates_active_loop_client(
+        self,
+        multi_backend_config: AgentConfig,
+    ) -> None:
+        """切换后端时运行中的 loop 也必须立即使用新 session."""
+        agent = ZeroAgent(config=multi_backend_config)
+        old_client = agent.client
+        agent.loop = SimpleNamespace(client=old_client)
+
+        agent.switch_backend("backend_b")
+
+        assert agent.loop.client is agent.client
+
+    def test_custom_handler_registry_is_not_replaced_on_switch(
+        self,
+        multi_backend_config: AgentConfig,
+    ) -> None:
+        custom_registry = ToolRegistry()
+        custom_handler = BaseHandler(
+            registry=custom_registry,
+            cwd=multi_backend_config.workspace_dir,
+        )
+        agent = ZeroAgent(
+            config=multi_backend_config,
+            handler=custom_handler,
+        )
+
+        agent.switch_backend("backend_b")
+
+        assert agent.handler.registry is custom_registry
+
     def test_switch_backend_preserves_history(self, multi_backend_config: AgentConfig) -> None:
         """switch_backend 迁移对话历史."""
         agent = ZeroAgent(config=multi_backend_config)
@@ -270,6 +390,19 @@ class TestZeroAgentBackends:
 
         with pytest.raises(ConfigError, match="System prompt asset is required"):
             ZeroAgent._load_system_prompt_template("zh")
+
+
+class TestPromptAssembly:
+    def test_render_preserves_order_and_exposes_dynamic_blocks(self) -> None:
+        assembly = PromptAssembly((
+            PromptBlock("base", "base"),
+            PromptBlock("runtime", "runtime", dynamic=True),
+            PromptBlock("tools", "tools"),
+        ))
+
+        assert assembly.render() == "baseruntimetools"
+        assert assembly.names == ("base", "runtime", "tools")
+        assert assembly.dynamic_names == ("runtime",)
 
 
 class TestZeroAgentSystemPrompt:
@@ -376,6 +509,41 @@ class TestZeroAgentSystemPrompt:
         assert "使用用户当前使用的语言回复" in prompt
         assert "Reply in the language the user is currently using" not in prompt
 
+
+    def test_empty_custom_system_prompt_is_preserved(
+        self,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        config = AgentConfig(
+            llm_backends={
+                "default": LLMBackendConfig(
+                    name="default",
+                    provider="openai",
+                    api_key="test-key",
+                    api_base="https://api.openai.com/v1",
+                    model="test-model",
+                ),
+            },
+            default_backend="default",
+            max_turns=1,
+            workspace_dir=str(tmp_path / "workspace"),
+            memory_dir=str(tmp_path / "memory"),
+        )
+        fake_client = _FakeClient(
+            config.llm_backends["default"],
+            [MockResponse(content="done")],
+        )
+        monkeypatch.setattr(
+            "zero_agent.core.agent.LLMFactory.create_all_sessions",
+            lambda _config: {"default": fake_client},
+        )
+
+        agent = ZeroAgent(config=config)
+        terminal = _exhaust(agent.run("hello", system_prompt=""))
+
+        assert terminal.status is TerminalStatus.COMPLETED
+        assert fake_client.system_snapshots == [""]
 
 class TestZeroAgentConfigReload:
     """Atomic hot reload and task-boundary runtime config tests."""
@@ -645,6 +813,63 @@ class TestZeroAgentConfigReload:
             "total_output_tokens": 0,
             "total_cached_tokens": 0,
         }
+
+    def test_reload_rebuilds_tool_schema_when_model_language_changes(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        config_path = tmp_path / "config.yaml"
+        workspace = tmp_path / "workspace"
+        _write_reload_config(config_path, workspace=workspace, model="gpt-4o")
+        config = AgentConfig.from_yaml(config_path)
+        monkeypatch.setattr(
+            "zero_agent.core.agent.LLMFactory.create_all_sessions",
+            lambda current: {
+                "primary": _ReloadClient(current.llm_backends["primary"]),
+            },
+        )
+        agent = ZeroAgent(config=config)
+        baseline = _config_mtime[str(config_path)]
+
+        _write_reload_config(config_path, workspace=workspace, model="qwen-max")
+        _bump_mtime(config_path, baseline)
+
+        assert agent.reload_config() is True
+        code_run = next(
+            tool for tool in agent.registry.generate_openai_schema()
+            if tool["function"]["name"] == "code_run"
+        )
+        assert "执行" in code_run["function"]["description"]
+
+    def test_apply_pending_runtime_config_is_noop_without_pending(
+        self,
+        tmp_path,
+    ) -> None:
+        config = AgentConfig(
+            llm_backends={
+                "default": LLMBackendConfig(
+                    name="default",
+                    provider="openai",
+                    api_key="key",
+                    api_base="https://api.invalid",
+                    model="gpt-4o",
+                ),
+            },
+            default_backend="default",
+            workspace_dir=str(tmp_path / "workspace"),
+            memory_dir=str(tmp_path / "memory"),
+        )
+        agent = ZeroAgent(config=config)
+        old_registry = agent.registry
+        old_memory = agent.memory
+        old_cwd = agent.handler.cwd
+
+        agent._apply_pending_runtime_config()
+
+        assert agent.registry is old_registry
+        assert agent.memory is old_memory
+        assert agent.handler.cwd == old_cwd
 
     def test_reload_preserves_actual_active_backup_identity(
         self,

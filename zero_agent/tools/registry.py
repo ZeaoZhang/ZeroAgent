@@ -9,8 +9,7 @@ ToolRegistry: 工具注册、查找、Schema 生成（支持 OpenAI 和 Claude �
     3. BaseHandler.do_<name>() 方法约定 — 由 handler.dispatch() 自动发现
 """
 
-from __future__ import annotations
-
+import copy
 import importlib
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Generator, List, Optional
@@ -183,18 +182,26 @@ class ToolRegistry:
         return result
 
     @classmethod
-    def with_builtins(cls, config: AgentConfig) -> "ToolRegistry":
-        """工厂方法：创建预注册了内置工具的 ToolRegistry.
-
-        自动发现并注册 zero_agent/tools/builtin/ 下的所有工具模块.
+    def with_builtins(
+        cls,
+        config: AgentConfig,
+        *,
+        language: Optional[str] = None,
+    ) -> "ToolRegistry":
+        """Factory method: create a registry populated with builtin tools.
 
         Args:
-            config: Agent 配置，用于工具初始化时的路径参考.
+            config: Agent configuration used by builtin handlers.
+            language: Optional language override for tool descriptions.
 
         Returns:
-            预注册了内置工具的 ToolRegistry 实例.
+            Registry containing the builtin tools.
         """
         registry = cls()
+        registration_config = config
+        if language is not None:
+            registration_config = copy.copy(config)
+            registration_config.language = language
 
         builtin_modules = [
             ("zero_agent.tools.builtin.control", "register_control_tools"),
@@ -210,7 +217,7 @@ class ToolRegistry:
             try:
                 module = importlib.import_module(module_name)
                 if hasattr(module, register_func):
-                    getattr(module, register_func)(registry, config)
+                    getattr(module, register_func)(registry, registration_config)
             except ImportError:
                 # 内置模块不存在时跳过，不阻断注册流程
                 pass

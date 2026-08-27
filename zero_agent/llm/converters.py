@@ -186,7 +186,10 @@ def msgs_claude_to_openai(
                 elif b.get("type") == "image_url":
                     text_parts.append(b)
                 elif b.get("type") == "text" and b.get("text"):
-                    text_parts.append({"type": "text", "text": b.get("text", "")})
+                    text_block = {"type": "text", "text": b.get("text", "")}
+                    if b.get("cache_control") is not None:
+                        text_block["cache_control"] = b["cache_control"]
+                    text_parts.append(text_block)
             if text_parts:
                 result.append({"role": "user", "content": text_parts})
         else:

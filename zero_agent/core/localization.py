@@ -81,7 +81,17 @@ class PromptLocalizer:
         return translated
 
     def task_control(self, mode: TaskMode) -> str:
-        """Return the localized control contract for the observed task mode."""
+        """Return the localized control contract for the observed task mode.
+
+        Args:
+            mode: Current task state.
+
+        Returns:
+            Localized control-contract XML block.
+
+        Raises:
+            ConfigError: If ``mode`` has no registered prompt translation.
+        """
 
         try:
             message_id = _TASK_CONTROL_MESSAGE_IDS[mode]

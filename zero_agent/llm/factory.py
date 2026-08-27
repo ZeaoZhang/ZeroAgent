@@ -34,6 +34,7 @@ class LLMFactory:
         session_log_path: str | None = None,
         *,
         tracer: Any | None = None,
+        tool_language: str = "en",
     ) -> LiteLLMSession | TextToolSession:
         """创建 LLM 会话.
 
@@ -44,6 +45,7 @@ class LLMFactory:
             backend_config: 单个 LLM 后端的配置.
             log_dir: LLM 调用日志目录.
             sessions_dir: 会话历史日志目录.
+            tool_language: 文本工具协议使用的语言.
 
         Returns:
             LiteLLMSession 或 TextToolSession 实例.
@@ -63,7 +65,11 @@ class LLMFactory:
             tracer=tracer,
         )
         if getattr(backend_config, "tool_protocol", "native") == "text":
-            session = TextToolSession(session, auto_save_tokens=True)
+            session = TextToolSession(
+                session,
+                auto_save_tokens=True,
+                language=tool_language,
+            )
         return session
 
     @staticmethod
@@ -109,6 +115,7 @@ class LLMFactory:
                 sessions_dir=config.sessions_dir,
                 session_log_path=session_log_path,
                 tracer=tracer,
+                tool_language=config.resolved_tool_language_for_backend(name),
             )
 
         if config.failover_backends:
@@ -144,6 +151,9 @@ class LLMFactory:
             sessions_dir=config.sessions_dir,
             session_log_path=session_log_path,
             tracer=tracer,
+            tool_language=config.resolved_tool_language_for_backend(
+                config.default_backend,
+            ),
         )
 
 
@@ -168,6 +178,7 @@ class LLMFactory:
                 sessions_dir=config.sessions_dir,
                 session_log_path=session_log_path,
                 tracer=tracer,
+                tool_language=config.resolved_tool_language_for_backend(name),
             ))
         return AutoFailoverSession(
             primary=primary,

@@ -495,7 +495,7 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
 }
 
 .topbar-left {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -504,6 +504,7 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
   font-size: 15px;
   font-weight: 600;
   color: var(--text);
+  min-width: 0;
 }
 
 .topbar-right {
@@ -511,6 +512,12 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
 }
 
 #session-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(52vw, 560px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 13px;
   font-weight: 600;
   margin: 0;
@@ -721,18 +728,50 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
 }
 .plan-status-card .plan-card-header {
   cursor: default;
-  width: fit-content;
+  width: 100%;
+  max-width: 100%;
 }
 .plan-status-card .plan-task {
   font-weight: 600;
   color: var(--text);
   margin-bottom: 4px;
+  overflow-wrap: anywhere;
 }
+.plan-status-card .plan-progress {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin: 6px 0 8px;
+}
+.plan-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0 0 8px;
+}
+.plan-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.plan-entry-marker {
+  flex: 0 0 1.1em;
+  text-align: center;
+  font-weight: 700;
+}
+.plan-entry-content { min-width: 0; }
+.plan-entry-completed { color: var(--text-muted); text-decoration: line-through; }
+.plan-entry-completed .plan-entry-marker { color: var(--ok); }
+.plan-entry-active { color: var(--text); font-weight: 600; }
+.plan-entry-active .plan-entry-marker { color: var(--warn); }
+.plan-entry-pending { color: var(--text-muted); }
+.plan-entry-pending .plan-entry-marker { color: var(--text-faint); }
 .plan-status-card .plan-path {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-muted);
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 .plan-status-card .plan-execute-btn {
   margin-top: 8px;
