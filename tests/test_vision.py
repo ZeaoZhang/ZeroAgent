@@ -5,7 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from zero_agent.core.config import AgentConfig, LLMBackendConfig
+from zero_agent.core.loop import AgentLoop
 from zero_agent.core.exceptions import LLMError
+from zero_agent.core.types import StepAction
 from zero_agent.llm import sessions as sessions_module
 from zero_agent.llm.sessions import LiteLLMSession
 from zero_agent.tools.registry import ToolRegistry
@@ -97,7 +99,61 @@ def test_openai_compatible_backend_forwards_explicit_thinking_config() -> None:
 
     assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 4096}
 
-def test_vision_tool_rejects_text_only_default_backend() -> None:
+def test_vision_tool_uses_first_visual_backend_when_default_is_text_only() -> None:
+    calls = []
+    config = AgentConfig(
+        default_backend="text",
+        llm_backends={
+            "text": LLMBackendConfig(
+                name="text",
+                provider="openai",
+                api_key="key",
+                api_base="https://relay.example/v1",
+                model="deepseek-text",
+                vision=False,
+            ),
+            "visual": LLMBackendConfig(
+                name="visual",
+                provider="openai",
+                api_key="key",
+                api_base="https://relay.example/v1",
+                model="gpt-vision",
+                vision=True,
+            ),
+        },
+    )
+    tool = ToolRegistry.with_builtins(config).get("vision")
+    assert tool is not None
+
+    class VisualSession:
+        def vision(self, image_path, prompt):
+            calls.append((image_path, prompt))
+            return "image understood"
+
+    class Handler:
+        parent = type("Parent", (), {"_sessions": {"visual": VisualSession()}})()
+        @staticmethod
+        def _default_next_prompt(_args):
+            return "\n"
+
+    result = tool.handler({"image_path": "screen.png", "prompt": "describe"}, None, Handler())
+    assert next(result).startswith("[Action] Analyzing image")
+    with pytest.raises(StopIteration) as stopped:
+        next(result)
+    outcome = stopped.value.value
+
+    assert outcome.data == {
+        "status": "success",
+        "backend": "visual",
+        "content": "image understood",
+    }
+    assert calls == [("screen.png", "describe")]
+    assert outcome.action is StepAction.CONTINUE
+    assert outcome.next_prompt
+    assert AgentLoop._valid_step_outcome(outcome)
+
+
+def test_vision_tool_rejects_explicit_text_only_backend_with_valid_continuation() -> None:
     config = AgentConfig(
         default_backend="text",
         llm_backends={
@@ -125,11 +181,24 @@ def test_vision_tool_rejects_text_only_default_backend() -> None:
     class Handler:
         parent = type("Parent", (), {"_sessions": {}})()
 
-    result = tool.handler({"image_path": "screen.png"}, None, Handler())
+        @staticmethod
+        def _default_next_prompt(_args):
+            return "\n"
+
+    result = tool.handler(
+        {"image_path": "screen.png", "backend": "text"},
+        None,
+        Handler(),
+    )
     with pytest.raises(StopIteration) as stopped:
         next(result)
-    assert stopped.value.value.data["status"] == "error"
-    assert "does not support vision" in stopped.value.value.data["msg"]
+    outcome = stopped.value.value
+
+    assert outcome.data["status"] == "error"
+    assert "does not support vision" in outcome.data["msg"]
+    assert outcome.action is StepAction.CONTINUE
+    assert outcome.next_prompt
+    assert AgentLoop._valid_step_outcome(outcome)
 
 def test_anthropic_vision_uses_base64_image_source(monkeypatch) -> None:
     session = LiteLLMSession(

@@ -67,16 +67,34 @@ def _make_vision_handler(config: AgentConfig):
         handler: Any,
     ) -> Generator[str, None, StepOutcome]:
         image_path = str(args.get("image_path") or "")
-        backend_name = args.get("backend") or config.default_backend
+        requested_backend = args.get("backend")
+        if requested_backend:
+            backend_name = str(requested_backend)
+        else:
+            default_config = config.llm_backends.get(config.default_backend)
+            if default_config is not None and default_config.vision:
+                backend_name = config.default_backend
+            else:
+                backend_name = next(
+                    (
+                        name
+                        for name in sorted(config.llm_backends)
+                        if config.llm_backends[name].vision
+                    ),
+                    config.default_backend,
+                )
+        next_prompt = handler._default_next_prompt(args)
         backend_config = config.llm_backends.get(backend_name)
         if backend_config is None:
             return StepOutcome(
                 {"status": "error", "msg": f"unknown backend: {backend_name}"},
+                next_prompt=next_prompt,
                 action=StepAction.CONTINUE,
             )
         if not backend_config.vision:
             return StepOutcome(
                 {"status": "error", "msg": f"backend does not support vision: {backend_name}"},
+                next_prompt=next_prompt,
                 action=StepAction.CONTINUE,
             )
 
@@ -85,6 +103,7 @@ def _make_vision_handler(config: AgentConfig):
         if client is None or not hasattr(client, "vision"):
             return StepOutcome(
                 {"status": "error", "msg": f"vision session unavailable: {backend_name}"},
+                next_prompt=next_prompt,
                 action=StepAction.CONTINUE,
             )
 
@@ -95,11 +114,12 @@ def _make_vision_handler(config: AgentConfig):
             safe_error = str(exc).replace(backend_config.api_key, "<redacted-api-key>")
             return StepOutcome(
                 {"status": "error", "msg": safe_error[:1000]},
+                next_prompt=next_prompt,
                 action=StepAction.CONTINUE,
             )
         return StepOutcome(
             {"status": "success", "backend": backend_name, "content": result},
+            next_prompt=next_prompt,
             action=StepAction.CONTINUE,
         )
-
     return _handler
