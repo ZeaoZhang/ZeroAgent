@@ -250,6 +250,7 @@ class Session:
     group_id: Optional[str] = None  # Session group ID
     log_path: Optional[str] = None
     sub_agents: List[Dict[str, Any]] = field(default_factory=list)
+    agent_turn_token: str = ""
     restore_history: bool = False
     plan_path: Optional[str] = None
     plan_status: str = "inactive"  # inactive|planning|ready|executing|failed|cancelled
@@ -308,6 +309,23 @@ def session_has_user_message(session_or_messages: Session | list[dict]) -> bool:
     )
 
 
+def _clone_agent_records(records: list[dict]) -> list[dict]:
+    return [copy.deepcopy(agent) for agent in records]
+
+
+def _normalize_sub_agents(value: Any) -> List[Dict[str, Any]]:
+    agents: List[Dict[str, Any]] = []
+    for raw in value or []:
+        if not isinstance(raw, dict):
+            continue
+        agent = copy.deepcopy(raw)
+        if agent.get("status") == "running":
+            agent["status"] = "cancelled"
+            agent["updated_at"] = time.time()
+            agent["reason"] = "bridge_restarted"
+        agents.append(agent)
+    return agents
+
 def _session_to_persistable(sess: Session) -> dict:
     return {
         "id": sess.id,
@@ -315,7 +333,7 @@ def _session_to_persistable(sess: Session) -> dict:
         "cwd": sess.cwd,
         "created_at": sess.created_at,
         "updated_at": sess.updated_at,
-        "messages": list(sess.messages),
+        "messages": copy.deepcopy(sess.messages),
         "msg_seq": sess.msg_seq,
         "log_path": sess.log_path,
         "status": "idle",
@@ -325,7 +343,7 @@ def _session_to_persistable(sess: Session) -> dict:
         "model_override": sess.model_override,
         "token_usage": _normalize_token_usage(sess.token_usage),
         "group_id": sess.group_id,
-        "sub_agents": list(sess.sub_agents),
+        "sub_agents": _clone_agent_records(sess.sub_agents),
         "planPath": sess.plan_path,
         "planStatus": sess.plan_status,
         "planTask": sess.plan_task,
@@ -355,7 +373,7 @@ def _session_from_persisted(
         model_override=data.get("model_override"),
         log_path=owned_path,
         group_id=data.get("group_id"),
-        sub_agents=list(data.get("sub_agents") or []),
+        sub_agents=_normalize_sub_agents(data.get("sub_agents")),
         token_usage=_normalize_token_usage(data.get("token_usage")),
         plan_path=data.get("planPath"),
         plan_status=plan_status,
@@ -585,29 +603,30 @@ class AgentManager:
         return []
 
     def snapshot(self, sess: Session, include_messages: bool = True) -> dict:
-        out = {
-            "sessionId": sess.id,
-            "id": sess.id,
-            "title": sess.title,
-            "cwd": sess.cwd,
-            "status": sess.status,
-            "terminalStatus": sess.terminal_status,
-            "reason": sess.terminal_reason,
-            "createdAt": sess.created_at,
-            "updatedAt": sess.updated_at,
-            "lastError": sess.last_error,
-            "modelOverride": sess.model_override,
-            "tokenUsage": sess.token_usage,
-            "groupId": sess.group_id,
-            "subAgents": sess.sub_agents,
-            "planPath": sess.plan_path,
-            "planStatus": sess.plan_status,
-            "planTask": sess.plan_task,
-        }
-        if include_messages:
-            out["messages"] = list(sess.messages)
-            out["partial"] = dict(sess.partial) if sess.partial else None
-        return out
+        with self.lock:
+            out = {
+                "sessionId": sess.id,
+                "id": sess.id,
+                "title": sess.title,
+                "cwd": sess.cwd,
+                "status": sess.status,
+                "terminalStatus": sess.terminal_status,
+                "reason": sess.terminal_reason,
+                "createdAt": sess.created_at,
+                "updatedAt": sess.updated_at,
+                "lastError": sess.last_error,
+                "modelOverride": sess.model_override,
+                "tokenUsage": copy.deepcopy(sess.token_usage),
+                "groupId": sess.group_id,
+                "subAgents": _clone_agent_records(sess.sub_agents),
+                "planPath": sess.plan_path,
+                "planStatus": sess.plan_status,
+                "planTask": sess.plan_task,
+            }
+            if include_messages:
+                out["messages"] = copy.deepcopy(sess.messages)
+                out["partial"] = copy.deepcopy(sess.partial) if sess.partial else None
+            return out
 
     def add_message(self, sess: Session, role: str, content: str, **extra) -> dict:
         sess.msg_seq += 1
@@ -953,7 +972,6 @@ class AgentManager:
             sess.thread = t
             t.start()
             seq = sess.msg_seq
-        emit_session_state(sess, "running")
         return {"ok": True, "sessionId": sid, "accepted": True, "userMessageId": user_msg["id"], "seq": seq}
 
     def start_plan(self, sid: str, task: str) -> dict:
@@ -997,7 +1015,7 @@ class AgentManager:
                 with contextlib.suppress(OSError):
                     shutil.rmtree(workspace.directory, ignore_errors=True)
                 raise web.HTTPConflict(text=json.dumps({"error": "session is no longer available"}, ensure_ascii=False), content_type="application/json")
-            agent, display_q = submitted
+            agent, display_q, token = submitted
 
             user_msg = self.add_message(sess, "user", task_text)
             sess.status = "running"
@@ -1005,7 +1023,7 @@ class AgentManager:
             sess.terminal_status = ""
             sess.terminal_reason = ""
             sess.partial = {"id": sess.msg_seq + 1, "role": "assistant", "content": "", "ts": time.time(), "partial": True}
-            sess.thread = threading.Thread(target=self._drain_turn, args=(sess, agent, display_q), daemon=True, name=f"Plan-{sid}")
+            sess.thread = threading.Thread(target=self._run_submitted_turn, args=(sess, agent, display_q, token), daemon=True, name=f"Plan-{sid}")
             sess.thread.start()
             seq = sess.msg_seq
             self._persist_sessions()
@@ -1044,14 +1062,14 @@ class AgentManager:
             if submitted is None:
                 sess.plan_status = "ready"
                 raise web.HTTPConflict(text=json.dumps({"error": "session is no longer available"}, ensure_ascii=False), content_type="application/json")
-            agent, display_q = submitted
+            agent, display_q, token = submitted
 
             sess.status = "running"
             sess.last_error = ""
             sess.terminal_status = ""
             sess.terminal_reason = ""
             sess.partial = {"id": sess.msg_seq + 1, "role": "assistant", "content": "", "ts": time.time(), "partial": True}
-            sess.thread = threading.Thread(target=self._drain_turn, args=(sess, agent, display_q), daemon=True, name=f"Execute-{sid}")
+            sess.thread = threading.Thread(target=self._run_submitted_turn, args=(sess, agent, display_q, token), daemon=True, name=f"Execute-{sid}")
             sess.thread.start()
             seq = sess.msg_seq
             self._persist_sessions()
@@ -1100,6 +1118,34 @@ class AgentManager:
         contract = getattr(handler, "task_contract", None)
         return getattr(contract, "mode", None)
 
+    def _register_agent_locked(self, sess: Session) -> tuple[str, dict]:
+        token = uuid.uuid4().hex
+        now = time.time()
+        record = {
+            "id": f"agent-{uuid.uuid4().hex[:12]}",
+            "name": "ZeroAgent",
+            "type": "session-agent",
+            "status": "running",
+            "created_at": now,
+            "updated_at": now,
+            "reason": "",
+        }
+        sess.agent_turn_token = token
+        sess.sub_agents[:] = [record]
+        return token, record
+
+    def _update_agent_locked(self, sess: Session, token: str, status: str, reason: str = "") -> Optional[dict]:
+        if token != sess.agent_turn_token or not sess.sub_agents:
+            return None
+        record = sess.sub_agents[0]
+        record["status"] = status
+        record["updated_at"] = time.time()
+        record["reason"] = reason
+        return record
+
+    def _turn_is_current_locked(self, sess: Session, token: str) -> bool:
+        return token == sess.agent_turn_token and bool(sess.sub_agents)
+
     def _submit_turn(
         self,
         sess: Session,
@@ -1108,30 +1154,43 @@ class AgentManager:
         task_mode: TaskMode,
         plan_path: Optional[str],
     ):
-        """Synchronously ensure a runner and submit one task.
-
-        Returns ``(agent, display_q)``, or ``None`` when the session was
-        detached (deleted/replaced) before submission could start.
-        """
+        """Synchronously ensure a runner and submit one task."""
         with self.lock:
             if self.sessions.get(sess.id) is not sess:
                 return None
-            if sess.agent is None:
-                sess.agent = self.make_agent(sess)
-            agent = sess.agent
-            if self.sessions.get(sess.id) is not sess:
-                return None
-            if not hasattr(agent, "put_task"):
-                raise RuntimeError("AgentRunner object has no put_task method")
-            display_q = agent.put_task(
-                prompt,
-                images=images or [],
-                task_mode=task_mode,
-                plan_path=plan_path,
-            )
-            return agent, display_q
+            try:
+                if sess.agent is None:
+                    sess.agent = self.make_agent(sess)
+                agent = sess.agent
+                if self.sessions.get(sess.id) is not sess:
+                    return None
+                if not hasattr(agent, "put_task"):
+                    raise RuntimeError("AgentRunner object has no put_task method")
+                display_q = agent.put_task(
+                    prompt,
+                    images=images or [],
+                    task_mode=task_mode,
+                    plan_path=plan_path,
+                )
+            except Exception as exc:
+                if sess.sub_agents:
+                    sess.sub_agents[0]["status"] = "failed"
+                    sess.sub_agents[0]["updated_at"] = time.time()
+                    sess.sub_agents[0]["reason"] = str(exc)
+                sess.agent_turn_token = ""
+                self._persist_sessions()
+                raise
+            token, _ = self._register_agent_locked(sess)
+            self._persist_sessions()
+            return agent, display_q, token
 
-    def _drain_turn(self, sess: Session, agent: Any, display_q) -> None:
+    def _run_submitted_turn(self, sess: Session, agent: Any, display_q, token: str) -> None:
+        try:
+            self._drain_turn(sess, agent, display_q, token)
+        except Exception as exc:
+            self._fail_turn(sess, exc, token)
+
+    def _drain_turn(self, sess: Session, agent: Any, display_q, token: str) -> None:
         pieces: list[str] = []
         terminal: Optional[dict] = None
         import queue as _queue
@@ -1149,7 +1208,7 @@ class AgentManager:
                     continue
                 pieces.append(text)
                 with self.lock:
-                    if sess.partial is not None:
+                    if self._turn_is_current_locked(sess, token) and sess.partial is not None:
                         sess.partial["content"] = "".join(pieces) if getattr(agent, "inc_out", False) else text
                         sess.partial["ts"] = time.time()
                         sess.updated_at = time.time()
@@ -1165,6 +1224,8 @@ class AgentManager:
         reason = str(terminal.get("reason") or "")
         text = str(terminal.get("text") or "")
         with self.lock:
+            if not self._turn_is_current_locked(sess, token):
+                return
             sess.partial = None
             sess.terminal_status = terminal_status
             sess.terminal_reason = reason
@@ -1216,18 +1277,28 @@ class AgentManager:
                 self.add_message(sess, "error", text or error_detail)
                 if plan_contract:
                     sess.plan_status = "failed"
+            agent_status = {
+                "completed": "completed",
+                "waiting": "waiting",
+                "cancelled": "cancelled",
+            }.get(terminal_status, "failed")
+            self._update_agent_locked(sess, token, agent_status, reason)
             sess.updated_at = time.time()
             self._persist_sessions()
         emit_session_state(sess, sess.status)
 
-    def _fail_turn(self, sess: Session, exc: Exception) -> None:
+    def _fail_turn(self, sess: Session, exc: Exception, token: Optional[str] = None) -> None:
         tb = traceback.format_exc()
         with self.lock:
+            if token is not None and not self._turn_is_current_locked(sess, token):
+                return
             sess.partial = None
             sess.status = "error"
             sess.last_error = str(exc)
             sess.terminal_status = "failed"
             sess.terminal_reason = type(exc).__name__
+            if token is not None:
+                self._update_agent_locked(sess, token, "failed", str(exc))
             self.add_message(sess, "error", str(exc))
             self._persist_sessions()
         print(tb, file=sys.stderr)
@@ -1242,14 +1313,16 @@ class AgentManager:
         task_mode: TaskMode = TaskMode.OPEN,
         plan_path: Optional[str] = None,
     ):
+        token = None
         try:
             submitted = self._submit_turn(sess, prompt, images, task_mode, plan_path)
             if submitted is None:
                 return
-            agent, display_q = submitted
-            self._drain_turn(sess, agent, display_q)
-        except Exception as e:
-            self._fail_turn(sess, e)
+            agent, display_q, token = submitted
+            emit_session_state(sess, "running")
+            self._drain_turn(sess, agent, display_q, token)
+        except Exception as exc:
+            self._fail_turn(sess, exc, token)
 
     def messages(self, sid: str, after: int = 0, limit: int = 200) -> dict:
         with self.lock:
@@ -1279,13 +1352,49 @@ class AgentManager:
             if sess.agent and hasattr(sess.agent, "abort"):
                 with contextlib.suppress(Exception):
                     sess.agent.abort()
+            token = sess.agent_turn_token
+            if token:
+                self._update_agent_locked(sess, token, "cancelled", "user_cancelled")
+            sess.agent_turn_token = ""
             sess.status = "cancelled"
             sess.partial = None
             sess.terminal_status = "cancelled"
             sess.terminal_reason = "user_cancelled"
             sess.updated_at = time.time()
+            self._persist_sessions()
         emit_session_state(sess, "cancelled")
         return {"ok": True, "sessionId": sid}
+
+    def get_agents(self, sid: str) -> list[dict]:
+        with self.lock:
+            sess = self.sessions.get(sid)
+            if not sess:
+                raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
+            return _clone_agent_records(sess.sub_agents)
+
+    def cancel_agent(self, sid: str, agent_id: str) -> dict:
+        with self.lock:
+            sess = self.sessions.get(sid)
+            if not sess:
+                raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
+            if not sess.sub_agents or sess.sub_agents[0].get("id") != agent_id:
+                raise web.HTTPNotFound(text=json.dumps({"error": "agent not found"}, ensure_ascii=False), content_type="application/json")
+            if sess.agent and hasattr(sess.agent, "abort"):
+                with contextlib.suppress(Exception):
+                    sess.agent.abort()
+            token = sess.agent_turn_token
+            if token:
+                self._update_agent_locked(sess, token, "cancelled", "user_cancelled")
+            sess.agent_turn_token = ""
+            sess.status = "cancelled"
+            sess.partial = None
+            sess.terminal_status = "cancelled"
+            sess.terminal_reason = "user_cancelled"
+            sess.updated_at = time.time()
+            self._persist_sessions()
+            agents = _clone_agent_records(sess.sub_agents)
+        emit_session_state(sess, "cancelled")
+        return {"ok": True, "sessionId": sid, "agentId": agent_id, "agents": agents}
 
 
 import base64
@@ -1394,23 +1503,26 @@ hub = WsHub()
 
 
 def emit_session_state(sess: Session, state_name: str):
-    hub.emit({
-        "type": "session-state",
-        "sessionId": sess.id,
-        "state": state_name,
-        "status": sess.status,
-        "terminalStatus": sess.terminal_status,
-        "reason": sess.terminal_reason,
-        "seq": sess.msg_seq,
-        "updatedAt": sess.updated_at,
-        "title": sess.title,
-        "tokenUsage": sess.token_usage,
-        "modelOverride": sess.model_override,
-        "groupId": sess.group_id,
-        "planPath": sess.plan_path,
-        "planStatus": sess.plan_status,
-        "planTask": sess.plan_task,
-    })
+    with manager.lock:
+        payload = {
+            "type": "session-state",
+            "sessionId": sess.id,
+            "state": state_name,
+            "status": sess.status,
+            "terminalStatus": sess.terminal_status,
+            "reason": sess.terminal_reason,
+            "seq": sess.msg_seq,
+            "updatedAt": sess.updated_at,
+            "title": sess.title,
+            "tokenUsage": copy.deepcopy(sess.token_usage),
+            "modelOverride": sess.model_override,
+            "groupId": sess.group_id,
+            "subAgents": _clone_agent_records(sess.sub_agents),
+            "planPath": sess.plan_path,
+            "planStatus": sess.plan_status,
+            "planTask": sess.plan_task,
+        }
+    hub.emit(payload)
 
 
 async def ws_handler(request):
@@ -1670,7 +1782,14 @@ async def prompt_handler(request):
     data = await read_json(request)
     prompt = data.get("prompt", data.get("content", data.get("message", "")))
     images = data.get("images") or []
-    return json_ok(manager.submit_prompt(sid, prompt, images))
+    try:
+        result = manager.submit_prompt(sid, prompt, images)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": str(exc)}, ensure_ascii=False),
+            content_type="application/json",
+        ) from exc
+    return json_ok(result)
 
 
 async def messages_handler(request):
@@ -1684,6 +1803,7 @@ async def cancel_handler(request):
     sid = request.match_info["sid"]
     return json_ok(manager.cancel(sid))
 
+
 async def plan_handler(request):
     sid = request.match_info["sid"]
     data = await read_json(request)
@@ -1694,6 +1814,19 @@ async def plan_handler(request):
 async def plan_execute_handler(request):
     sid = request.match_info["sid"]
     return json_ok(manager.execute_plan(sid), status=202)
+
+
+async def get_agents_handler(request):
+    """Get sub-agents for a session."""
+    sid = request.match_info["sid"]
+    return json_ok({"ok": True, "sessionId": sid, "agents": manager.get_agents(sid)})
+
+
+async def cancel_agent_handler(request):
+    """Cancel a sub-agent."""
+    sid = request.match_info["sid"]
+    aid = request.match_info["aid"]
+    return json_ok(manager.cancel_agent(sid, aid))
 
 
 async def path_open_handler(request):
@@ -1756,26 +1889,6 @@ async def delete_group_handler(request):
     return json_ok(manager.delete_group(gid))
 
 
-async def get_agents_handler(request):
-    """Get sub-agents for a session"""
-    sid = request.match_info["sid"]
-    sess = manager.get_session(sid)
-    return json_ok({"ok": True, "sessionId": sid, "agents": sess.sub_agents})
-
-
-async def cancel_agent_handler(request):
-    """Cancel a sub-agent"""
-    sid = request.match_info["sid"]
-    aid = request.match_info["aid"]
-    sess = manager.get_session(sid)
-
-    # Find and mark agent as cancelled
-    for agent in sess.sub_agents:
-        if agent.get("id") == aid:
-            agent["status"] = "cancelled"
-            agent["updated_at"] = time.time()
-            return json_ok({"ok": True, "sessionId": sid, "agentId": aid})
-    return json_ok({"ok": False, "error": "agent not found"}, status=404)
 
 
 async def worldline_handler(request):

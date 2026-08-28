@@ -21,6 +21,8 @@ const state = {
   rightDrawerCollapsed: localStorage.getItem('rightDrawerCollapsed') !== 'false',
 };
 const sessionDeletionPromises = new Map();
+const agentRefreshTokens = new Map();
+const pendingAttachments = [];
 
 // Helper: get config/diagnostics for the active session (or defaults)
 function getActiveConfig() {
@@ -914,11 +916,29 @@ function createLocalSession(id, title, bridgeSessionId = id) {
     createdAt: now,
     updatedAt: now,
   };
+  state.activeAgents.set(id, []);
   getSessionRuntime(sess);
   // Keep freshly-created chats visually quiet: the empty state is enough guidance.
   state.sessions.set(id, sess);
   renderSessionList();
   return sess;
+}
+function replaceSessionAgents(sess, agents) {
+  if (!sess) return;
+  state.activeAgents.set(sess.id, Array.isArray(agents) ? agents : []);
+  if (isActiveSession(sess)) renderAgentPanel();
+}
+
+async function refreshSessionAgents(sess) {
+  if (!sess) return;
+  const refreshToken = (agentRefreshTokens.get(sess.id) || 0) + 1;
+  agentRefreshTokens.set(sess.id, refreshToken);
+  const response = await window.zeroAgent.rpc('session/agents', {
+    sessionId: sess.bridgeSessionId || sess.id,
+  });
+  if (agentRefreshTokens.get(sess.id) !== refreshToken) return;
+  if (state.sessions.get(sess.id) !== sess) return;
+  replaceSessionAgents(sess, response?.agents);
 }
 function setSessionTitle(title) {
   if (!sessionTitleEl) return;
@@ -942,6 +962,7 @@ function setActiveSession(id) {
   renderSessionList();
   updateModelStatus();
   renderAgentPanel();
+  refreshSessionAgents(sess).catch(() => {});
   const runtime = getSessionRuntime(sess);
   setBusy(runtime.busy, runtime.busy ? 'Agent is responding…' : null, sess);
   // When switching to a session that is still running, ensure the live draft
@@ -1674,7 +1695,16 @@ function renderMessage(msg, append = true) {
         return `<span class="user-msg-thumb-placeholder" title="Image expired">🖼</span>`;
       }).join('') + '</div>';
     }
-    wrap.innerHTML = `<div class="bubble">${imagesHtml}${escapeHtml(msg.content)}</div>`;
+    const fileIds = msg.file_ids || [];
+    const fileNames = msg.file_names || [];
+    let filesHtml = '';
+    if (fileIds.length > 0) {
+      filesHtml = '<div class="user-files">' + fileIds.map((id, index) => {
+        const name = fileNames[index] || sessionStorage.getItem('file-name:' + id) || 'Attached file';
+        return `<span class="user-file-chip">📎 ${escapeHtml(name)}</span>`;
+      }).join('') + '</div>';
+    }
+    wrap.innerHTML = `<div class="bubble">${imagesHtml}${filesHtml}${escapeHtml(msg.content)}</div>`;
     messagesEl.appendChild(wrap);
     const sess = state.sessions.get(state.activeId);
     const runtime = sess ? getSessionRuntime(sess) : null;
@@ -1772,6 +1802,10 @@ function handleNotification(msg) {
   if (msg.type === 'session-state') {
     const sess = findSessionByBridgeId(msg.sessionId);
     if (!sess) return;
+    if (Array.isArray(msg.subAgents)) {
+      agentRefreshTokens.set(sess.id, (agentRefreshTokens.get(sess.id) || 0) + 1);
+      replaceSessionAgents(sess, msg.subAgents);
+    }
 
     // Update token usage and model override if provided
     if (msg.tokenUsage) {
@@ -1811,31 +1845,6 @@ function handleNotification(msg) {
     }
     // Update tab dot regardless
     renderSessionList();
-    return;
-  }
-
-  // Handle agent events
-  if (msg.type === 'agent-spawned') {
-    const sess = findSessionByBridgeId(msg.sessionId);
-    if (sess && msg.agent) {
-      const agents = state.activeAgents.get(sess.id) || [];
-      agents.push(msg.agent);
-      state.activeAgents.set(sess.id, agents);
-      if (isActiveSession(sess)) renderAgentPanel();
-    }
-    return;
-  }
-
-  if (msg.type === 'agent-status') {
-    const sess = findSessionByBridgeId(msg.sessionId);
-    if (sess && msg.agentId) {
-      const agents = state.activeAgents.get(sess.id) || [];
-      const agent = agents.find(a => a.id === msg.agentId);
-      if (agent) {
-        agent.status = msg.status;
-        if (isActiveSession(sess)) renderAgentPanel();
-      }
-    }
     return;
   }
   if (msg.method !== 'session/update') return;
@@ -2225,6 +2234,8 @@ function normalizeBridgeMessage(msg) {
     role: msg.role || 'system',
     content: msg.content || '',
     image_ids: msg.image_ids || [],
+    file_ids: msg.file_ids || [],
+    file_names: msg.file_names || [],
     segments: msg.segments,
   };
 }
@@ -2384,7 +2395,13 @@ async function pollSessionMessages(sess) {
   }
 }
 
-async function sendPrompt(text, images = [], options = {}) {
+function isImageAttachment(attachment) {
+  const type = String(attachment?.type || '');
+  const dataUrl = String(attachment?.dataUrl || '');
+  return type.startsWith('image/') || dataUrl.startsWith('data:image/');
+}
+
+async function sendPrompt(text, attachments = [], options = {}) {
   if (!state.bridgeReady) {
     showError('ZeroAgent 服务尚未连接，请检查 bridge 是否运行。', '重启服务', () => restartBridge());
     return;
@@ -2399,14 +2416,20 @@ async function sendPrompt(text, images = [], options = {}) {
   beginAssistantTurn(runtime);
   const promptTurnToken = runtime.activeTurnToken;
 
-  // Store images in sessionStorage and collect ids
+  const images = attachments.filter(isImageAttachment);
+  const files = attachments.filter((attachment) => !isImageAttachment(attachment));
   const imageIds = images.map(img => {
     try { sessionStorage.setItem('img:' + img.id, img.dataUrl); } catch(e) { /* quota */ }
     return img.id;
   });
+  const fileIds = files.map(file => {
+    try { sessionStorage.setItem('file-name:' + file.id, file.name || 'Attached file'); } catch(e) { /* quota */ }
+    return file.id;
+  });
+  const fileNames = files.map(file => file.name || 'Attached file');
 
   const displayText = options.displayText || text;
-  const localUserMsg = { role: 'user', content: displayText, image_ids: imageIds };
+  const localUserMsg = { role: 'user', content: displayText, image_ids: imageIds, file_ids: fileIds, file_names: fileNames };
   sess.messages.push(localUserMsg);
   renderMessage(localUserMsg);
   startTaskTimer(sess);
@@ -2422,7 +2445,13 @@ async function sendPrompt(text, images = [], options = {}) {
     const res = await window.zeroAgent.rpc('session/prompt', {
       sessionId: await ensureBridgeSession(sess),
       prompt: text,
-      images: images.map(img => ({id: img.id, dataUrl: img.dataUrl})),
+      images: images.map(img => ({id: img.id, dataUrl: img.dataUrl, type: img.type || ''})),
+      files: files.map(file => ({
+        id: file.id,
+        name: file.name || 'Attached file',
+        dataUrl: file.dataUrl,
+        type: file.type || 'application/octet-stream',
+      })),
       llmNo: sess.config.llmNo
     });
     const acceptedUserId = Number(res.userMessageId || res.result?.userMessageId || 0);
@@ -3076,11 +3105,12 @@ function setBusy(busy, label, sess = state.sessions.get(state.activeId)) {
 
 function renderSendButtonState() {
   const hasText = inputEl.value.trim().length > 0;
+  const hasAttachments = pendingAttachments.length > 0;
   const busy = !!getActiveSessionRuntime()?.busy;
   sendBtn.classList.toggle('stop', busy);
   sendBtn.title = busy ? 'Stop (Esc)' : 'Send (Enter)';
   sendBtn.innerHTML = busy ? STOP_ICON : SEND_ICON;
-  sendBtn.disabled = !hasText && !busy;
+  sendBtn.disabled = !hasText && !hasAttachments && !busy;
 }
 
 function updateSendButton() {
@@ -3269,6 +3299,7 @@ async function hydrateBridgeSessions(listRes) {
     if (!sessionHasUserMessage({ messages })) continue;
     const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const sess = createLocalSession(localId, bSess.title || 'Restored', sid);
+    replaceSessionAgents(sess, bSess.subAgents);
     if (bSess.createdAt) sess.createdAt = Number(bSess.createdAt);
     if (bSess.updatedAt) sess.updatedAt = Number(bSess.updatedAt);
     sess.groupId = bSess.groupId || null;
@@ -3381,59 +3412,93 @@ window.zeroAgent.onBridgeLog((text) => {
 
 // ─── Input handling moved to init() ──────────────────────────────────────
 
-function renderImagePreviews() {
-  imagePreviews.innerHTML = '';
-  for (const img of pendingImages) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'image-preview-item';
-    wrapper.dataset.imgId = img.id;
+function createAttachmentId() {
+  return `attachment-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+}
 
-    const imgEl = document.createElement('img');
-    imgEl.src = img.dataUrl;
-    imgEl.alt = 'Pasted image';
+function renderAttachmentPreviews() {
+  imagePreviews.innerHTML = '';
+  for (const attachment of pendingAttachments) {
+    const wrapper = document.createElement('div');
+    wrapper.className = isImageAttachment(attachment) ? 'image-preview-item' : 'file-preview-item';
+    wrapper.dataset.attachmentId = attachment.id;
+
+    if (isImageAttachment(attachment)) {
+      const imgEl = document.createElement('img');
+      imgEl.src = attachment.dataUrl;
+      imgEl.alt = attachment.name || 'Attached image';
+      wrapper.appendChild(imgEl);
+    } else {
+      const fileName = document.createElement('span');
+      fileName.className = 'file-preview-name';
+      fileName.textContent = attachment.name || 'Attached file';
+      fileName.title = attachment.name || 'Attached file';
+      wrapper.appendChild(fileName);
+    }
 
     const closeBtn = document.createElement('button');
     closeBtn.className = 'remove-img';
     closeBtn.textContent = '×';
-    closeBtn.setAttribute('aria-label', 'Remove image');
+    closeBtn.setAttribute('aria-label', `Remove ${attachment.name || 'attachment'}`);
     closeBtn.addEventListener('click', () => {
-      const idx = pendingImages.findIndex(i => i.id === img.id);
-      if (idx !== -1) pendingImages.splice(idx, 1);
-      renderImagePreviews();
+      const idx = pendingAttachments.findIndex(item => item.id === attachment.id);
+      if (idx !== -1) pendingAttachments.splice(idx, 1);
+      renderAttachmentPreviews();
+      updateSendButton();
     });
 
-    wrapper.appendChild(imgEl);
     wrapper.appendChild(closeBtn);
     imagePreviews.appendChild(wrapper);
   }
-  imagePreviews.style.display = pendingImages.length ? 'flex' : 'none';
+  imagePreviews.style.display = pendingAttachments.length ? 'flex' : 'none';
 }
 
-function clearPendingImages() {
-  pendingImages.length = 0;
-  renderImagePreviews();
+function clearPendingAttachments() {
+  pendingAttachments.length = 0;
+  renderAttachmentPreviews();
+}
+
+function addFileAttachment(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    pendingAttachments.push({
+      id: createAttachmentId(),
+      name: file.name || 'Pasted file',
+      type: file.type || 'application/octet-stream',
+      dataUrl: String(reader.result || ''),
+    });
+    renderAttachmentPreviews();
+    updateSendButton();
+  };
+  reader.onerror = () => showError(`Failed to read ${file.name || 'attachment'}`);
+  reader.readAsDataURL(file);
+}
+
+function addFileAttachments(files) {
+  for (const file of Array.from(files || [])) addFileAttachment(file);
 }
 
 function submitInput() {
   const text = inputEl.value.trim();
-  if (!text && pendingImages.length === 0) return;
+  if (!text && pendingAttachments.length === 0) return;
   if (getActiveSessionRuntime()?.busy) {
     showSystem('Agent is still responding. Press Esc or Stop before sending another message.');
     return;
   }
-  const images = [...pendingImages];
+  const attachments = [...pendingAttachments];
   inputEl.value = '';
   inputEl.style.height = 'auto';
-  clearPendingImages();
+  clearPendingAttachments();
   updateSendButton();
   closeCommandPalette();
 
-  if (text.startsWith('/')) {
+  if (text.startsWith('/') && attachments.length === 0) {
     handleSlash(text).catch((err) => {
       showSystem('Command failed: ' + (err.message || err));
     });
   } else {
-    sendPrompt(text, images);
+    sendPrompt(text, attachments);
   }
 }
 
@@ -3745,18 +3810,29 @@ function showAgentContext(agent) {
 }
 
 async function cancelAgent(sessionId, agentId) {
+  const sess = findSessionByBridgeId(sessionId);
+  const cancelToken = sess ? (agentRefreshTokens.get(sess.id) || 0) + 1 : 0;
+  if (sess) agentRefreshTokens.set(sess.id, cancelToken);
   try {
-    await window.zeroAgent.rpc('session/agent/cancel', { sessionId, agentId });
+    const response = await window.zeroAgent.rpc('session/agent/cancel', { sessionId, agentId });
+    if (sess && (
+      agentRefreshTokens.get(sess.id) !== cancelToken ||
+      state.sessions.get(sess.id) !== sess
+    )) return;
+    if (Array.isArray(response?.agents)) {
+      replaceSessionAgents(sess, response.agents);
+    } else {
+      await refreshSessionAgents(sess);
+    }
+    if (sess && isActiveSession(sess)) renderAgentPanel();
   } catch (err) {
     showError('Failed to cancel agent: ' + (err.message || err));
   }
 }
-
 // ─── Init ────────────────────────────────────────────────────────────────
 // IME composition fix
 let _imeComposing = false;
 const imagePreviews = document.getElementById('image-previews');
-const pendingImages = []; // Array of { dataUrl, id }
 
 (async function init() {
   // Initialize DOM refs
@@ -3847,24 +3923,39 @@ const pendingImages = []; // Array of { dataUrl, id }
   });
 
   inputEl.addEventListener('paste', (e) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    for (const item of items) {
-      if (item.type.startsWith('image/')) {
-        e.preventDefault();
-        const file = item.getAsFile();
-        if (!file) continue;
-        const reader = new FileReader();
-        reader.onload = () => {
-          const dataUrl = reader.result;
-          const id = `img-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-          pendingImages.push({ dataUrl, id });
-          renderImagePreviews();
-        };
-        reader.readAsDataURL(file);
-        break;
-      }
+    const clipboardFiles = [];
+    for (const item of Array.from(e.clipboardData?.items || [])) {
+      if (item.kind !== 'file') continue;
+      const file = item.getAsFile();
+      if (file) clipboardFiles.push(file);
     }
+    if (!clipboardFiles.length && e.clipboardData?.files?.length) {
+      clipboardFiles.push(...Array.from(e.clipboardData.files));
+    }
+    if (!clipboardFiles.length) return;
+    e.preventDefault();
+    addFileAttachments(clipboardFiles);
+  });
+
+  const fileInput = $('file-input');
+  $('attach-btn')?.addEventListener('click', () => fileInput?.click());
+  fileInput?.addEventListener('change', () => {
+    addFileAttachments(fileInput.files);
+    fileInput.value = '';
+  });
+
+  const composerEl = $('composer');
+  composerEl?.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer?.files?.length) return;
+    e.preventDefault();
+    composerEl.classList.add('drag-over');
+  });
+  composerEl?.addEventListener('dragleave', () => composerEl.classList.remove('drag-over'));
+  composerEl?.addEventListener('drop', (e) => {
+    if (!e.dataTransfer?.files?.length) return;
+    e.preventDefault();
+    composerEl.classList.remove('drag-over');
+    addFileAttachments(e.dataTransfer.files);
   });
 
   sendBtn.addEventListener('click', () => {

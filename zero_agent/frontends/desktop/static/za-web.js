@@ -135,6 +135,11 @@
         const limit = params.limit ?? 200;
         return http(`/session/${encodeURIComponent(sid)}/messages?after=${encodeURIComponent(after)}&limit=${encodeURIComponent(limit)}`);
       }
+      case 'session/agents': {
+        const sid = params.sessionId || params.id || params.bridgeSessionId;
+        if (!sid) throw new Error('session/agents missing sessionId');
+        return http(`/session/${encodeURIComponent(sid)}/agents`);
+      }
       case 'session/cancel': {
         const sid = params.sessionId || params.id || params.bridgeSessionId;
         if (!sid) throw new Error('session/cancel missing sessionId');

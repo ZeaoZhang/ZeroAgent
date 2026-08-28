@@ -8,6 +8,7 @@ import json
 import queue
 import shutil
 import subprocess
+import re
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,19 @@ def test_frontend_session_sidebar_regression() -> None:
         check=False,
     )
     assert result.returncode == 0, f"Node session sidebar regression failed:\n{result.stdout}\n{result.stderr}"
+def test_frontend_agents_panel_regression() -> None:
+    root = Path(__file__).resolve().parents[1]
+    node = shutil.which("node")
+    assert node, "Node.js is required for the frontend agents panel regression"
+    script = root / "tests" / "frontend_agents.test.js"
+    result = subprocess.run(
+        [node, str(script)],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"Node agents panel regression failed:\n{result.stdout}\n{result.stderr}"
 
 
 
@@ -932,6 +946,78 @@ def _run_terminal(status: str, reason: str, text: str = "", data=None):
     return sess
 
 
+def test_run_agent_turn_registers_and_updates_one_agent_snapshot() -> None:
+    sess = _run_terminal("completed", "finished", "answer")
+
+    assert len(sess.sub_agents) == 1
+    agent = sess.sub_agents[0]
+    assert re.fullmatch(r"agent-[0-9a-f]{12}", agent["id"])
+    assert agent["name"] == "ZeroAgent"
+    assert agent["type"] == "session-agent"
+    assert agent["status"] == "completed"
+    assert agent["reason"] == "finished"
+    assert isinstance(agent["created_at"], float)
+    assert isinstance(agent["updated_at"], float)
+
+
+def test_restored_running_agent_is_cancelled_for_bridge_restart(tmp_path) -> None:
+    sess = desktop_bridge._session_from_persisted(
+        {
+            "id": "sess-123456789abc",
+            "messages": [{"role": "user", "content": "hello"}],
+            "sub_agents": [{
+                "id": "agent-aaaaaaaaaaaa",
+                "name": "ZeroAgent",
+                "type": "session-agent",
+                "status": "running",
+                "created_at": 1.0,
+                "updated_at": 1.0,
+                "reason": "",
+            }],
+        },
+        str(tmp_path),
+    )
+
+    assert sess.sub_agents[0]["status"] == "cancelled"
+    assert sess.sub_agents[0]["reason"] == "bridge_restarted"
+
+
+def test_agent_get_and_cancel_use_defensive_snapshot_and_real_abort() -> None:
+    class AbortableRunner:
+        def __init__(self):
+            self.aborted = False
+
+        def abort(self):
+            self.aborted = True
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session(cwd=manager.workspace_dir)
+    manager.add_message(sess, "user", "hello")
+    runner = AbortableRunner()
+    sess.agent = runner
+    sess.agent_turn_token = "turn"
+    sess.sub_agents = [{
+        "id": "agent-aaaaaaaaaaaa",
+        "name": "ZeroAgent",
+        "type": "session-agent",
+        "status": "running",
+        "created_at": 1.0,
+        "updated_at": 1.0,
+        "reason": "",
+    }]
+
+    agents = manager.get_agents(sess.id)
+    agents[0]["status"] = "failed"
+    assert sess.sub_agents[0]["status"] == "running"
+    result = manager.cancel_agent(sess.id, "agent-aaaaaaaaaaaa")
+
+    assert runner.aborted is True
+    assert result["agents"][0]["status"] == "cancelled"
+    assert result["agents"][0]["reason"] == "user_cancelled"
+    with pytest.raises(web.HTTPNotFound):
+        manager.cancel_agent(sess.id, "agent-bbbbbbbbbbbb")
+
+
 def test_run_agent_turn_keeps_cumulative_partial_once() -> None:
     class DummyRunner:
         def __init__(self):
@@ -1761,3 +1847,37 @@ def test_plan_execute_http_endpoint_succeeds(monkeypatch) -> None:
         assert fake.execute_calls == ["sess-123456789abc"]
 
     _plan_client_run(run)
+
+
+def test_agent_http_endpoints_delegate_snapshot_and_cancel(monkeypatch) -> None:
+    class FakeAgentManager:
+        def __init__(self) -> None:
+            self.get_calls = []
+            self.cancel_calls = []
+
+        def get_agents(self, sid: str) -> list[dict]:
+            self.get_calls.append(sid)
+            return [{"id": "agent-aaaaaaaaaaaa", "status": "running"}]
+
+        def cancel_agent(self, sid: str, aid: str) -> dict:
+            self.cancel_calls.append((sid, aid))
+            return {"ok": True, "sessionId": sid, "agentId": aid, "agents": [{"id": aid, "status": "cancelled"}]}
+
+    fake = FakeAgentManager()
+    monkeypatch.setattr(desktop_bridge, "manager", fake)
+
+    async def run(client) -> None:
+        headers = {"Authorization": "Bearer secret"}
+        get_resp = await client.get("/session/sess-123456789abc/agents", headers=headers)
+        assert get_resp.status == 200
+        assert (await get_resp.json())["agents"][0]["status"] == "running"
+        cancel_resp = await client.post(
+            "/session/sess-123456789abc/agents/agent-aaaaaaaaaaaa/cancel",
+            headers=headers,
+        )
+        assert cancel_resp.status == 200
+        assert (await cancel_resp.json())["agents"][0]["status"] == "cancelled"
+
+    _plan_client_run(run)
+    assert fake.get_calls == ["sess-123456789abc"]
+    assert fake.cancel_calls == [("sess-123456789abc", "agent-aaaaaaaaaaaa")]
