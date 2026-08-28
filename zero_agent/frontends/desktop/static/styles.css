@@ -894,7 +894,8 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
   height: 100%;
   object-fit: cover;
 }
-.image-preview-item .remove-img {
+.image-preview-item .remove-img,
+.file-preview-item .remove-img {
   position: absolute;
   top: 2px;
   right: 2px;
@@ -913,8 +914,44 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
   align-items: center;
   justify-content: center;
 }
-.image-preview-item .remove-img:hover {
+.image-preview-item .remove-img:hover,
+.file-preview-item .remove-img:hover {
   background: rgba(0,0,0,0.85);
+}
+.file-preview-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 150px;
+  height: 64px;
+  padding: 8px 26px 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.file-preview-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.user-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+  justify-content: flex-end;
+}
+.user-file-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 240px;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 /* User message image thumbnails */
@@ -937,7 +974,27 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  gap: 6px;
   padding: 4px 8px 8px;
+}
+
+.attach-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.attach-btn:hover,
+#composer.drag-over .attach-btn {
+  color: var(--accent);
+  background: var(--bg-hover);
 }
 
 .command-palette {

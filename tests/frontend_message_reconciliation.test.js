@@ -271,11 +271,13 @@ const deferred = () => {
 
 (async () => {
   const promptCalls = [];
+  const promptPayloads = [];
   context.window.zeroAgent = {
-    rpc(method) {
+    rpc(method, params) {
       assert.equal(method, 'session/prompt');
       const call = deferred();
       promptCalls.push(call);
+      promptPayloads.push(params);
       return call.promise;
     },
     pollSession: () => new Promise(() => {}),
@@ -308,9 +310,20 @@ const deferred = () => {
     params: { sessionId: 'bridge-prompt-race', update: { sessionUpdate: 'task_completed' } },
   });
 
-  const secondPrompt = sendPrompt('second prompt');
+  const secondPrompt = sendPrompt('second prompt', [{
+    id: 'file-1',
+    name: 'notes.txt',
+    type: 'text/plain',
+    dataUrl: 'data:text/plain;base64,SGVsbG8=',
+  }]);
   await Promise.resolve();
   assert.equal(promptCalls.length, 2);
+  assert.equal(JSON.stringify(promptPayloads[1].files), JSON.stringify([{
+    id: 'file-1',
+    name: 'notes.txt',
+    dataUrl: 'data:text/plain;base64,SGVsbG8=',
+    type: 'text/plain',
+  }]));
   handleNotification({
     method: 'session/update',
     params: { sessionId: 'bridge-prompt-race', update: {

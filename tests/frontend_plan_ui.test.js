@@ -139,7 +139,6 @@ function makeContext() {
   return context;
 }
 
-const context = makeContext();
 
 const testExports = `
 renderMessage = () => null;
@@ -162,6 +161,8 @@ globalThis.__testExports = {
   executePlanForSession,
   renderPlanStatus,
   renderMessages,
+  renderSendButtonState,
+  pendingAttachments,
   createLocalSession,
   getSessionRuntime,
   getActiveSessionRuntime,
@@ -172,10 +173,11 @@ globalThis.__testExports = {
   setSessionTitleElement: (el) => { sessionTitleEl = el; },
   setMessagesElement: (el) => { messagesEl = el; },
   setInputEl: (el) => { inputEl = el; },
+  setSendBtn: (el) => { sendBtn = el; },
   setEnsureBridgeSession: (fn) => { ensureBridgeSession = fn; },
 };
 `;
-
+const context = makeContext();
 vm.runInNewContext(source.slice(0, bridgeEventsMarker) + testExports, context, { filename: appPath });
 
 const t = context.__testExports;
@@ -186,6 +188,8 @@ t.setMessagesElement(messagesEl);
 t.setEnsureBridgeSession(async (sess) => sess.bridgeSessionId || sess.id);
 const inputEl = new FakeElement('textarea');
 t.setInputEl(inputEl);
+const sendBtn = new FakeElement('button');
+t.setSendBtn(sendBtn);
 
 function resetCounters() {
   context.__runAgentSlashCalls = 0;
@@ -217,6 +221,14 @@ function textOf(el) {
 }
 (async () => {
   resetCounters();
+  // Attachments alone must enable the send action.
+  inputEl.value = '';
+  t.pendingAttachments.push({ id: 'img-1', dataUrl: 'data:image/png;base64,AA==' });
+  t.renderSendButtonState();
+  assert.equal(sendBtn.disabled, false);
+  t.pendingAttachments.length = 0;
+  t.renderSendButtonState();
+  assert.equal(sendBtn.disabled, true);
 
   // 1. /plan is registered as a local slash command.
   const planCmd = t.LOCAL_SLASH_COMMANDS.find((c) => c.cmd === '/plan');
