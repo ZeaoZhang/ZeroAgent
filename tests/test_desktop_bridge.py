@@ -219,6 +219,35 @@ def test_sqlite_session_messages_and_metadata_survive_manager_restart(monkeypatc
 
 
 
+def test_add_message_rolls_back_memory_when_sqlite_write_fails(monkeypatch, tmp_path):
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+    session = manager.create_session()
+    manager.add_message(session, "user", "existing")
+    before = (session.msg_seq, list(session.messages), session.title, session.updated_at)
+
+    def fail_append(*args, **kwargs):
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(manager.session_store, "append_message", fail_append)
+
+    with pytest.raises(OSError, match="database unavailable"):
+        manager.add_message(session, "assistant", "new")
+
+    assert session.msg_seq == before[0]
+    assert session.messages == before[1]
+    assert session.title == before[2]
+    assert session.updated_at == before[3]
+
+
 
 
 def test_persisted_desktop_session_regenerates_owned_log_path(tmp_path) -> None:

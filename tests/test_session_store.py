@@ -180,3 +180,60 @@ def test_duplicate_message_id_is_rejected_without_overwriting_existing_row(store
         store.append_message(session, message_record(content="different"))
 
     assert store.load_state()["sessions"][session["id"]]["messages"][0]["content"] == "hello"
+
+
+def test_persist_session_rolls_back_all_rows_on_duplicate_message(store):
+    session = session_record()
+    messages = [
+        message_record(1, content="first"),
+        message_record(1, content="duplicate"),
+    ]
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.persist_session(session, messages)
+
+    assert store.load_state() == {
+        "sessions": {},
+        "groups": [],
+        "active_session_id": None,
+    }
+
+
+def test_malformed_json_metadata_uses_safe_defaults(store, tmp_path):
+    session = session_record()
+    store.append_message(session, message_record())
+    with sqlite3.connect(tmp_path / "sessions.sqlite3") as conn:
+        conn.execute(
+            "UPDATE sessions SET token_usage_json = ?, sub_agents_json = ?",
+            ("not-json", "[]"),
+        )
+        conn.commit()
+
+    loaded = store.load_state()["sessions"][session["id"]]
+
+    assert loaded["token_usage"] == {}
+    assert loaded["sub_agents"] == []
+
+
+def test_concurrent_message_appends_are_not_lost(store):
+    import threading
+
+    session = session_record()
+    store.append_message(session, message_record(1))
+    errors = []
+
+    def append(message_id):
+        try:
+            store.append_message(session, message_record(message_id, content=str(message_id)))
+        except Exception as exc:  # pragma: no cover - failure detail is asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=append, args=(message_id,)) for message_id in (2, 3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    messages = store.load_state()["sessions"][session["id"]]["messages"]
+    assert [message["id"] for message in messages] == [1, 2, 3]
