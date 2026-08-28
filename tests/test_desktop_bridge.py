@@ -183,6 +183,41 @@ def test_deleting_active_session_selects_newest_remaining_and_persists(monkeypat
     assert restored.active_session_id == newest.id
 
 
+def test_sqlite_session_messages_and_metadata_survive_manager_restart(monkeypatch, tmp_path) -> None:
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    first = desktop_bridge.AgentManager()
+    session = first.create_session()
+    first.add_message(session, "user", "hello")
+    first.add_message(session, "assistant", "world")
+    session.token_usage = {"input": 12, "output": 4}
+    session.plan_path = "/tmp/plan.md"
+    session.plan_status = "ready"
+    session.plan_task = "build it"
+    first._persist_sessions(raise_on_error=True)
+
+    restored = desktop_bridge.AgentManager()
+    loaded = restored.sessions[session.id]
+
+    assert [message["content"] for message in loaded.messages] == ["hello", "world"]
+    assert loaded.title == "hello"
+    assert loaded.token_usage["input"] == 12
+    assert loaded.plan_path == "/tmp/plan.md"
+    assert loaded.plan_status == "ready"
+    assert loaded.plan_task == "build it"
+    assert loaded.status == "idle"
+    assert loaded.agent is None
+    assert loaded.thread is None
+    assert loaded.partial is None
+
+
 
 
 
