@@ -352,3 +352,23 @@ def test_sync_sessions_removes_stale_session_rows(store):
     state = store.load_state()
     assert set(state["sessions"]) == {current["id"]}
     assert state["active_session_id"] == current["id"]
+
+
+def test_incomplete_supported_schema_is_rejected_without_repair(tmp_path):
+    path = tmp_path / "sessions.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute("INSERT INTO schema_meta(key, value) VALUES ('version', '1')")
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="incomplete session store schema"):
+        SessionStore(path).initialize()
+
+    with sqlite3.connect(path) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert tables == {"schema_meta"}

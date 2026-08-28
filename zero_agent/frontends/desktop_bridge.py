@@ -835,6 +835,7 @@ class AgentManager:
                     updated_at_by_session,
                 )
                 self.groups.pop(gid)
+                self._last_persisted_state = self._capture_session_state()
             except Exception:
                 for sid, (group_id, updated_at) in previous.items():
                     sess = self.sessions.get(sid)

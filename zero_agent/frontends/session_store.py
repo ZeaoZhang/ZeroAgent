@@ -15,6 +15,38 @@ _SCHEMA_VERSION = "1"
 _UNSET = object()
 _MESSAGE_COLUMNS = {"id", "role", "content", "ts"}
 
+_REQUIRED_SCHEMA_COLUMNS = {
+    "groups": {"id", "name", "created_at", "position"},
+    "sessions": {
+        "id",
+        "title",
+        "cwd",
+        "created_at",
+        "updated_at",
+        "msg_seq",
+        "last_error",
+        "terminal_status",
+        "terminal_reason",
+        "model_override",
+        "token_usage_json",
+        "group_id",
+        "sub_agents_json",
+        "plan_path",
+        "plan_status",
+        "plan_task",
+    },
+    "messages": {
+        "session_id",
+        "message_id",
+        "role",
+        "content",
+        "timestamp",
+        "metadata_json",
+    },
+    "app_state": {"key", "value"},
+    "schema_meta": {"key", "value"},
+}
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS groups (
@@ -85,34 +117,67 @@ class SessionStore:
         conn.execute("PRAGMA journal_mode = WAL")
         return conn
 
+    @staticmethod
+    def _validate_existing_schema(conn: sqlite3.Connection) -> None:
+        tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        missing_tables = set(_REQUIRED_SCHEMA_COLUMNS) - tables
+        if missing_tables:
+            raise RuntimeError(
+                "incomplete session store schema; missing tables: "
+                + ", ".join(sorted(missing_tables))
+            )
+        for table, required_columns in _REQUIRED_SCHEMA_COLUMNS.items():
+            columns = {
+                row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+            }
+            missing_columns = required_columns - columns
+            if missing_columns:
+                raise RuntimeError(
+                    f"incomplete session store schema; {table} missing columns: "
+                    + ", ".join(sorted(missing_columns))
+                )
+
     def initialize(self) -> None:
-        """Create the database schema and reject unsupported versions."""
+        """Create the database schema and reject unsupported or damaged versions."""
         with self._lock:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
             with self._connect() as conn:
-                meta_exists = conn.execute(
-                    """
-                    SELECT 1 FROM sqlite_master
-                    WHERE type = 'table' AND name = 'schema_meta'
-                    """
-                ).fetchone()
-                version_row = None
-                if meta_exists:
+                tables = {
+                    row["name"]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                if "schema_meta" in tables:
                     version_row = conn.execute(
                         "SELECT value FROM schema_meta WHERE key = ?",
                         ("version",),
                     ).fetchone()
-                    if version_row is not None and str(version_row["value"]) != _SCHEMA_VERSION:
+                    if version_row is None:
+                        raise RuntimeError(
+                            "incomplete session store schema; missing version"
+                        )
+                    if str(version_row["value"]) != _SCHEMA_VERSION:
                         raise RuntimeError(
                             "unsupported session store schema version: "
                             f"{version_row['value']}"
                         )
-                conn.executescript(_SCHEMA)
-                if version_row is None:
-                    conn.execute(
-                        "INSERT INTO schema_meta(key, value) VALUES (?, ?)",
-                        ("version", _SCHEMA_VERSION),
+                    self._validate_existing_schema(conn)
+                    return
+                if tables & set(_REQUIRED_SCHEMA_COLUMNS):
+                    raise RuntimeError(
+                        "incomplete session store schema; missing schema_meta"
                     )
+                conn.executescript(_SCHEMA)
+                conn.execute(
+                    "INSERT INTO schema_meta(key, value) VALUES (?, ?)",
+                    ("version", _SCHEMA_VERSION),
+                )
 
     @staticmethod
     def _json_dump(value: Any) -> str:

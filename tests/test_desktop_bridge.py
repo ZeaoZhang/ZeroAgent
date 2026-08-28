@@ -1516,6 +1516,38 @@ def test_create_group_rolls_back_memory_when_sqlite_write_fails(monkeypatch, tmp
     assert manager.groups == {}
 
 
+
+
+def test_deleted_group_state_remains_durable_after_later_persistence_failure(
+    monkeypatch,
+    tmp_path,
+):
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+    session = manager.create_session()
+    manager.add_message(session, "user", "hello")
+    group = manager.create_group("work")
+    manager.set_session_group(session.id, group["id"])
+    manager.delete_group(group["id"])
+
+    def fail_sync(*args, **kwargs):
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(manager.session_store, "sync_sessions", fail_sync)
+    session.status = "running"
+
+    with pytest.raises(OSError, match="database unavailable"):
+        manager._persist_sessions()
+
+    assert session.group_id is None
 def test_session_group_assignment_rejects_unknown_group(monkeypatch, tmp_path) -> None:
     config = AgentConfig(
         llm_backends={"default": LLMBackendConfig(
