@@ -319,3 +319,36 @@ def test_initialize_rejects_unsupported_schema_version(tmp_path):
 
     with pytest.raises(RuntimeError, match="unsupported session store schema version"):
         SessionStore(path).initialize()
+
+
+def test_unsupported_schema_is_rejected_before_schema_mutation(tmp_path):
+    path = tmp_path / "sessions.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute("INSERT INTO schema_meta(key, value) VALUES ('version', '99')")
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="unsupported session store schema version"):
+        SessionStore(path).initialize()
+
+    with sqlite3.connect(path) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert tables == {"schema_meta"}
+
+
+def test_sync_sessions_removes_stale_session_rows(store):
+    stale = session_record("sess-stale")
+    current = session_record("sess-current")
+    store.append_message(stale, message_record())
+    store.append_message(current, message_record())
+
+    store.sync_sessions([current], current["id"])
+
+    state = store.load_state()
+    assert set(state["sessions"]) == {current["id"]}
+    assert state["active_session_id"] == current["id"]

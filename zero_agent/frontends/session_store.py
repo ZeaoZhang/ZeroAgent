@@ -90,19 +90,28 @@ class SessionStore:
         with self._lock:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
             with self._connect() as conn:
-                conn.executescript(_SCHEMA)
-                row = conn.execute(
-                    "SELECT value FROM schema_meta WHERE key = ?",
-                    ("version",),
+                meta_exists = conn.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'schema_meta'
+                    """
                 ).fetchone()
-                if row is None:
+                version_row = None
+                if meta_exists:
+                    version_row = conn.execute(
+                        "SELECT value FROM schema_meta WHERE key = ?",
+                        ("version",),
+                    ).fetchone()
+                    if version_row is not None and str(version_row["value"]) != _SCHEMA_VERSION:
+                        raise RuntimeError(
+                            "unsupported session store schema version: "
+                            f"{version_row['value']}"
+                        )
+                conn.executescript(_SCHEMA)
+                if version_row is None:
                     conn.execute(
                         "INSERT INTO schema_meta(key, value) VALUES (?, ?)",
                         ("version", _SCHEMA_VERSION),
-                    )
-                elif str(row["value"]) != _SCHEMA_VERSION:
-                    raise RuntimeError(
-                        f"unsupported session store schema version: {row['value']}"
                     )
 
     @staticmethod
@@ -247,9 +256,20 @@ class SessionStore:
         sessions: list[dict],
         active_session_id: str | None,
     ) -> None:
-        """Atomically synchronize session metadata and active state."""
+        """Atomically synchronize session rows and active state."""
+        session_ids = [str(session.get("id") or "") for session in sessions]
+        if any(not session_id for session_id in session_ids):
+            raise ValueError("session id is required")
         with self._lock:
             with self._connect() as conn:
+                if session_ids:
+                    placeholders = ", ".join("?" for _ in session_ids)
+                    conn.execute(
+                        f"DELETE FROM sessions WHERE id NOT IN ({placeholders})",
+                        session_ids,
+                    )
+                else:
+                    conn.execute("DELETE FROM sessions")
                 for session in sessions:
                     self._write_session(conn, session)
                 if active_session_id is None:
