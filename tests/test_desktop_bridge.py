@@ -54,7 +54,7 @@ def test_bridge_tests_never_write_the_production_session_store(tmp_path) -> None
     sess = manager.create_session()
     manager.add_message(sess, "user", "hello")
     assert manager.sessions_dir == str(tmp_path / "sessions")
-    assert (tmp_path / "sessions" / "sessions.json").exists()
+    assert (tmp_path / "sessions" / "sessions.sqlite3").exists()
 
 
 def test_web_frontend_folds_tool_markers() -> None:
@@ -182,6 +182,103 @@ def test_deleting_active_session_selects_newest_remaining_and_persists(monkeypat
     restored = desktop_bridge.AgentManager()
     assert restored.active_session_id == newest.id
 
+
+def test_sqlite_session_messages_and_metadata_survive_manager_restart(monkeypatch, tmp_path) -> None:
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    first = desktop_bridge.AgentManager()
+    session = first.create_session()
+    first.add_message(session, "user", "hello")
+    first.add_message(session, "assistant", "world")
+    session.token_usage = {"input": 12, "output": 4}
+    session.plan_path = "/tmp/plan.md"
+    session.plan_status = "ready"
+    session.plan_task = "build it"
+    first._persist_sessions(raise_on_error=True)
+
+    restored = desktop_bridge.AgentManager()
+    loaded = restored.sessions[session.id]
+
+    assert [message["content"] for message in loaded.messages] == ["hello", "world"]
+    assert loaded.title == "hello"
+    assert loaded.token_usage["input"] == 12
+    assert loaded.plan_path == "/tmp/plan.md"
+    assert loaded.plan_status == "ready"
+    assert loaded.plan_task == "build it"
+    assert loaded.status == "idle"
+    assert loaded.agent is None
+    assert loaded.thread is None
+    assert loaded.partial is None
+
+
+
+def test_add_message_rolls_back_memory_when_sqlite_write_fails(monkeypatch, tmp_path):
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+    session = manager.create_session()
+    manager.add_message(session, "user", "existing")
+    before = (session.msg_seq, list(session.messages), session.title, session.updated_at)
+
+    def fail_append(*args, **kwargs):
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(manager.session_store, "append_message", fail_append)
+
+    with pytest.raises(OSError, match="database unavailable"):
+        manager.add_message(session, "assistant", "new")
+
+    assert session.msg_seq == before[0]
+    assert session.messages == before[1]
+    assert session.title == before[2]
+    assert session.updated_at == before[3]
+
+
+def test_metadata_persistence_failure_restores_last_durable_session_state(
+    monkeypatch,
+    tmp_path,
+):
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+    session = manager.create_session()
+    manager.add_message(session, "user", "durable")
+    session.status = "running"
+    session.last_error = "transient"
+    session.sub_agents = [{"id": "agent", "status": "running"}]
+
+    def fail_sync(*args, **kwargs):
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(manager.session_store, "sync_sessions", fail_sync)
+
+    with pytest.raises(OSError, match="database unavailable"):
+        manager._persist_sessions()
+
+    assert session.status == "idle"
+    assert session.last_error == ""
+    assert session.sub_agents == []
 
 
 
@@ -858,6 +955,88 @@ def test_resume_history_creates_runner_for_live_session(monkeypatch, tmp_path) -
     assert sess.agent == "runner"
 
 
+
+def test_resume_history_replaces_existing_sqlite_messages(monkeypatch, tmp_path) -> None:
+    class DummyRunner:
+        def history_snapshot(self):
+            return [{"role": "user", "content": "old"}]
+
+        def replace_history(self, history):
+            self.history = history
+
+    class DummyContinue:
+        @staticmethod
+        def set_sessions_dir(_path):
+            pass
+
+        @staticmethod
+        def list_sessions(exclude_pid=None):
+            return [(str(tmp_path / "history.txt"), 1, "preview", 1)]
+
+        @staticmethod
+        def restore(runner, _path):
+            return "restored", True
+
+        @staticmethod
+        def extract_ui_messages(_path):
+            return [{"role": "user", "content": "new history"}]
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "old history")
+    runner = DummyRunner()
+    sess.agent = runner
+    monkeypatch.setattr(manager, "ensure_project_import_path", lambda: None)
+    monkeypatch.setitem(__import__("sys").modules, "zero_agent.bots.shared.continue_cmd", DummyContinue)
+
+    result = manager.resume_history(sess.id, 1)
+
+    assert result["ok"] is True
+    assert [message["content"] for message in sess.messages] == ["new history", "restored"]
+    restored = desktop_bridge.AgentManager()
+    assert [message["content"] for message in restored.sessions[sess.id].messages] == [
+        "new history",
+        "restored",
+    ]
+
+
+
+def test_resume_history_removes_old_sqlite_messages_when_source_has_no_user(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class DummyRunner:
+        def history_snapshot(self):
+            return []
+
+    class DummyContinue:
+        @staticmethod
+        def set_sessions_dir(_path):
+            pass
+
+        @staticmethod
+        def list_sessions(exclude_pid=None):
+            return [(str(tmp_path / "history.txt"), 1, "preview", 1)]
+
+        @staticmethod
+        def restore(runner, _path):
+            return "summary only", False
+
+        @staticmethod
+        def extract_ui_messages(_path):
+            return []
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "old history")
+    sess.agent = DummyRunner()
+    monkeypatch.setattr(manager, "ensure_project_import_path", lambda: None)
+    monkeypatch.setitem(__import__("sys").modules, "zero_agent.bots.shared.continue_cmd", DummyContinue)
+
+    manager.resume_history(sess.id, 1)
+
+    assert manager.sessions[sess.id].messages[0]["content"] == "summary only"
+    assert sess.id not in desktop_bridge.AgentManager().sessions
 def test_legacy_session_keeps_pid_response_log(monkeypatch, tmp_path) -> None:
     class DummyAgent:
         client = type("Client", (), {"log_path": None})()
@@ -1314,6 +1493,61 @@ def test_session_groups_persist_empty_groups_and_delete_without_sessions(monkeyp
     assert manager.list_groups() == []
 
 
+def test_create_group_rolls_back_memory_when_sqlite_write_fails(monkeypatch, tmp_path):
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+
+    def fail_save(*args, **kwargs):
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(manager.session_store, "save_group", fail_save)
+
+    with pytest.raises(OSError, match="database unavailable"):
+        manager.create_group("work")
+
+    assert manager.groups == {}
+
+
+
+
+def test_deleted_group_state_remains_durable_after_later_persistence_failure(
+    monkeypatch,
+    tmp_path,
+):
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+    session = manager.create_session()
+    manager.add_message(session, "user", "hello")
+    group = manager.create_group("work")
+    manager.set_session_group(session.id, group["id"])
+    manager.delete_group(group["id"])
+
+    def fail_sync(*args, **kwargs):
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(manager.session_store, "sync_sessions", fail_sync)
+    session.status = "running"
+
+    with pytest.raises(OSError, match="database unavailable"):
+        manager._persist_sessions()
+
+    assert session.group_id is None
 def test_session_group_assignment_rejects_unknown_group(monkeypatch, tmp_path) -> None:
     config = AgentConfig(
         llm_backends={"default": LLMBackendConfig(
@@ -1347,16 +1581,22 @@ def test_empty_sessions_are_not_persisted_until_first_user_message(monkeypatch, 
     manager = desktop_bridge.AgentManager()
     session = manager.create_session()
 
-    assert not (tmp_path / "sessions" / "sessions.json").exists()
+    db_path = tmp_path / "sessions" / "sessions.sqlite3"
+    assert not manager.session_store.load_state()["sessions"]
     manager.add_message(session, "assistant", "answer without a user prompt")
-    assert not (tmp_path / "sessions" / "sessions.json").exists()
+    assert not manager.session_store.load_state()["sessions"]
 
     manager.add_message(session, "user", "  hello  ")
-    payload = json.loads((tmp_path / "sessions" / "sessions.json").read_text(encoding="utf-8"))
-    assert [item["id"] for item in payload["sessions"]] == [session.id]
+    state = manager.session_store.load_state()
+    assert list(state["sessions"]) == [session.id]
+    assert [message["content"] for message in state["sessions"][session.id]["messages"]] == [
+        "answer without a user prompt",
+        "  hello  ",
+    ]
+    assert db_path.exists()
 
 
-def test_loading_sessions_discards_persisted_empty_conversations(monkeypatch, tmp_path) -> None:
+def test_loading_legacy_json_sessions_is_ignored(monkeypatch, tmp_path) -> None:
     config = AgentConfig(
         llm_backends={"default": LLMBackendConfig(
             name="default", provider="openai", api_key="test", api_base="https://x", model="m",
@@ -1367,21 +1607,21 @@ def test_loading_sessions_discards_persisted_empty_conversations(monkeypatch, tm
     )
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
-    sessions_dir.joinpath("sessions.json").write_text(json.dumps({
+    legacy = sessions_dir / "sessions.json"
+    legacy.write_text(json.dumps({
         "version": 1,
-        "activeSessionId": "sess-empty000000",
+        "activeSessionId": "sess-legacy0000",
         "sessions": [
-            {"id": "sess-empty000000", "messages": []},
-            {"id": "sess-valid00000", "messages": [{"role": "user", "content": "hello"}]},
+            {"id": "sess-legacy0000", "messages": [{"role": "user", "content": "legacy"}]},
         ],
     }), encoding="utf-8")
+    before = legacy.read_bytes()
     monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
 
     manager = desktop_bridge.AgentManager()
 
-    assert list(manager.sessions) == ["sess-valid00000"]
-    payload = json.loads(sessions_dir.joinpath("sessions.json").read_text(encoding="utf-8"))
-    assert [item["id"] for item in payload["sessions"]] == ["sess-valid00000"]
+    assert manager.sessions == {}
+    assert legacy.read_bytes() == before
 
 
 def test_session_plan_fields_default() -> None:
