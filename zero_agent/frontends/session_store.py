@@ -12,6 +12,7 @@ from typing import Any
 
 
 _SCHEMA_VERSION = "1"
+_UNSET = object()
 _MESSAGE_COLUMNS = {"id", "role", "content", "ts"}
 
 
@@ -96,15 +97,12 @@ class SessionStore:
                 )
 
     @staticmethod
-    def _json_dump(value: Any, default: Any) -> str:
-        try:
-            return json.dumps(
-                value,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        except (TypeError, ValueError):
-            return json.dumps(default, ensure_ascii=False, separators=(",", ":"))
+    def _json_dump(value: Any) -> str:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
 
     @staticmethod
     def _json_load(value: Any, default: Any) -> Any:
@@ -113,6 +111,20 @@ class SessionStore:
         try:
             return json.loads(value)
         except (TypeError, ValueError, json.JSONDecodeError):
+            return default
+
+    @staticmethod
+    def _as_float(value: Any, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+
+    @staticmethod
+    def _as_int(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
             return default
 
     @classmethod
@@ -128,9 +140,9 @@ class SessionStore:
             str(session.get("terminal_status") or ""),
             str(session.get("terminal_reason") or ""),
             session.get("model_override"),
-            cls._json_dump(session.get("token_usage", {}), {}),
+            cls._json_dump(session.get("token_usage", {})),
             session.get("group_id"),
-            cls._json_dump(session.get("sub_agents", []), []),
+            cls._json_dump(session.get("sub_agents", [])),
             session.get("plan_path"),
             str(session.get("plan_status") or "inactive"),
             str(session.get("plan_task") or ""),
@@ -169,6 +181,32 @@ class SessionStore:
             values,
         )
 
+    @classmethod
+    def _write_message(
+        cls,
+        conn: sqlite3.Connection,
+        session_id: str,
+        message: dict,
+    ) -> None:
+        metadata = {
+            key: value for key, value in message.items() if key not in _MESSAGE_COLUMNS
+        }
+        conn.execute(
+            """
+            INSERT INTO messages(
+                session_id, message_id, role, content, timestamp, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                int(message.get("id")),
+                str(message.get("role") or ""),
+                str(message.get("content") or ""),
+                float(message.get("ts") or time.time()),
+                cls._json_dump(metadata),
+            ),
+        )
+
     def append_message(
         self,
         session: dict,
@@ -177,31 +215,11 @@ class SessionStore:
         active_session_id: str | None = None,
     ) -> None:
         """Atomically upsert session metadata, append one message, and active state."""
-        metadata = {
-            key: value for key, value in message.items() if key not in _MESSAGE_COLUMNS
-        }
-        message_id = int(message.get("id"))
-        role = str(message.get("role") or "")
-        content = str(message.get("content") or "")
-        timestamp = float(message.get("ts") or time.time())
+        session_id = str(session.get("id") or "")
         with self._lock:
             with self._connect() as conn:
                 self._write_session(conn, session)
-                conn.execute(
-                    """
-                    INSERT INTO messages(
-                        session_id, message_id, role, content, timestamp, metadata_json
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        str(session.get("id") or ""),
-                        message_id,
-                        role,
-                        content,
-                        timestamp,
-                        self._json_dump(metadata, {}),
-                    ),
-                )
+                self._write_message(conn, session_id, message)
                 if active_session_id is not None:
                     conn.execute(
                         """
@@ -222,31 +240,17 @@ class SessionStore:
         *,
         active_session_id: str | None = None,
     ) -> None:
-        """Atomically upsert a session and persist its complete message list."""
+        """Atomically replace a session's complete message list."""
+        session_id = str(session.get("id") or "")
         with self._lock:
             with self._connect() as conn:
                 self._write_session(conn, session)
+                conn.execute(
+                    "DELETE FROM messages WHERE session_id = ?",
+                    (session_id,),
+                )
                 for message in messages:
-                    metadata = {
-                        key: value
-                        for key, value in message.items()
-                        if key not in _MESSAGE_COLUMNS
-                    }
-                    conn.execute(
-                        """
-                        INSERT INTO messages(
-                            session_id, message_id, role, content, timestamp, metadata_json
-                        ) VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            str(session.get("id") or ""),
-                            int(message.get("id")),
-                            str(message.get("role") or ""),
-                            str(message.get("content") or ""),
-                            float(message.get("ts") or time.time()),
-                            self._json_dump(metadata, {}),
-                        ),
-                    )
+                    self._write_message(conn, session_id, message)
                 if active_session_id is not None:
                     conn.execute(
                         """
@@ -261,8 +265,8 @@ class SessionStore:
             {
                 "id": str(row["id"]),
                 "name": str(row["name"]),
-                "created_at": float(row["created_at"]),
-                "position": int(row["position"]),
+                "created_at": self._as_float(row["created_at"], time.time()),
+                "position": self._as_int(row["position"], 0),
             }
             for row in conn.execute(
                 "SELECT id, name, created_at, position FROM groups ORDER BY position, id"
@@ -275,9 +279,9 @@ class SessionStore:
             "id": str(row["id"]),
             "title": str(row["title"]),
             "cwd": str(row["cwd"]),
-            "created_at": float(row["created_at"]),
-            "updated_at": float(row["updated_at"]),
-            "msg_seq": int(row["msg_seq"]),
+            "created_at": cls._as_float(row["created_at"], time.time()),
+            "updated_at": cls._as_float(row["updated_at"], time.time()),
+            "msg_seq": cls._as_int(row["msg_seq"], 0),
             "last_error": str(row["last_error"]),
             "terminal_status": str(row["terminal_status"]),
             "terminal_reason": str(row["terminal_reason"]),
@@ -300,7 +304,7 @@ class SessionStore:
             "id": int(row["message_id"]),
             "role": str(row["role"]),
             "content": str(row["content"]),
-            "ts": float(row["timestamp"]),
+            "ts": cls._as_float(row["timestamp"], time.time()),
             **metadata,
         }
 
@@ -335,7 +339,11 @@ class SessionStore:
                 ):
                     session = sessions.get(str(row["session_id"]))
                     if session is not None:
-                        session["messages"].append(self._message_from_row(row))
+                        try:
+                            message = self._message_from_row(row)
+                        except (TypeError, ValueError, OverflowError):
+                            continue
+                        session["messages"].append(message)
 
                 active_row = conn.execute(
                     "SELECT value FROM app_state WHERE key = ?",
@@ -395,14 +403,34 @@ class SessionStore:
                     )
                 conn.execute("DELETE FROM groups WHERE id = ?", (group_id,))
 
-    def delete_session(self, session_id: str) -> None:
+    def delete_session(
+        self,
+        session_id: str,
+        *,
+        active_session_id: str | None | object = _UNSET,
+    ) -> None:
+        """Delete a session and optionally update active state atomically."""
         with self._lock:
             with self._connect() as conn:
                 conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-                conn.execute(
-                    "DELETE FROM app_state WHERE key = ? AND value = ?",
-                    ("active_session_id", session_id),
-                )
+                if active_session_id is _UNSET:
+                    conn.execute(
+                        "DELETE FROM app_state WHERE key = ? AND value = ?",
+                        ("active_session_id", session_id),
+                    )
+                elif active_session_id is None:
+                    conn.execute(
+                        "DELETE FROM app_state WHERE key = ?",
+                        ("active_session_id",),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO app_state(key, value) VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        """,
+                        ("active_session_id", str(active_session_id)),
+                    )
 
     def set_active_session(self, session_id: str | None) -> None:
         with self._lock:

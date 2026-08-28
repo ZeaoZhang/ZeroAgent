@@ -501,7 +501,7 @@ class AgentManager:
             key=lambda sess: (float(sess.updated_at or 0), sess.id),
         ).id
 
-    def _persist_sessions(self, *, raise_on_error: bool = False) -> None:
+    def _persist_sessions(self, *, raise_on_error: bool = True) -> None:
         """Persist non-empty in-memory sessions to SQLite."""
         try:
             with self.lock, SESSION_PERSISTENCE_LOCK:
@@ -747,7 +747,11 @@ class AgentManager:
             max_pos = max((g.position for g in self.groups.values()), default=-1)
             group = SessionGroup(id=gid, name=trimmed, position=max_pos + 1)
             self.groups[gid] = group
-            self._persist_groups(raise_on_error=True)
+            try:
+                self._persist_groups(raise_on_error=True)
+            except Exception:
+                self.groups.pop(gid, None)
+                raise
         return {
             "id": gid,
             "name": trimmed,
@@ -837,12 +841,22 @@ class AgentManager:
                 with contextlib.suppress(Exception):
                     sess.agent.abort()
             previous_active = self.active_session_id
+            was_active = previous_active == sid
             self.sessions.pop(sid)
-            if self.active_session_id == sid:
+            if was_active:
                 self.active_session_id = self._newest_session_id()
+            persisted_active = self.active_session_id
+            if (
+                persisted_active is not None
+                and persisted_active in self.sessions
+                and not session_has_user_message(self.sessions[persisted_active])
+            ):
+                persisted_active = None
             try:
-                self.session_store.delete_session(sid)
-                self._persist_sessions(raise_on_error=True)
+                self.session_store.delete_session(
+                    sid,
+                    active_session_id=persisted_active,
+                )
             except Exception:
                 self.sessions[sid] = sess
                 self.active_session_id = previous_active
@@ -864,7 +878,7 @@ class AgentManager:
                 self.session_idempotency_results.move_to_end(key)
                 return prior_result
 
-            sess = self.sessions.pop(sid, None)
+            sess = self.sessions.get(sid)
             if not sess:
                 raise web.HTTPNotFound(
                     text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False),
@@ -876,20 +890,31 @@ class AgentManager:
                 with contextlib.suppress(Exception):
                     sess.agent.abort()
             previous_active = self.active_session_id
-            if self.active_session_id == sid:
+            replacement_id = "sess-" + uuid.uuid4().hex[:12]
+            replacement = Session(
+                id=replacement_id,
+                cwd=sess.cwd,
+                log_path=_desktop_log_path(self.sessions_dir, replacement_id),
+            )
+            was_active = previous_active == sid
+            self.sessions.pop(sid)
+            if was_active:
                 self.active_session_id = self._newest_session_id()
+            persisted_active = self.active_session_id
+            if (
+                persisted_active is not None
+                and persisted_active in self.sessions
+                and not session_has_user_message(self.sessions[persisted_active])
+            ):
+                persisted_active = None
             try:
-                self.session_store.delete_session(sid)
-                replacement_id = "sess-" + uuid.uuid4().hex[:12]
-                replacement = Session(
-                    id=replacement_id,
-                    cwd=sess.cwd,
-                    log_path=_desktop_log_path(self.sessions_dir, replacement_id),
+                self.session_store.delete_session(
+                    sid,
+                    active_session_id=persisted_active,
                 )
                 self.sessions[replacement.id] = replacement
-                if previous_active == sid:
+                if was_active:
                     self.active_session_id = replacement.id
-                self._persist_sessions(raise_on_error=True)
             except Exception:
                 self.sessions[sid] = sess
                 self.active_session_id = previous_active
@@ -909,6 +934,7 @@ class AgentManager:
         emit_session_state(sess, "closed")
         emit_session_state(replacement, "created")
         return result
+
     def list_resume_sessions(self, limit: int = 10) -> list[dict]:
         self.ensure_project_import_path()
         continue_cmd = importlib.import_module("zero_agent.bots.shared.continue_cmd")
@@ -958,29 +984,89 @@ class AgentManager:
             if sess.agent is None:
                 sess.agent = self.make_agent(sess)
             runner = sess.agent
+            history_snapshot = None
+            snapshot_history = getattr(runner, "history_snapshot", None)
+            if callable(snapshot_history):
+                history_snapshot = snapshot_history()
         summary, full = continue_cmd.restore(runner, path)
         ui_messages = continue_cmd.extract_ui_messages(path)
 
         with self.lock:
-            sess.messages.clear()
-            sess.msg_seq = 0
-            sess.partial = None
-            sess.status = "idle"
-            sess.last_error = ""
-            sess.terminal_status = ""
-            sess.terminal_reason = ""
-            for msg in ui_messages:
-                self.add_message(
-                    sess,
-                    str(msg.get("role") or "assistant"),
-                    str(msg.get("content") or ""),
-                )
-            self.add_message(sess, "system", summary)
-            if ui_messages:
-                first_user = next((m for m in ui_messages if m.get("role") == "user"), None)
-                if first_user:
-                    sess.title = str(first_user.get("content") or "Restored").replace("\n", " ")[:40]
-            sess.updated_at = time.time()
+            old_state = {
+                "messages": sess.messages,
+                "msg_seq": sess.msg_seq,
+                "partial": sess.partial,
+                "status": sess.status,
+                "last_error": sess.last_error,
+                "terminal_status": sess.terminal_status,
+                "terminal_reason": sess.terminal_reason,
+                "title": sess.title,
+                "updated_at": sess.updated_at,
+            }
+            try:
+                restored_messages = []
+                for msg in ui_messages:
+                    restored_messages.append({
+                        "id": len(restored_messages) + 1,
+                        "role": str(msg.get("role") or "assistant"),
+                        "content": str(msg.get("content") or ""),
+                        "ts": time.time(),
+                    })
+                if summary:
+                    restored_messages.append({
+                        "id": len(restored_messages) + 1,
+                        "role": "system",
+                        "content": str(summary),
+                        "ts": time.time(),
+                    })
+                sess.messages = restored_messages
+                sess.msg_seq = len(restored_messages)
+                sess.partial = None
+                sess.status = "idle"
+                sess.last_error = ""
+                sess.terminal_status = ""
+                sess.terminal_reason = ""
+                if ui_messages:
+                    first_user = next((m for m in ui_messages if m.get("role") == "user"), None)
+                    if first_user:
+                        sess.title = str(first_user.get("content") or "Restored").replace("\n", " ")[:40]
+                sess.updated_at = time.time()
+                if session_has_user_message(sess):
+                    self.session_store.persist_session(
+                        _session_to_store_dict(sess),
+                        [_message_to_store_dict(message) for message in sess.messages],
+                        active_session_id=self.active_session_id,
+                    )
+                elif self.active_session_id == sess.id:
+                    remaining = [
+                        candidate for candidate in self.sessions.values()
+                        if candidate is not sess and session_has_user_message(candidate)
+                    ]
+                    fallback = max(
+                        remaining,
+                        key=lambda candidate: (candidate.updated_at, candidate.id),
+                        default=None,
+                    )
+                    self.session_store.delete_session(
+                        sess.id,
+                        active_session_id=fallback.id if fallback else None,
+                    )
+                else:
+                    self.session_store.delete_session(sess.id)
+            except Exception:
+                sess.messages = old_state["messages"]
+                sess.msg_seq = old_state["msg_seq"]
+                sess.partial = old_state["partial"]
+                sess.status = old_state["status"]
+                sess.last_error = old_state["last_error"]
+                sess.terminal_status = old_state["terminal_status"]
+                sess.terminal_reason = old_state["terminal_reason"]
+                sess.title = old_state["title"]
+                sess.updated_at = old_state["updated_at"]
+                restore_history = getattr(runner, "replace_history", None)
+                if history_snapshot is not None and callable(restore_history):
+                    restore_history(history_snapshot)
+                raise
 
         emit_session_state(sess, "resumed")
         return {

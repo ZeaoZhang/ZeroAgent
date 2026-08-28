@@ -922,6 +922,88 @@ def test_resume_history_creates_runner_for_live_session(monkeypatch, tmp_path) -
     assert sess.agent == "runner"
 
 
+
+def test_resume_history_replaces_existing_sqlite_messages(monkeypatch, tmp_path) -> None:
+    class DummyRunner:
+        def history_snapshot(self):
+            return [{"role": "user", "content": "old"}]
+
+        def replace_history(self, history):
+            self.history = history
+
+    class DummyContinue:
+        @staticmethod
+        def set_sessions_dir(_path):
+            pass
+
+        @staticmethod
+        def list_sessions(exclude_pid=None):
+            return [(str(tmp_path / "history.txt"), 1, "preview", 1)]
+
+        @staticmethod
+        def restore(runner, _path):
+            return "restored", True
+
+        @staticmethod
+        def extract_ui_messages(_path):
+            return [{"role": "user", "content": "new history"}]
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "old history")
+    runner = DummyRunner()
+    sess.agent = runner
+    monkeypatch.setattr(manager, "ensure_project_import_path", lambda: None)
+    monkeypatch.setitem(__import__("sys").modules, "zero_agent.bots.shared.continue_cmd", DummyContinue)
+
+    result = manager.resume_history(sess.id, 1)
+
+    assert result["ok"] is True
+    assert [message["content"] for message in sess.messages] == ["new history", "restored"]
+    restored = desktop_bridge.AgentManager()
+    assert [message["content"] for message in restored.sessions[sess.id].messages] == [
+        "new history",
+        "restored",
+    ]
+
+
+
+def test_resume_history_removes_old_sqlite_messages_when_source_has_no_user(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class DummyRunner:
+        def history_snapshot(self):
+            return []
+
+    class DummyContinue:
+        @staticmethod
+        def set_sessions_dir(_path):
+            pass
+
+        @staticmethod
+        def list_sessions(exclude_pid=None):
+            return [(str(tmp_path / "history.txt"), 1, "preview", 1)]
+
+        @staticmethod
+        def restore(runner, _path):
+            return "summary only", False
+
+        @staticmethod
+        def extract_ui_messages(_path):
+            return []
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "old history")
+    sess.agent = DummyRunner()
+    monkeypatch.setattr(manager, "ensure_project_import_path", lambda: None)
+    monkeypatch.setitem(__import__("sys").modules, "zero_agent.bots.shared.continue_cmd", DummyContinue)
+
+    manager.resume_history(sess.id, 1)
+
+    assert manager.sessions[sess.id].messages[0]["content"] == "summary only"
+    assert sess.id not in desktop_bridge.AgentManager().sessions
 def test_legacy_session_keeps_pid_response_log(monkeypatch, tmp_path) -> None:
     class DummyAgent:
         client = type("Client", (), {"log_path": None})()
@@ -1376,6 +1458,29 @@ def test_session_groups_persist_empty_groups_and_delete_without_sessions(monkeyp
     assert session.id in manager.sessions
     assert manager.sessions[session.id].group_id is None
     assert manager.list_groups() == []
+
+
+def test_create_group_rolls_back_memory_when_sqlite_write_fails(monkeypatch, tmp_path):
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+
+    def fail_save(*args, **kwargs):
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(manager.session_store, "save_group", fail_save)
+
+    with pytest.raises(OSError, match="database unavailable"):
+        manager.create_group("work")
+
+    assert manager.groups == {}
 
 
 def test_session_group_assignment_rejects_unknown_group(monkeypatch, tmp_path) -> None:

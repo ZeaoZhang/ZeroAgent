@@ -237,3 +237,70 @@ def test_concurrent_message_appends_are_not_lost(store):
     assert errors == []
     messages = store.load_state()["sessions"][session["id"]]["messages"]
     assert [message["id"] for message in messages] == [1, 2, 3]
+
+
+def test_persist_session_replaces_existing_messages(store):
+    session = session_record()
+    store.append_message(session, message_record(1, content="old"))
+    session["msg_seq"] = 1
+
+    store.persist_session(
+        session,
+        [message_record(1, content="new")],
+    )
+
+    messages = store.load_state()["sessions"][session["id"]]["messages"]
+    assert messages == [
+        {
+            "id": 1,
+            "role": "user",
+            "content": "new",
+            "ts": 1.0,
+            "image_ids": ["img-1"],
+        }
+    ]
+
+
+def test_delete_session_can_update_active_session_atomically(store):
+    first = session_record("sess-first")
+    second = session_record("sess-second")
+    store.append_message(first, message_record())
+    store.append_message(second, message_record())
+    store.set_active_session(first["id"])
+
+    store.delete_session(first["id"], active_session_id=second["id"])
+
+    assert store.load_state()["active_session_id"] == second["id"]
+
+
+def test_unserializable_metadata_fails_without_persisting(store):
+    session = session_record()
+    session["token_usage"] = {"bad": object()}
+
+    with pytest.raises(TypeError):
+        store.upsert_session(session)
+    assert store.load_state()["sessions"] == {}
+
+
+
+def test_malformed_scalar_rows_do_not_hide_other_sessions(store, tmp_path):
+    first = session_record("sess-first")
+    second = session_record("sess-second")
+    store.append_message(first, message_record())
+    store.append_message(second, message_record())
+    with sqlite3.connect(tmp_path / "sessions.sqlite3") as conn:
+        conn.execute(
+            "UPDATE sessions SET updated_at = ? WHERE id = ?",
+            ("not-a-number", first["id"]),
+        )
+        conn.execute(
+            "UPDATE messages SET message_id = ? WHERE session_id = ?",
+            ("not-a-number", first["id"]),
+        )
+        conn.commit()
+
+    loaded = store.load_state()["sessions"]
+
+    assert set(loaded) == {first["id"], second["id"]}
+    assert loaded[first["id"]]["updated_at"] > 0
+    assert loaded[first["id"]]["messages"] == []
