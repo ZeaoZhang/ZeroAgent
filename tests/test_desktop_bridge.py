@@ -54,7 +54,7 @@ def test_bridge_tests_never_write_the_production_session_store(tmp_path) -> None
     sess = manager.create_session()
     manager.add_message(sess, "user", "hello")
     assert manager.sessions_dir == str(tmp_path / "sessions")
-    assert (tmp_path / "sessions" / "sessions.json").exists()
+    assert (tmp_path / "sessions" / "sessions.sqlite3").exists()
 
 
 def test_web_frontend_folds_tool_markers() -> None:
@@ -1347,16 +1347,22 @@ def test_empty_sessions_are_not_persisted_until_first_user_message(monkeypatch, 
     manager = desktop_bridge.AgentManager()
     session = manager.create_session()
 
-    assert not (tmp_path / "sessions" / "sessions.json").exists()
+    db_path = tmp_path / "sessions" / "sessions.sqlite3"
+    assert not manager.session_store.load_state()["sessions"]
     manager.add_message(session, "assistant", "answer without a user prompt")
-    assert not (tmp_path / "sessions" / "sessions.json").exists()
+    assert not manager.session_store.load_state()["sessions"]
 
     manager.add_message(session, "user", "  hello  ")
-    payload = json.loads((tmp_path / "sessions" / "sessions.json").read_text(encoding="utf-8"))
-    assert [item["id"] for item in payload["sessions"]] == [session.id]
+    state = manager.session_store.load_state()
+    assert list(state["sessions"]) == [session.id]
+    assert [message["content"] for message in state["sessions"][session.id]["messages"]] == [
+        "answer without a user prompt",
+        "  hello  ",
+    ]
+    assert db_path.exists()
 
 
-def test_loading_sessions_discards_persisted_empty_conversations(monkeypatch, tmp_path) -> None:
+def test_loading_legacy_json_sessions_is_ignored(monkeypatch, tmp_path) -> None:
     config = AgentConfig(
         llm_backends={"default": LLMBackendConfig(
             name="default", provider="openai", api_key="test", api_base="https://x", model="m",
@@ -1367,21 +1373,21 @@ def test_loading_sessions_discards_persisted_empty_conversations(monkeypatch, tm
     )
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
-    sessions_dir.joinpath("sessions.json").write_text(json.dumps({
+    legacy = sessions_dir / "sessions.json"
+    legacy.write_text(json.dumps({
         "version": 1,
-        "activeSessionId": "sess-empty000000",
+        "activeSessionId": "sess-legacy0000",
         "sessions": [
-            {"id": "sess-empty000000", "messages": []},
-            {"id": "sess-valid00000", "messages": [{"role": "user", "content": "hello"}]},
+            {"id": "sess-legacy0000", "messages": [{"role": "user", "content": "legacy"}]},
         ],
     }), encoding="utf-8")
+    before = legacy.read_bytes()
     monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
 
     manager = desktop_bridge.AgentManager()
 
-    assert list(manager.sessions) == ["sess-valid00000"]
-    payload = json.loads(sessions_dir.joinpath("sessions.json").read_text(encoding="utf-8"))
-    assert [item["id"] for item in payload["sessions"]] == ["sess-valid00000"]
+    assert manager.sessions == {}
+    assert legacy.read_bytes() == before
 
 
 def test_session_plan_fields_default() -> None:

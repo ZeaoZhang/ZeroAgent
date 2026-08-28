@@ -169,8 +169,14 @@ class SessionStore:
             values,
         )
 
-    def append_message(self, session: dict, message: dict) -> None:
-        """Atomically upsert session metadata and append one message."""
+    def append_message(
+        self,
+        session: dict,
+        message: dict,
+        *,
+        active_session_id: str | None = None,
+    ) -> None:
+        """Atomically upsert session metadata, append one message, and active state."""
         metadata = {
             key: value for key, value in message.items() if key not in _MESSAGE_COLUMNS
         }
@@ -196,11 +202,59 @@ class SessionStore:
                         self._json_dump(metadata, {}),
                     ),
                 )
-
+                if active_session_id is not None:
+                    conn.execute(
+                        """
+                        INSERT INTO app_state(key, value) VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        """,
+                        ("active_session_id", str(active_session_id)),
+                    )
     def upsert_session(self, session: dict) -> None:
         with self._lock:
             with self._connect() as conn:
                 self._write_session(conn, session)
+
+    def persist_session(
+        self,
+        session: dict,
+        messages: list[dict],
+        *,
+        active_session_id: str | None = None,
+    ) -> None:
+        """Atomically upsert a session and persist its complete message list."""
+        with self._lock:
+            with self._connect() as conn:
+                self._write_session(conn, session)
+                for message in messages:
+                    metadata = {
+                        key: value
+                        for key, value in message.items()
+                        if key not in _MESSAGE_COLUMNS
+                    }
+                    conn.execute(
+                        """
+                        INSERT INTO messages(
+                            session_id, message_id, role, content, timestamp, metadata_json
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(session.get("id") or ""),
+                            int(message.get("id")),
+                            str(message.get("role") or ""),
+                            str(message.get("content") or ""),
+                            float(message.get("ts") or time.time()),
+                            self._json_dump(metadata, {}),
+                        ),
+                    )
+                if active_session_id is not None:
+                    conn.execute(
+                        """
+                        INSERT INTO app_state(key, value) VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        """,
+                        ("active_session_id", str(active_session_id)),
+                    )
 
     def _load_groups_with_connection(self, conn: sqlite3.Connection) -> list[dict]:
         return [
@@ -316,13 +370,29 @@ class SessionStore:
                     ),
                 )
 
-    def delete_group_and_unassign_sessions(self, group_id: str) -> None:
+    def delete_group_and_unassign_sessions(
+        self,
+        group_id: str,
+        updated_at_by_session: dict[str, float] | None = None,
+    ) -> None:
         with self._lock:
             with self._connect() as conn:
-                conn.execute(
-                    "UPDATE sessions SET group_id = NULL WHERE group_id = ?",
-                    (group_id,),
-                )
+                updates = updated_at_by_session or {}
+                if updates:
+                    for session_id, updated_at in updates.items():
+                        conn.execute(
+                            """
+                            UPDATE sessions
+                            SET group_id = NULL, updated_at = ?
+                            WHERE id = ? AND group_id = ?
+                            """,
+                            (float(updated_at), session_id, group_id),
+                        )
+                else:
+                    conn.execute(
+                        "UPDATE sessions SET group_id = NULL WHERE group_id = ?",
+                        (group_id,),
+                    )
                 conn.execute("DELETE FROM groups WHERE id = ?", (group_id,))
 
     def delete_session(self, session_id: str) -> None:

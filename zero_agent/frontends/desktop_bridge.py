@@ -43,6 +43,7 @@ from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import AgentConfig, default_config_path, load_default_config
 from zero_agent.core.types import TaskMode
 from zero_agent.frontends.plan_command import create_plan_workspace
+from zero_agent.frontends.session_store import SessionStore
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -284,7 +285,7 @@ def _resolve_runtime_path(path: str | os.PathLike[str] | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Session persistence (sessions.json) so conversations survive app restarts.
+# Session persistence (SQLite) so conversations survive app restarts.
 # ---------------------------------------------------------------------------
 
 def _message_text(content: Any) -> str:
@@ -350,13 +351,39 @@ def _session_to_persistable(sess: Session) -> dict:
     }
 
 
+def _session_to_store_dict(sess: Session) -> dict:
+    """Return only durable session fields using the SQLite store names."""
+    return {
+        "id": sess.id,
+        "title": sess.title,
+        "cwd": sess.cwd,
+        "created_at": sess.created_at,
+        "updated_at": sess.updated_at,
+        "msg_seq": sess.msg_seq,
+        "last_error": sess.last_error,
+        "terminal_status": sess.terminal_status,
+        "terminal_reason": sess.terminal_reason,
+        "model_override": sess.model_override,
+        "token_usage": _normalize_token_usage(sess.token_usage),
+        "group_id": sess.group_id,
+        "sub_agents": _clone_agent_records(sess.sub_agents),
+        "plan_path": sess.plan_path,
+        "plan_status": sess.plan_status,
+        "plan_task": sess.plan_task,
+    }
+
+
+def _message_to_store_dict(message: dict) -> dict:
+    return copy.deepcopy(message)
+
+
 def _session_from_persisted(
     data: dict,
     sessions_dir: str | None = None,
 ) -> Session:
     sid = str(data.get("id") or ("sess-" + uuid.uuid4().hex[:12]))
     owned_path = _desktop_log_path(sessions_dir, sid) if sessions_dir and _DESKTOP_SESSION_ID_RE.fullmatch(sid) else None
-    plan_status = str(data.get("planStatus") or "inactive")
+    plan_status = str(data.get("planStatus", data.get("plan_status")) or "inactive")
     if plan_status not in _PLAN_STATUSES:
         plan_status = "inactive"
     sess = Session(
@@ -375,9 +402,9 @@ def _session_from_persisted(
         group_id=data.get("group_id"),
         sub_agents=_normalize_sub_agents(data.get("sub_agents")),
         token_usage=_normalize_token_usage(data.get("token_usage")),
-        plan_path=data.get("planPath"),
+        plan_path=data.get("planPath", data.get("plan_path")),
         plan_status=plan_status,
-        plan_task=str(data.get("planTask") or ""),
+        plan_task=str(data.get("planTask", data.get("plan_task")) or ""),
     )
     sess.messages = list(data.get("messages") or [])
     sess.restore_history = bool(sess.messages)
@@ -418,45 +445,35 @@ class AgentManager:
         self.active_session_id: Optional[str] = None
         self.session_idempotency_results: OrderedDict[tuple[str, str], dict] = OrderedDict()
         self.groups: OrderedDict[str, SessionGroup] = OrderedDict()
-        self.group_store = os.path.join(self.sessions_dir, "groups.json")
+        self.session_store = SessionStore(
+            os.path.join(self.sessions_dir, "sessions.sqlite3")
+        )
+        self.session_store.initialize()
         self._load_persisted_groups()
         self._load_persisted_sessions()
 
     def _persist_groups(self, *, raise_on_error: bool = False) -> None:
-        """Atomically write group entities to groups.json."""
-        store = self.group_store
-        tmp = f"{store}.{uuid.uuid4().hex}.tmp"
+        """Persist group entities to SQLite."""
         try:
-            with self.lock:
-                os.makedirs(self.sessions_dir, exist_ok=True)
-                payload = {
-                    "version": 1,
-                    "groups": [
-                        {"id": g.id, "name": g.name, "created_at": g.created_at, "position": g.position}
-                        for g in self.groups.values()
-                    ],
-                }
-                with open(tmp, "w", encoding="utf-8") as fh:
-                    json.dump(payload, fh, ensure_ascii=False, indent=2)
-                os.replace(tmp, store)
+            with self.lock, SESSION_PERSISTENCE_LOCK:
+                for group in self.groups.values():
+                    self.session_store.save_group({
+                        "id": group.id,
+                        "name": group.name,
+                        "created_at": group.created_at,
+                        "position": group.position,
+                    })
         except Exception as exc:
-            with contextlib.suppress(OSError):
-                os.remove(tmp)
             print(f"persist groups failed: {exc}", file=sys.stderr)
             if raise_on_error:
                 raise
 
     def _load_persisted_groups(self) -> None:
-        store = self.group_store
-        if not os.path.isfile(store):
-            return
         try:
-            with open(store, encoding="utf-8") as fh:
-                payload = json.load(fh)
+            group_entries = self.session_store.load_groups()
         except Exception as exc:
             print(f"load persisted groups failed: {exc}", file=sys.stderr)
             return
-        group_entries = payload.get("groups") or []
         for entry in group_entries:
             try:
                 g = SessionGroup(
@@ -468,7 +485,6 @@ class AgentManager:
                 self.groups[g.id] = g
             except Exception as exc:
                 print(f"skip broken persisted group: {exc}", file=sys.stderr)
-
 
     def _owned_desktop_logs(self) -> set[str]:
         """Return absolute paths currently owned by persisted desktop sessions."""
@@ -485,64 +501,52 @@ class AgentManager:
             key=lambda sess: (float(sess.updated_at or 0), sess.id),
         ).id
 
-
     def _persist_sessions(self, *, raise_on_error: bool = False) -> None:
-        """Atomically write non-empty in-memory sessions to sessions.json."""
-        store = os.path.join(self.sessions_dir, "sessions.json")
-        tmp = f"{store}.{uuid.uuid4().hex}.tmp"
+        """Persist non-empty in-memory sessions to SQLite."""
         try:
             with self.lock, SESSION_PERSISTENCE_LOCK:
-                persisted = [s for s in self.sessions.values() if session_has_user_message(s)]
-                if not persisted:
-                    with contextlib.suppress(OSError):
-                        os.remove(store)
-                    return
-                os.makedirs(self.sessions_dir, exist_ok=True)
-                persisted_ids = {s.id for s in persisted}
-                active_id = self.active_session_id if self.active_session_id in persisted_ids else persisted[-1].id
-                payload = {
-                    "version": 1,
-                    "activeSessionId": active_id,
-                    "sessions": [_session_to_persistable(s) for s in persisted],
-                }
-                with open(tmp, "w", encoding="utf-8") as fh:
-                    json.dump(payload, fh, ensure_ascii=False, indent=2)
-                os.replace(tmp, store)
+                persisted = [
+                    sess for sess in self.sessions.values()
+                    if session_has_user_message(sess)
+                ]
+                persisted_ids = {sess.id for sess in persisted}
+                for sess in persisted:
+                    self.session_store.upsert_session(_session_to_store_dict(sess))
+                active_id = (
+                    self.active_session_id
+                    if self.active_session_id in persisted_ids
+                    else (persisted[-1].id if persisted else None)
+                )
+                self.session_store.set_active_session(active_id)
         except Exception as exc:
-            with contextlib.suppress(OSError):
-                os.remove(tmp)
             print(f"persist sessions failed: {exc}", file=sys.stderr)
             if raise_on_error:
                 raise
 
     def _load_persisted_sessions(self) -> None:
-        """Restore non-empty sessions and remove stale empty records."""
-        store = os.path.join(self.sessions_dir, "sessions.json")
-        if not os.path.isfile(store):
-            return
         try:
-            with open(store, encoding="utf-8") as fh:
-                payload = json.load(fh)
+            state = self.session_store.load_state()
         except Exception as exc:
             print(f"load persisted sessions failed: {exc}", file=sys.stderr)
             return
-        skipped = False
-        for data in payload.get("sessions") or []:
+
+        for data in (state.get("sessions") or {}).values():
             try:
                 sess = _session_from_persisted(data, self.sessions_dir)
                 if not session_has_user_message(sess):
-                    skipped = True
                     continue
                 self.sessions[sess.id] = sess
             except Exception as exc:
                 print(f"skip broken persisted session: {exc}", file=sys.stderr)
-        active = payload.get("activeSessionId")
+
+        active = state.get("active_session_id")
         if active and active in self.sessions:
             self.active_session_id = active
         elif self.sessions:
             self.active_session_id = next(iter(self.sessions))
-        if skipped:
-            self._persist_sessions()
+        else:
+            self.active_session_id = None
+
 
 
     def _load_base_config(self) -> AgentConfig:
@@ -629,6 +633,13 @@ class AgentManager:
             return out
 
     def add_message(self, sess: Session, role: str, content: str, **extra) -> dict:
+        previous = (
+            sess.msg_seq,
+            len(sess.messages),
+            sess.title,
+            sess.updated_at,
+        )
+        was_valid = session_has_user_message(sess)
         sess.msg_seq += 1
         msg = {"id": sess.msg_seq, "role": role, "content": content, "ts": time.time()}
         msg.update(extra)
@@ -637,7 +648,23 @@ class AgentManager:
         if role == "user" and content.strip() and sess.title == "New chat":
             sess.title = content.strip().replace("\n", " ")[:40]
         if session_has_user_message(sess):
-            self._persist_sessions()
+            try:
+                if was_valid:
+                    self.session_store.append_message(
+                        _session_to_store_dict(sess),
+                        _message_to_store_dict(msg),
+                        active_session_id=self.active_session_id,
+                    )
+                else:
+                    self.session_store.persist_session(
+                        _session_to_store_dict(sess),
+                        [_message_to_store_dict(message) for message in sess.messages],
+                        active_session_id=self.active_session_id,
+                    )
+            except Exception:
+                sess.msg_seq, message_count, sess.title, sess.updated_at = previous
+                del sess.messages[message_count:]
+                raise
         return msg
     def create_session(self, cwd: Optional[str] = None) -> Session:
         sid = "sess-" + uuid.uuid4().hex[:12]
@@ -739,14 +766,28 @@ class AgentManager:
                     content_type="application/json",
                 )
             affected: List[str] = []
+            previous: dict[str, tuple[Optional[str], float]] = {}
+            updated_at_by_session: dict[str, float] = {}
             for sid, sess in list(self.sessions.items()):
                 if sess.group_id == gid:
+                    previous[sid] = (sess.group_id, sess.updated_at)
                     sess.group_id = None
                     sess.updated_at = time.time()
                     affected.append(sid)
-            self.groups.pop(gid)
-            self._persist_sessions(raise_on_error=True)
-            self._persist_groups(raise_on_error=True)
+                    updated_at_by_session[sid] = sess.updated_at
+            try:
+                self.session_store.delete_group_and_unassign_sessions(
+                    gid,
+                    updated_at_by_session,
+                )
+                self.groups.pop(gid)
+            except Exception:
+                for sid, (group_id, updated_at) in previous.items():
+                    sess = self.sessions.get(sid)
+                    if sess:
+                        sess.group_id = group_id
+                        sess.updated_at = updated_at
+                raise
         for sid in affected:
             sess = self.sessions.get(sid)
             if sess:
@@ -795,16 +836,23 @@ class AgentManager:
             if sess.agent and hasattr(sess.agent, "abort"):
                 with contextlib.suppress(Exception):
                     sess.agent.abort()
+            previous_active = self.active_session_id
             self.sessions.pop(sid)
             if self.active_session_id == sid:
                 self.active_session_id = self._newest_session_id()
+            try:
+                self.session_store.delete_session(sid)
+                self._persist_sessions(raise_on_error=True)
+            except Exception:
+                self.sessions[sid] = sess
+                self.active_session_id = previous_active
+                raise
             if owned_path:
                 with contextlib.suppress(OSError):
                     if os.path.isfile(owned_path):
                         os.remove(owned_path)
             result = {"ok": True, "sessionId": sid}
             remember_session_result(self.session_idempotency_results, "delete", sid, result)
-            self._persist_sessions()
         emit_session_state(sess, "closed")
         return result
 
@@ -827,15 +875,25 @@ class AgentManager:
             if sess.agent and hasattr(sess.agent, "abort"):
                 with contextlib.suppress(Exception):
                     sess.agent.abort()
-            replacement_id = "sess-" + uuid.uuid4().hex[:12]
-            replacement = Session(
-                id=replacement_id,
-                cwd=sess.cwd,
-                log_path=_desktop_log_path(self.sessions_dir, replacement_id),
-            )
-            self.sessions[replacement.id] = replacement
+            previous_active = self.active_session_id
             if self.active_session_id == sid:
-                self.active_session_id = replacement.id
+                self.active_session_id = self._newest_session_id()
+            try:
+                self.session_store.delete_session(sid)
+                replacement_id = "sess-" + uuid.uuid4().hex[:12]
+                replacement = Session(
+                    id=replacement_id,
+                    cwd=sess.cwd,
+                    log_path=_desktop_log_path(self.sessions_dir, replacement_id),
+                )
+                self.sessions[replacement.id] = replacement
+                if previous_active == sid:
+                    self.active_session_id = replacement.id
+                self._persist_sessions(raise_on_error=True)
+            except Exception:
+                self.sessions[sid] = sess
+                self.active_session_id = previous_active
+                raise
             if owned_path:
                 with contextlib.suppress(OSError):
                     if os.path.isfile(owned_path):
@@ -847,8 +905,6 @@ class AgentManager:
                 "session": self.snapshot(replacement),
             }
             remember_session_result(self.session_idempotency_results, "replace", sid, result)
-            self._persist_sessions()
-
 
         emit_session_state(sess, "closed")
         emit_session_state(replacement, "created")
