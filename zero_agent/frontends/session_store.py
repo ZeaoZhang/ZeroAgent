@@ -86,15 +86,24 @@ class SessionStore:
         return conn
 
     def initialize(self) -> None:
-        """Create the database schema exactly once, safely repeatable."""
+        """Create the database schema and reject unsupported versions."""
         with self._lock:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
             with self._connect() as conn:
                 conn.executescript(_SCHEMA)
-                conn.execute(
-                    "INSERT OR IGNORE INTO schema_meta(key, value) VALUES (?, ?)",
-                    ("version", _SCHEMA_VERSION),
-                )
+                row = conn.execute(
+                    "SELECT value FROM schema_meta WHERE key = ?",
+                    ("version",),
+                ).fetchone()
+                if row is None:
+                    conn.execute(
+                        "INSERT INTO schema_meta(key, value) VALUES (?, ?)",
+                        ("version", _SCHEMA_VERSION),
+                    )
+                elif str(row["value"]) != _SCHEMA_VERSION:
+                    raise RuntimeError(
+                        f"unsupported session store schema version: {row['value']}"
+                    )
 
     @staticmethod
     def _json_dump(value: Any) -> str:
@@ -232,6 +241,30 @@ class SessionStore:
         with self._lock:
             with self._connect() as conn:
                 self._write_session(conn, session)
+
+    def sync_sessions(
+        self,
+        sessions: list[dict],
+        active_session_id: str | None,
+    ) -> None:
+        """Atomically synchronize session metadata and active state."""
+        with self._lock:
+            with self._connect() as conn:
+                for session in sessions:
+                    self._write_session(conn, session)
+                if active_session_id is None:
+                    conn.execute(
+                        "DELETE FROM app_state WHERE key = ?",
+                        ("active_session_id",),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO app_state(key, value) VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        """,
+                        ("active_session_id", str(active_session_id)),
+                    )
 
     def persist_session(
         self,

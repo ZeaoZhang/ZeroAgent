@@ -248,6 +248,39 @@ def test_add_message_rolls_back_memory_when_sqlite_write_fails(monkeypatch, tmp_
     assert session.updated_at == before[3]
 
 
+def test_metadata_persistence_failure_restores_last_durable_session_state(
+    monkeypatch,
+    tmp_path,
+):
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default", provider="openai", api_key="test", api_base="https://x", model="m",
+        )},
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: config)
+    manager = desktop_bridge.AgentManager()
+    session = manager.create_session()
+    manager.add_message(session, "user", "durable")
+    session.status = "running"
+    session.last_error = "transient"
+    session.sub_agents = [{"id": "agent", "status": "running"}]
+
+    def fail_sync(*args, **kwargs):
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(manager.session_store, "sync_sessions", fail_sync)
+
+    with pytest.raises(OSError, match="database unavailable"):
+        manager._persist_sessions()
+
+    assert session.status == "idle"
+    assert session.last_error == ""
+    assert session.sub_agents == []
+
+
 
 
 def test_persisted_desktop_session_regenerates_owned_log_path(tmp_path) -> None:

@@ -304,3 +304,18 @@ def test_malformed_scalar_rows_do_not_hide_other_sessions(store, tmp_path):
     assert set(loaded) == {first["id"], second["id"]}
     assert loaded[first["id"]]["updated_at"] > 0
     assert loaded[first["id"]]["messages"] == []
+
+
+def test_initialize_rejects_unsupported_schema_version(tmp_path):
+    path = tmp_path / "sessions.sqlite3"
+    initial = SessionStore(path)
+    initial.initialize()
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE schema_meta SET value = ? WHERE key = 'version'",
+            ("99",),
+        )
+        conn.commit()
+
+    with pytest.raises(RuntimeError, match="unsupported session store schema version"):
+        SessionStore(path).initialize()

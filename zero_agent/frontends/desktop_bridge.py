@@ -260,6 +260,28 @@ class Session:
 
 _PLAN_STATUSES = {"inactive", "planning", "ready", "executing", "failed", "cancelled"}
 
+_SESSION_STATE_FIELDS = (
+    "title",
+    "cwd",
+    "created_at",
+    "updated_at",
+    "messages",
+    "msg_seq",
+    "partial",
+    "status",
+    "last_error",
+    "terminal_status",
+    "terminal_reason",
+    "model_override",
+    "token_usage",
+    "group_id",
+    "sub_agents",
+    "agent_turn_token",
+    "plan_path",
+    "plan_status",
+    "plan_task",
+)
+
 
 @dataclass
 class SessionGroup:
@@ -451,6 +473,7 @@ class AgentManager:
         self.session_store.initialize()
         self._load_persisted_groups()
         self._load_persisted_sessions()
+        self._last_persisted_state = self._capture_session_state()
 
     def _persist_groups(self, *, raise_on_error: bool = False) -> None:
         """Persist group entities to SQLite."""
@@ -501,6 +524,23 @@ class AgentManager:
             key=lambda sess: (float(sess.updated_at or 0), sess.id),
         ).id
 
+    def _capture_session_state(self) -> dict[str, dict]:
+        return {
+            sid: {
+                field: copy.deepcopy(getattr(sess, field))
+                for field in _SESSION_STATE_FIELDS
+            }
+            for sid, sess in self.sessions.items()
+        }
+
+    def _restore_session_state(self, state: dict[str, dict]) -> None:
+        for sid, values in state.items():
+            sess = self.sessions.get(sid)
+            if sess is None:
+                continue
+            for field, value in values.items():
+                setattr(sess, field, copy.deepcopy(value))
+
     def _persist_sessions(self, *, raise_on_error: bool = True) -> None:
         """Persist non-empty in-memory sessions to SQLite."""
         try:
@@ -510,15 +550,18 @@ class AgentManager:
                     if session_has_user_message(sess)
                 ]
                 persisted_ids = {sess.id for sess in persisted}
-                for sess in persisted:
-                    self.session_store.upsert_session(_session_to_store_dict(sess))
                 active_id = (
                     self.active_session_id
                     if self.active_session_id in persisted_ids
                     else (persisted[-1].id if persisted else None)
                 )
-                self.session_store.set_active_session(active_id)
+                self.session_store.sync_sessions(
+                    [_session_to_store_dict(sess) for sess in persisted],
+                    active_id,
+                )
+                self._last_persisted_state = self._capture_session_state()
         except Exception as exc:
+            self._restore_session_state(self._last_persisted_state)
             print(f"persist sessions failed: {exc}", file=sys.stderr)
             if raise_on_error:
                 raise
@@ -661,6 +704,7 @@ class AgentManager:
                         [_message_to_store_dict(message) for message in sess.messages],
                         active_session_id=self.active_session_id,
                     )
+                self._last_persisted_state = self._capture_session_state()
             except Exception:
                 sess.msg_seq, message_count, sess.title, sess.updated_at = previous
                 del sess.messages[message_count:]
@@ -687,12 +731,18 @@ class AgentManager:
                 raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
             return sess
 
-    def _detach_response_log(self, sess: Session) -> str | None:
-        """Detach an owned response log before aborting its worker."""
+    def _owned_response_log_path(self, sess: Session) -> str | None:
         if not _DESKTOP_SESSION_ID_RE.fullmatch(sess.id):
             return None
         owned_path = _desktop_log_path(self.sessions_dir, sess.id)
         if not sess.log_path or os.path.abspath(sess.log_path) != owned_path:
+            return None
+        return owned_path
+
+    def _detach_response_log(self, sess: Session) -> str | None:
+        """Detach an owned response log after its session mutation commits."""
+        owned_path = self._owned_response_log_path(sess)
+        if owned_path is None:
             return None
         runner = sess.agent
         agent = getattr(runner, "_agent", None)
@@ -836,7 +886,7 @@ class AgentManager:
             sess = self.sessions.get(sid)
             if not sess:
                 raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
-            owned_path = self._detach_response_log(sess)
+            owned_path = self._owned_response_log_path(sess)
             if sess.agent and hasattr(sess.agent, "abort"):
                 with contextlib.suppress(Exception):
                     sess.agent.abort()
@@ -862,6 +912,7 @@ class AgentManager:
                 self.active_session_id = previous_active
                 raise
             if owned_path:
+                self._detach_response_log(sess)
                 with contextlib.suppress(OSError):
                     if os.path.isfile(owned_path):
                         os.remove(owned_path)
@@ -885,7 +936,7 @@ class AgentManager:
                     content_type="application/json",
                 )
 
-            owned_path = self._detach_response_log(sess)
+            owned_path = self._owned_response_log_path(sess)
             if sess.agent and hasattr(sess.agent, "abort"):
                 with contextlib.suppress(Exception):
                     sess.agent.abort()
@@ -920,6 +971,7 @@ class AgentManager:
                 self.active_session_id = previous_active
                 raise
             if owned_path:
+                self._detach_response_log(sess)
                 with contextlib.suppress(OSError):
                     if os.path.isfile(owned_path):
                         os.remove(owned_path)
@@ -1053,6 +1105,7 @@ class AgentManager:
                     )
                 else:
                     self.session_store.delete_session(sess.id)
+                self._last_persisted_state = self._capture_session_state()
             except Exception:
                 sess.messages = old_state["messages"]
                 sess.msg_seq = old_state["msg_seq"]
