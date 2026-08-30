@@ -78,6 +78,7 @@ def register_memory_tools(registry: ToolRegistry, config: AgentConfig) -> None:
             },
         },
         handler=_make_update_working_checkpoint_handler(config),
+        evidence_kind="memory",
         category="memory",
         promotes_task_state=False,
     ))
@@ -98,6 +99,7 @@ def register_memory_tools(registry: ToolRegistry, config: AgentConfig) -> None:
             "properties": {},
         },
         handler=_make_start_long_term_update_handler(config),
+        evidence_kind="memory",
         category="memory",
         promotes_task_state=False,
     ))

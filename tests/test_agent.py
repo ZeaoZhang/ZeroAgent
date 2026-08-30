@@ -1033,6 +1033,7 @@ class TestZeroAgentHooks:
             description="",
             parameters={"type": "object", "properties": {}},
             handler=file_read_handler,
+            evidence_kind="read",
         ))
 
         events: list[tuple[str, dict]] = []

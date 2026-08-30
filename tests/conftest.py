@@ -51,6 +51,7 @@ def mock_registry() -> ToolRegistry:
             "required": ["message"],
         },
         handler=_make_echo_handler(),
+        evidence_kind="execute",
         category="test",
     ))
 

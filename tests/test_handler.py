@@ -1,6 +1,10 @@
 """Tests for core/handler.py — BaseHandler dispatch and do_no_tool."""
 
+from types import SimpleNamespace
+
 import pytest
+
+from zero_agent.core.config import AgentConfig
 
 from zero_agent.core.handler import BaseHandler
 from zero_agent.core.types import EvidenceLedger, EvidenceRecord, StepAction, StepOutcome, TaskContract, TaskMode, TerminalStatus
@@ -52,6 +56,63 @@ class TestBaseHandlerDispatch:
         assert "ref=1" in result.next_prompt
         assert "tool=echo" in result.next_prompt
         assert "recent_evidence: none" not in result.next_prompt
+
+    def test_dispatch_vision_records_read_evidence_and_completes(
+        self,
+        mock_config: AgentConfig,
+    ) -> None:
+        mock_config.llm_backends["default"].vision = True
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
+
+        class VisualSession:
+            def vision(self, image_path: str, prompt: str) -> str:
+                return f"understood {image_path}: {prompt}"
+
+        handler.parent = SimpleNamespace(_sessions={"default": VisualSession()})
+        vision_result = _exhaust(handler.dispatch(
+            "vision",
+            {"image_path": "screen.png", "prompt": "describe"},
+            MockResponse(),
+        ))
+
+        assert handler.task_contract.mode is TaskMode.EXECUTING
+        assert vision_result.data["status"] == "success"
+        assert len(handler.evidence_ledger.records) == 1
+        assert handler.evidence_ledger.records[0].kind == "read"
+        assert "ref=1" in (vision_result.next_prompt or "")
+
+        completion = _exhaust(handler.dispatch(
+            "complete_task",
+            {"answer": "The image was understood.", "evidence_refs": [1]},
+            MockResponse(),
+        ))
+
+        assert completion.action is StepAction.REQUEST_COMPLETION
+        assert handler.completion_certificate is not None
+        assert handler.completion_certificate.reason == "execution_evidence_satisfied"
+
+    def test_dispatch_vision_error_keeps_contract_anchor(
+        self,
+        mock_config: AgentConfig,
+    ) -> None:
+        mock_config.llm_backends["default"].vision = True
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
+        handler.parent = SimpleNamespace(_sessions={})
+
+        outcome = _exhaust(handler.dispatch(
+            "vision",
+            {"image_path": "missing.png"},
+            MockResponse(),
+        ))
+
+        assert outcome.data["status"] == "error"
+        assert outcome.next_prompt is not None
+        assert "<task_contract>" in outcome.next_prompt
+        assert "tool=vision" in outcome.next_prompt
+        assert "status=error" in outcome.next_prompt
+
     def test_dispatch_unknown_tool(self, mock_handler: BaseHandler) -> None:
         """未知工具返回错误提示."""
         gen = mock_handler.dispatch(
@@ -1158,8 +1219,8 @@ class TestBaseHandlerDoNoTool:
         assert len(mock_handler.evidence_ledger.records) == 1
         record = mock_handler.evidence_ledger.records[0]
         assert record.tool_name == "echo"
-        assert record.status == "unknown"
-        assert record.kind == "system"
+        assert record.status == "success"
+        assert record.kind == "execute"
 
     def test_bad_json_does_not_record_evidence(
         self,
@@ -1337,7 +1398,7 @@ class TestBaseHandlerDoNoTool:
         ))
         assert after_success.action is StepAction.CONTINUE
 
-    def test_echo_does_not_reset_completion_rejection_budget(
+    def test_non_eligible_custom_tool_does_not_reset_completion_rejection_budget(
         self,
         mock_handler: BaseHandler,
     ) -> None:
@@ -1349,7 +1410,7 @@ class TestBaseHandlerDoNoTool:
             ))
             assert outcome.action is StepAction.CONTINUE
 
-        _exhaust(mock_handler.dispatch("echo", {"message": "retry"}, MockResponse()))
+        _exhaust(mock_handler.dispatch("add", {"a": 1, "b": 2}, MockResponse()))
         third = _exhaust(mock_handler.dispatch(
             "complete_task", {"answer": "Done", "evidence_refs": [99]}, MockResponse(),
         ))

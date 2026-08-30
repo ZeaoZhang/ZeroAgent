@@ -12,7 +12,7 @@ ToolRegistry: 工具注册、查找、Schema 生成（支持 OpenAI 和 Claude �
 import copy
 import importlib
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Literal, Optional
 
 from zero_agent.core.config import AgentConfig
 
@@ -34,6 +34,10 @@ class ToolDefinition:
         parameters: JSON Schema 格式的参数定义（properties + required）.
         handler: 工具执行函数，是一个 generator，yield 状态信息，return 结果.
         category: 工具分类标签，用于分组管理.
+        evidence_kind: 工具结果的证据类型。声明为 read/write/execute/web/verify 的
+            注册工具，handler 正常返回的普通值记录为 success；结果字典显式返回
+            status=error 或 status=interrupt 时记录为失败。未声明时保守地保持 OPEN，
+            避免产生无法被 complete_task 引用的证据死路.
         promotes_task_state: 成功分发前是否将 OPEN 任务推进到 EXECUTING.
     """
 
@@ -43,6 +47,7 @@ class ToolDefinition:
     handler: ToolHandler
     category: str = "general"
     promotes_task_state: bool = True
+    evidence_kind: Optional[Literal["read", "write", "execute", "web", "user", "memory", "verify", "system"]] = None
 
 
 @dataclass

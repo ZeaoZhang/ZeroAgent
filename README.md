@@ -74,6 +74,10 @@ pip install -e ".[all-extras]"
 
 `search_web`、`vision`、`memory_plot`、`send_im` 是 ZeroAgent 的可选/实验性扩展模块，不会默认注册进 `with_builtins()`。
 
+### 自定义工具与任务证据
+
+通过 `ToolRegistry.register(ToolDefinition(...))` 注册的工具，如果其成功结果需要被 `complete_task.evidence_refs` 引用，必须声明合法的 `evidence_kind`（`read`、`write`、`execute`、`web` 或 `verify`）。声明为上述类型的工具，handler 正常返回的普通字符串/字典会记录为 `success`；结果字典显式返回 `status=error` 或 `status=interrupt` 时记录为失败。未声明证据类型的自定义工具会保守地保持任务为 `OPEN`，不会将任务推进到要求证据引用的 `EXECUTING` 状态；`memory`、`user` 和 `system` 类型也不会触发该推进。
+
 ## 配置
 
 推荐先运行配置向导:

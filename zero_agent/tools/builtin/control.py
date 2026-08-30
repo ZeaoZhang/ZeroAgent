@@ -42,5 +42,6 @@ def register_control_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         },
         handler=lambda _args, _response, _handler: None,
         category="control",
+        evidence_kind="system",
         promotes_task_state=False,
     ))

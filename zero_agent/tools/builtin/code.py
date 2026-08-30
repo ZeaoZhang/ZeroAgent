@@ -206,6 +206,7 @@ def register_code_tools(registry: ToolRegistry, config: AgentConfig) -> None:
     lang = config.resolved_tool_language
 
     registry.register(ToolDefinition(
+        evidence_kind="execute",
         name="code_run",
         description=_t(
             "代码执行器。长代码或大量数据先用 file_write 写入 scripts/，再用 script_path 执行；"

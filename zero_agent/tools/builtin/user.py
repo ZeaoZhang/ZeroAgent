@@ -76,6 +76,7 @@ def register_user_tools(registry: ToolRegistry, config: AgentConfig) -> None:
             },
         },
         handler=_make_ask_user_handler(config),
+        evidence_kind="user",
         category="user",
         promotes_task_state=False,
     ))

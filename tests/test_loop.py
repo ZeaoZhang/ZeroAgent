@@ -484,6 +484,7 @@ class TestAgentLoop:
             description="记录写入调用",
             parameters={"type": "object", "properties": {"path": {"type": "string"}}},
             handler=record_handler,
+            evidence_kind="write",
         ))
         handler = BaseHandler(registry=registry, cwd="/tmp/test-workspace")
         _set_execution_contract(handler)

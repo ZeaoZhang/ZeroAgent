@@ -38,6 +38,10 @@ _TOOL_PROTOCOL_REASONS = {
     "code_run_invalid_script_path",
 }
 
+_COMPLETION_EVIDENCE_KINDS = frozenset(
+    {"read", "write", "execute", "web", "verify"},
+)
+
 
 class BaseHandler:
     """工具分发基类.
@@ -256,29 +260,18 @@ class BaseHandler:
             "tool_name": tool_name, "args": args, "response": response,
         })
 
-        # 1. 优先查找 do_<tool_name> 方法
+        # 1. 优先查找 do_<tool_name>() 方法
         method_name = f"do_{tool_name}"
         if hasattr(self, method_name):
             method = getattr(self, method_name)
             ret = yield from self._try_call_generator(method, args, response)
-            ret = self._apply_tool_protocol_budget(tool_name, ret)
-            if self._successful_completion_correction(tool_name, ret):
-                self._completion_rejection_count = 0
-            self._record_evidence(tool_name, args, ret)
-            self._trigger_hook("tool_after", {
-                "tool_name": tool_name,
-                "args": args,
-                "outcome": ret,
-                "result": ret.data if isinstance(ret, StepOutcome) else ret,
-            })
-            return ret
+            return self._finalize_tool_dispatch(tool_name, args, ret)
 
         # 2. 回退到 ToolRegistry
         tool_def = self.registry.get(tool_name)
         if tool_def is not None:
             data = yield from tool_def.handler(args, response, self)
-            plain_data = not isinstance(data, StepOutcome)
-            if plain_data:
+            if not isinstance(data, StepOutcome):
                 next_prompt = (
                     data.pop("_za_next_prompt", None)
                     if isinstance(data, dict)
@@ -292,20 +285,7 @@ class BaseHandler:
             else:
                 ret = data
 
-            ret = self._apply_tool_protocol_budget(tool_name, ret)
-            if self._successful_completion_correction(tool_name, ret):
-                self._completion_rejection_count = 0
-            self._record_evidence(tool_name, args, ret)
-
-            if plain_data and ret.next_prompt is None:
-                ret.next_prompt = self._default_next_prompt(args)
-            self._trigger_hook("tool_after", {
-                "tool_name": tool_name,
-                "args": args,
-                "outcome": ret,
-                "result": ret.data,
-            })
-            return ret
+            return self._finalize_tool_dispatch(tool_name, args, ret)
 
         # 3. 未知工具
         yield self._tl(
@@ -325,15 +305,41 @@ class BaseHandler:
         })
         return ret
 
+    def _finalize_tool_dispatch(
+        self, tool_name: str, args: Dict[str, Any], ret: Any,
+    ) -> Any:
+        """Apply common post-dispatch bookkeeping and hooks."""
+        ret = self._apply_tool_protocol_budget(tool_name, ret)
+        if self._successful_completion_correction(tool_name, ret):
+            self._completion_rejection_count = 0
+        self._record_evidence(tool_name, args, ret)
+        if isinstance(ret, StepOutcome):
+            self._refresh_next_prompt(tool_name, ret, args)
+        self._trigger_hook("tool_after", {
+            "tool_name": tool_name,
+            "args": args,
+            "outcome": ret,
+            "result": ret.data if isinstance(ret, StepOutcome) else ret,
+        })
+        return ret
+
     def _mark_executing(self, tool_name: str) -> None:
-        """Promote OPEN to EXECUTING after an observable external operation."""
+        """Promote OPEN to EXECUTING after an observable external operation.
+
+        Registry tools must declare their evidence contract before promotion.
+        An undeclared custom tool remains OPEN so a successful plain answer can
+        still complete the task rather than requiring unusable evidence.
+        """
 
         if tool_name in {"complete_task", "ask_user", "bad_json"}:
             return
         tool_def = self.registry.get(tool_name)
         if not hasattr(self, f"do_{tool_name}") and tool_def is None:
             return
-        if tool_def is not None and not tool_def.promotes_task_state:
+        if tool_def is not None and (
+            not tool_def.promotes_task_state
+            or tool_def.evidence_kind not in _COMPLETION_EVIDENCE_KINDS
+        ):
             return
         if self.task_contract.mode is not TaskMode.OPEN:
             return
@@ -342,6 +348,42 @@ class BaseHandler:
             user_request=self.task_contract.user_request,
             mode=TaskMode.EXECUTING,
             plan_path=self.task_contract.plan_path,
+        )
+
+    def _evidence_kind_for_tool(self, tool_name: str) -> str:
+        """Return the declared or built-in evidence kind for a tool."""
+        tool_def = self.registry.get(tool_name)
+        if tool_def is not None:
+            return tool_def.evidence_kind or "system"
+        return self._evidence_kind(tool_name)
+
+    def _refresh_next_prompt(
+        self, tool_name: str, outcome: Any, args: Dict[str, Any],
+    ) -> None:
+        """Refresh automatic anchors after recording evidence."""
+
+        if not isinstance(outcome, StepOutcome):
+            return
+        suffix = outcome.next_prompt_suffix
+        automatic = self._is_automatic_prompt(tool_name, outcome)
+        if outcome.action is StepAction.CONTINUE and automatic:
+            outcome.next_prompt = self._default_next_prompt(args)
+        if suffix is not None:
+            if outcome.action is StepAction.CONTINUE:
+                outcome.next_prompt = (outcome.next_prompt or "") + suffix
+            outcome.next_prompt_suffix = None
+
+    def _is_automatic_prompt(self, tool_name: str, outcome: StepOutcome) -> bool:
+        """Return whether a prompt is a refreshable automatic continuation."""
+        if outcome.next_prompt is None:
+            return True
+        return (
+            outcome.next_prompt == "\n"
+            and self._evidence_status(
+                tool_name,
+                outcome.data,
+                evidence_kind=self._evidence_kind_for_tool(tool_name),
+            ) == "success"
         )
 
     @staticmethod
@@ -660,8 +702,12 @@ class BaseHandler:
         if not isinstance(getattr(self, "evidence_ledger", None), EvidenceLedger):
             self.evidence_ledger = EvidenceLedger()
         data = outcome.data if isinstance(outcome, StepOutcome) else outcome
-        kind = self._evidence_kind(tool_name)
-        status = self._evidence_status(tool_name, data)
+        kind = self._evidence_kind_for_tool(tool_name)
+        status = self._evidence_status(
+            tool_name,
+            data,
+            evidence_kind=kind,
+        )
         clean_args = {
             k: v for k, v in args.items()
             if not str(k).startswith("_")
@@ -677,7 +723,7 @@ class BaseHandler:
 
     @staticmethod
     def _evidence_kind(tool_name: str) -> str:
-        if tool_name == "file_read":
+        if tool_name in {"file_read", "vision"}:
             return "read"
         if tool_name in {"file_write", "file_patch"}:
             return "write"
@@ -694,7 +740,12 @@ class BaseHandler:
         return "system"
 
     @staticmethod
-    def _evidence_status(tool_name: str, data: Any) -> str:
+    def _evidence_status(
+        tool_name: str,
+        data: Any,
+        *,
+        evidence_kind: Optional[str] = None,
+    ) -> str:
         if tool_name == "file_read":
             return (
                 "success"
@@ -721,6 +772,8 @@ class BaseHandler:
             status = str(data.get("status") or "").lower()
             if status in {"success", "error", "interrupt"}:
                 return status
+        if evidence_kind in _COMPLETION_EVIDENCE_KINDS:
+            return "success"
         return "unknown"
 
     @staticmethod
@@ -773,11 +826,17 @@ class BaseHandler:
             return record.get(field, default)
         return getattr(record, field, default)
 
-    @staticmethod
-    def _successful_completion_correction(tool_name: str, outcome: StepOutcome) -> bool:
+    def _successful_completion_correction(self, tool_name: str, outcome: StepOutcome) -> bool:
         if tool_name in {"complete_task", "ask_user", "bad_json", "no_tool"}:
             return False
-        return BaseHandler._evidence_status(tool_name, outcome.data) == "success"
+        return (
+            self._evidence_status(
+                tool_name,
+                outcome.data,
+                evidence_kind=self._evidence_kind_for_tool(tool_name),
+            )
+            == "success"
+        )
 
     def _apply_tool_protocol_budget(
         self,

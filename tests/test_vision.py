@@ -132,9 +132,6 @@ def test_vision_tool_uses_first_visual_backend_when_default_is_text_only() -> No
 
     class Handler:
         parent = type("Parent", (), {"_sessions": {"visual": VisualSession()}})()
-        @staticmethod
-        def _default_next_prompt(_args):
-            return "\n"
 
     result = tool.handler({"image_path": "screen.png", "prompt": "describe"}, None, Handler())
     assert next(result).startswith("[Action] Analyzing image")
@@ -149,11 +146,10 @@ def test_vision_tool_uses_first_visual_backend_when_default_is_text_only() -> No
     }
     assert calls == [("screen.png", "describe")]
     assert outcome.action is StepAction.CONTINUE
-    assert outcome.next_prompt
-    assert AgentLoop._valid_step_outcome(outcome)
+    assert outcome.next_prompt is None
 
 
-def test_vision_tool_rejects_explicit_text_only_backend_with_valid_continuation() -> None:
+def test_vision_tool_rejects_explicit_text_only_backend() -> None:
     config = AgentConfig(
         default_backend="text",
         llm_backends={
@@ -181,10 +177,6 @@ def test_vision_tool_rejects_explicit_text_only_backend_with_valid_continuation(
     class Handler:
         parent = type("Parent", (), {"_sessions": {}})()
 
-        @staticmethod
-        def _default_next_prompt(_args):
-            return "\n"
-
     result = tool.handler(
         {"image_path": "screen.png", "backend": "text"},
         None,
@@ -197,8 +189,7 @@ def test_vision_tool_rejects_explicit_text_only_backend_with_valid_continuation(
     assert outcome.data["status"] == "error"
     assert "does not support vision" in outcome.data["msg"]
     assert outcome.action is StepAction.CONTINUE
-    assert outcome.next_prompt
-    assert AgentLoop._valid_step_outcome(outcome)
+    assert outcome.next_prompt is None
 
 def test_anthropic_vision_uses_base64_image_source(monkeypatch) -> None:
     session = LiteLLMSession(

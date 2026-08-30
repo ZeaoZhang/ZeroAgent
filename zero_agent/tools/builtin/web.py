@@ -287,6 +287,7 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
             },
         },
         handler=_make_web_scan_handler(config),
+        evidence_kind="web",
         category="browser",
     ))
 
@@ -337,6 +338,7 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
                 },
             },
         },
+        evidence_kind="web",
         handler=_make_web_execute_js_handler(config),
         category="browser",
     ))
@@ -434,7 +436,6 @@ def _make_web_execute_js_handler(config: AgentConfig):
 
         return StepOutcome(
             result,
-            next_prompt=handler._default_next_prompt(args),
             action=StepAction.CONTINUE,
         )
     return _handler

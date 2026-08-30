@@ -116,13 +116,18 @@ class StepAction(str, Enum):
 
 @dataclass
 class StepOutcome:
-    """Tool result and explicit control action returned by ``dispatch``."""
+    """Tool result and explicit control action returned by ``dispatch``.
+
+    ``next_prompt_suffix`` augments an automatic post-evidence anchor without
+    capturing that anchor before the evidence record exists.
+    """
 
     data: Any
     next_prompt: Optional[str] = None
     action: StepAction = StepAction.CONTINUE
     reason: str = ""
     terminal_status: Optional[TerminalStatus] = None
+    next_prompt_suffix: Optional[str] = None
 
 
 @dataclass

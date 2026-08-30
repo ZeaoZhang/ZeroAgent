@@ -260,6 +260,7 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
             },
         },
         handler=_make_file_read_handler(config),
+        evidence_kind="read",
         category="file",
     ))
 
@@ -299,6 +300,7 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
             },
         },
         handler=_make_file_patch_handler(config),
+        evidence_kind="write",
         category="file",
     ))
 
@@ -345,6 +347,7 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
             "required": ["path", "content"],
         },
         handler=_make_file_write_handler(config),
+        evidence_kind="write",
         category="file",
     ))
 
@@ -401,7 +404,7 @@ def _make_file_read_handler(config: AgentConfig):
             result = "由于设置了show_linenos，以下返回信息为：(行号|)内容 。\n" + result
         if " ... [TRUNCATED]" in result:
             result += "\n\n（某些行被截断，如需完整内容可改用 code_run 读取）"
-        next_prompt = None
+        next_prompt_suffix = None
         # SOP 读取提示
         is_memory_path = _is_under_dir(path, config.memory_dir)
         if is_memory_path and not result.startswith("Error:"):
@@ -411,7 +414,7 @@ def _make_file_read_handler(config: AgentConfig):
             ("memory" in path or "sop" in path)
             and not result.startswith("Error:")
         ):
-            next_prompt = handler._default_next_prompt(args) + (
+            next_prompt_suffix = (
                 "\n[SYSTEM TIPS] 正在读取记忆或SOP文件，若决定按sop执行请提取"
                 "sop中的关键点（特别是靠后的）update working memory."
             )
@@ -419,10 +422,10 @@ def _make_file_read_handler(config: AgentConfig):
         result = smart_format(
             result, max_str_len=maxlen, omit_str="\n\n[omitted long content]\n\n"
         )
-        if next_prompt is not None:
+        if next_prompt_suffix is not None:
             return StepOutcome(
                 result,
-                next_prompt=next_prompt,
+                next_prompt_suffix=next_prompt_suffix,
                 action=StepAction.CONTINUE,
             )
         return result

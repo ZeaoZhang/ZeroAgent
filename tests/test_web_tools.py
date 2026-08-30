@@ -142,7 +142,9 @@ def test_web_scan_handler_returns_html_string(
 
     assert outcome.data["status"] == "success"
     assert outcome.data["content"] == "<main>Hello</main>"
-    assert outcome.next_prompt == "\n"
+    assert outcome.next_prompt is not None
+    assert "ref=1" in outcome.next_prompt
+    assert "tool=web_scan" in outcome.next_prompt
 
 
 def _exhaust(gen):
