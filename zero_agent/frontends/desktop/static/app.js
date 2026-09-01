@@ -12,6 +12,8 @@ const state = {
   defaultConfig: { theme: 'auto', llmNo: 0, workspaceDir: '' },
   modelProfiles: [],
   channelStatuses: [],
+  channelConfig: { channelId: null, snapshot: null },
+  wechatLogin: { sessionId: null, timer: null },
   channelActionIds: new Set(),
   slashCommands: [],
   restartingBridge: false,
@@ -44,6 +46,8 @@ let messagesEl, inputEl, sendBtn, sessionListEl, sessionTitleEl, statusBadge, st
 let errorBanner, commandPaletteEl, leftDrawer, rightDrawer, agentList;
 let modelStatus, currentModelEl, tokenUsageEl, modelPickerModal, modelList;
 let channelSettingsModal, channelListEl, channelSettingsBtn;
+let channelConfigModal, channelConfigTitle, channelConfigForm, channelConfigError;
+let wechatQrPanel, wechatQrImage, wechatQrStatus;
 let diagnosticsLogEl, diagnosticsPanel;
 
 
@@ -3283,6 +3287,11 @@ function renderChannelList() {
     const busy = state.channelActionIds.has(channel.id);
     const runDisabled = busy || (!channel.configured && !channel.running);
     const required = channel.configured ? '配置已就绪' : '未配置必要凭据';
+    const wechatAction = channel.id === 'wechat'
+      ? `<button type="button" class="btn ghost channel-config-action"
+          data-channel-config-id="${escapeHtml(channel.id)}"
+          data-channel-login="wechat">扫码登录</button>`
+      : '';
     return `
       <article class="channel-card">
         <div class="channel-card-header">
@@ -3311,6 +3320,11 @@ function renderChannelList() {
             <span class="channel-switch" aria-hidden="true"></span>
           </label>
         </div>
+        <div class="channel-config-actions">
+          <button type="button" class="btn ghost channel-config-action"
+            data-channel-config-id="${escapeHtml(channel.id)}">配置</button>
+          ${wechatAction}
+        </div>
       </article>
     `;
   }).join('');
@@ -3319,6 +3333,9 @@ function renderChannelList() {
 function channelErrorMessage(err, operation) {
   const raw = rawErrorText(err);
   const status = Number(err?.status || err?.data?.status || 0);
+  if (operation === '微信扫码登录' && status >= 400 && status < 600 && raw) {
+    return `${operation}失败：${raw}`;
+  }
   if (status >= 400 && status < 500 && status !== 401 && status !== 403 && raw) {
     return `${operation || '渠道操作'}失败：${raw}`;
   }
@@ -3372,6 +3389,238 @@ async function handleChannelToggle(channelId, action, value) {
   } finally {
     state.channelActionIds.delete(channelId);
     renderChannelList();
+  }
+}
+
+
+function _clearChannelConfigError() {
+  if (channelConfigError) channelConfigError.textContent = '';
+}
+
+function _setChannelConfigError(message) {
+  if (channelConfigError) channelConfigError.textContent = message || '';
+}
+
+function _clearElementChildren(element) {
+  if (!element) return;
+  while (element.children && element.children.length) {
+    element.removeChild(element.children[0]);
+  }
+}
+
+function renderChannelConfig(snapshot) {
+  if (!snapshot) return;
+  state.channelConfig.snapshot = snapshot;
+  if (channelConfigTitle) {
+    channelConfigTitle.textContent = `配置：${snapshot.channelId || ''}`;
+  }
+  _clearChannelConfigError();
+  _clearElementChildren(channelConfigForm);
+
+  const fields = Array.isArray(snapshot.fields) ? snapshot.fields : [];
+  if (!fields.length && channelConfigForm) {
+    const message = document.createElement('p');
+    message.className = 'dialog-message';
+    message.textContent = snapshot.channelId === 'wechat'
+      ? '微信通过扫码登录，不在文件中编辑凭据。'
+      : '此渠道没有可编辑配置。';
+    channelConfigForm.appendChild(message);
+  }
+  fields.forEach((field) => {
+    const row = document.createElement('div');
+    row.className = 'form-row';
+    const label = document.createElement('label');
+    label.textContent = field.label || field.key || '';
+    const input = document.createElement('input');
+    input.dataset.channelField = field.key || '';
+    input.name = field.key || '';
+    input.type = field.kind === 'secret' ? 'password' : 'text';
+    input.value = '';
+    if (field.kind === 'secret' && field.configured) {
+      input.placeholder = '已配置；留空保持不变';
+    } else if (field.kind === 'list') {
+      input.placeholder = '用逗号分隔多个用户';
+    }
+    input.disabled = field.editable === false;
+    label.appendChild(input);
+    row.appendChild(label);
+
+    const source = document.createElement('span');
+    source.className = 'channel-config-source';
+    source.textContent = field.source === 'environment'
+      ? '环境变量管理'
+      : field.source === 'file'
+        ? (field.configured ? '已由配置文件设置' : '配置文件为空')
+        : '未配置';
+    row.appendChild(source);
+
+    if (field.configured && field.editable !== false) {
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.className = 'btn ghost';
+      clear.textContent = '清除';
+      clear.dataset.channelClear = field.key || '';
+      clear.addEventListener('click', () => {
+        input.value = '';
+        input.dataset.channelClear = 'true';
+      });
+      row.appendChild(clear);
+    }
+    channelConfigForm?.appendChild(row);
+  });
+
+  if (wechatQrPanel) {
+    wechatQrPanel.classList.toggle('hidden', snapshot.channelId !== 'wechat');
+  }
+}
+
+async function openChannelConfig(channelId) {
+  if (!channelConfigModal || !channelId) return null;
+  state.channelConfig = { channelId, snapshot: null };
+  channelConfigModal.classList.remove('hidden');
+  _clearChannelConfigError();
+  if (wechatQrPanel) wechatQrPanel.classList.toggle('hidden', channelId !== 'wechat');
+  try {
+    const result = await window.zeroAgent.rpc('channels/config', { channelId });
+    const snapshot = result?.config || result;
+    renderChannelConfig(snapshot);
+    return snapshot;
+  } catch (err) {
+    _setChannelConfigError(channelErrorMessage(err, '加载渠道配置'));
+    return null;
+  }
+}
+
+function _channelConfigValues() {
+  const values = {};
+  const snapshot = state.channelConfig.snapshot;
+  const fields = Array.isArray(snapshot?.fields) ? snapshot.fields : [];
+  const fieldByKey = new Map(fields.map((field) => [field.key, field]));
+  const inputs = channelConfigForm?.querySelectorAll('[data-channel-field]') || [];
+  inputs.forEach((input) => {
+    const key = input.dataset.channelField;
+    if (!key || input.disabled) return;
+    if (input.dataset.channelClear === 'true') {
+      values[key] = null;
+      return;
+    }
+    const raw = String(input.value || '').trim();
+    if (!raw) return;
+    const field = fieldByKey.get(key);
+    if (field?.kind === 'list') {
+      const list = raw.split(/[,\n]/).map((item) => item.trim()).filter(Boolean);
+      if (list.length) values[key] = list;
+    } else {
+      values[key] = raw;
+    }
+  });
+  return values;
+}
+
+async function saveChannelConfig() {
+  const channelId = state.channelConfig.channelId;
+  if (!channelId) return null;
+  const saveButton = $('channel-config-save');
+  if (saveButton) saveButton.disabled = true;
+  _clearChannelConfigError();
+  try {
+    const result = await window.zeroAgent.rpc('channels/config/save', {
+      channelId,
+      values: _channelConfigValues(),
+    });
+    if (Array.isArray(result?.channels)) {
+      state.channelStatuses = result.channels;
+      renderChannelList();
+    }
+    if (result?.requiresRestart && typeof showSystem === 'function') {
+      showSystem('配置已保存；当前渠道正在运行，请停止后重新启动。');
+    }
+    closeChannelConfig();
+    return result;
+  } catch (err) {
+    await loadChannelStatuses({ silent: true });
+    _setChannelConfigError(channelErrorMessage(err, '保存渠道配置'));
+    return null;
+  } finally {
+    if (saveButton) saveButton.disabled = false;
+  }
+}
+
+function closeChannelConfig() {
+  if (state.wechatLogin.timer !== null) {
+    clearTimeout(state.wechatLogin.timer);
+    state.wechatLogin.timer = null;
+  }
+  state.wechatLogin.sessionId = null;
+  if (wechatQrPanel) wechatQrPanel.classList.add('hidden');
+  if (wechatQrImage) wechatQrImage.src = '';
+  if (wechatQrStatus) wechatQrStatus.textContent = '点击扫码登录生成二维码。';
+  if (channelConfigModal) channelConfigModal.classList.add('hidden');
+}
+
+function _scheduleWechatLoginPoll(sessionId) {
+  clearTimeout(state.wechatLogin.timer);
+  state.wechatLogin.timer = setTimeout(() => {
+    state.wechatLogin.timer = null;
+    pollWechatLogin(sessionId);
+  }, 2000);
+}
+
+async function startWechatLogin() {
+  if (!state.channelConfig.channelId || state.channelConfig.channelId !== 'wechat') return null;
+  _clearChannelConfigError();
+  try {
+    const result = await window.zeroAgent.rpc('channels/wechat/login/start', {});
+    const login = result?.login || result;
+    if (!login?.sessionId) throw new Error('微信扫码会话无效');
+    state.wechatLogin.sessionId = login.sessionId;
+    if (wechatQrPanel) wechatQrPanel.classList.remove('hidden');
+    if (wechatQrImage && login.qrDataUrl) wechatQrImage.src = login.qrDataUrl;
+    if (wechatQrStatus) wechatQrStatus.textContent = login.status || 'pending';
+    if (login.status === 'failed') {
+      _setChannelConfigError(login.error || '微信扫码初始化失败');
+      return login;
+    }
+    _scheduleWechatLoginPoll(login.sessionId);
+    return login;
+  } catch (err) {
+    _setChannelConfigError(channelErrorMessage(err, '微信扫码登录'));
+    return null;
+  }
+}
+
+async function pollWechatLogin(sessionId) {
+  if (
+    !channelConfigModal
+    || channelConfigModal.classList.contains('hidden')
+    || state.wechatLogin.sessionId !== sessionId
+  ) return null;
+  try {
+    const result = await window.zeroAgent.rpc(
+      'channels/wechat/login/status',
+      { sessionId },
+    );
+    const login = result?.login || result;
+    if (login.qrDataUrl && wechatQrImage) wechatQrImage.src = login.qrDataUrl;
+    if (wechatQrStatus) wechatQrStatus.textContent = login.status || '';
+    if (['confirmed', 'expired', 'failed', 'cancelled'].includes(login.status)) {
+      state.wechatLogin.timer = null;
+      if (login.status === 'confirmed') {
+        await loadChannelStatuses({ silent: true });
+        if (typeof showSystem === 'function') {
+          showSystem('扫码成功，请点击“运行”启动微信渠道');
+        }
+      } else if (login.status === 'failed') {
+        _setChannelConfigError(login.error || '微信扫码登录失败');
+      }
+      return login;
+    }
+    _scheduleWechatLoginPoll(sessionId);
+    return login;
+  } catch (err) {
+    state.wechatLogin.timer = null;
+    _setChannelConfigError(channelErrorMessage(err, '微信扫码登录'));
+    return null;
   }
 }
 
@@ -3989,6 +4238,13 @@ const imagePreviews = document.getElementById('image-previews');
   channelSettingsModal = $('channel-settings-modal');
   channelListEl = $('channel-list');
   channelSettingsBtn = $('channel-settings-btn');
+  channelConfigModal = $('channel-config-modal');
+  channelConfigTitle = $('channel-config-title');
+  channelConfigForm = $('channel-config-form');
+  wechatQrPanel = $('wechat-qr-panel');
+  wechatQrImage = $('wechat-qr-image');
+  wechatQrStatus = $('wechat-qr-status');
+  channelConfigError = $('channel-config-error');
 
   // Add platform class to body for platform-specific CSS
   const platform = (window.zeroAgent && window.zeroAgent.platform) || process.platform || 'unknown';
@@ -4116,6 +4372,25 @@ const imagePreviews = document.getElementById('image-previews');
     if (!input?.dataset?.channelId || !input.dataset.channelAction) return;
     handleChannelToggle(input.dataset.channelId, input.dataset.channelAction, input.checked);
   });
+  channelListEl?.addEventListener('click', (event) => {
+    const action = event.target?.closest?.('[data-channel-config-id]');
+    if (!action) return;
+    event.preventDefault();
+    const channelId = action.dataset.channelConfigId;
+    if (action.dataset.channelLogin === 'wechat') {
+      openChannelConfig(channelId).then(() => startWechatLogin());
+    } else {
+      openChannelConfig(channelId);
+    }
+  });
+  $('close-channel-config')?.addEventListener('click', closeChannelConfig);
+  $('channel-config-cancel')?.addEventListener('click', closeChannelConfig);
+  $('channel-config-save')?.addEventListener('click', saveChannelConfig);
+  $('wechat-qr-start')?.addEventListener('click', startWechatLogin);
+  channelConfigModal?.querySelector('[data-close-channel-config]')?.addEventListener(
+    'click',
+    closeChannelConfig,
+  );
   $('error-dismiss')?.addEventListener('click', hideError);
 
   // ─── Drawer Toggles ─────────────────────────────────────────────────────
@@ -4243,6 +4518,11 @@ const imagePreviews = document.getElementById('image-previews');
     if (e.key === 'Escape' && channelSettingsModal && !channelSettingsModal.classList.contains('hidden')) {
       e.preventDefault();
       closeChannelSettings();
+      return;
+    }
+    if (e.key === 'Escape' && channelConfigModal && !channelConfigModal.classList.contains('hidden')) {
+      e.preventDefault();
+      closeChannelConfig();
       return;
     }
     // Cmd/Ctrl+B - Toggle left drawer

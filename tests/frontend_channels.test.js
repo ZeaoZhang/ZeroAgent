@@ -61,6 +61,35 @@ async function adapterTests() {
   assert.equal(calls[2].url, 'http://127.0.0.1:14168/channels/telegram/link');
   assert.equal(calls[2].init.method, 'POST');
   assert.deepEqual(JSON.parse(calls[2].init.body), { linked: false });
+
+  await windowObj.zeroAgent.rpc('channels/config', { channelId: 'telegram' });
+  assert.equal(calls[3].url, 'http://127.0.0.1:14168/channels/telegram/config');
+  assert.equal(calls[3].init.method, undefined);
+
+  await windowObj.zeroAgent.rpc('channels/config/save', {
+    channelId: 'telegram',
+    values: { tg_bot_token: 'new-token', tg_allowed_users: ['1001'] },
+  });
+  assert.equal(calls[4].url, 'http://127.0.0.1:14168/channels/telegram/config');
+  assert.equal(calls[4].init.method, 'POST');
+  assert.deepEqual(JSON.parse(calls[4].init.body), {
+    values: { tg_bot_token: 'new-token', tg_allowed_users: ['1001'] },
+  });
+
+  await windowObj.zeroAgent.rpc('channels/wechat/login/start', {});
+  assert.equal(calls[5].url, 'http://127.0.0.1:14168/channels/wechat/login');
+  assert.equal(calls[5].init.method, 'POST');
+  await windowObj.zeroAgent.rpc('channels/wechat/login/status', { sessionId: 'session-1' });
+  assert.equal(calls[6].url, 'http://127.0.0.1:14168/channels/wechat/login/session-1');
+  assert.equal(calls[6].init.method, undefined);
+  await windowObj.zeroAgent.rpc('channels/wechat/login/cancel', { sessionId: 'session-1' });
+  assert.equal(calls[7].url, 'http://127.0.0.1:14168/channels/wechat/login/session-1/cancel');
+  assert.equal(calls[7].init.method, 'POST');
+  await assert.rejects(
+    windowObj.zeroAgent.rpc('channels/wechat/login/status', {}),
+    /missing sessionId/,
+  );
+
 }
 
 class FakeClassList {
@@ -89,6 +118,11 @@ class FakeElement {
     this.textContent = '';
     this.innerHTML = '';
     this.disabled = false;
+    this.value = '';
+    this.type = '';
+    this.name = '';
+    this.placeholder = '';
+    this.src = '';
   }
   appendChild(node) { this.children.push(node); node.parentNode = this; return node; }
   removeChild(node) {
@@ -97,10 +131,39 @@ class FakeElement {
     node.parentNode = null;
     return node;
   }
+  remove() { this.parentNode?.removeChild(this); }
   addEventListener(type, listener) { this.listeners.set(type, listener); }
-  setAttribute(name, value) { this.attributes[name] = String(value); }
-  querySelector() { return null; }
-  querySelectorAll() { return []; }
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+    if (name === 'class') this.className = String(value);
+    if (name.startsWith('data-')) {
+      const key = name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+      this.dataset[key] = String(value);
+    }
+  }
+  _matches(selector) {
+    if (selector === '*') return true;
+    if (selector === 'input') return this.tagName === 'INPUT';
+    if (selector === 'textarea') return this.tagName === 'TEXTAREA';
+    if (selector === 'img') return this.tagName === 'IMG';
+    if (selector === '.modal-backdrop') return this.classList.contains('modal-backdrop');
+    if (selector === '[data-channel-field]') return this.dataset.channelField !== undefined;
+    if (selector === '[data-channel-config-field]') {
+      return this.dataset.channelConfigField !== undefined;
+    }
+    return false;
+  }
+  querySelectorAll(selector) {
+    const selectors = selector.split(',').map((item) => item.trim());
+    const matches = [];
+    const visit = (node) => {
+      if (selectors.some((item) => node._matches(item))) matches.push(node);
+      node.children.forEach(visit);
+    };
+    this.children.forEach(visit);
+    return matches;
+  }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
   focus() {}
 }
 
@@ -114,7 +177,18 @@ function makeAppContext() {
     getElementById: (id) => elements.get(id) || null,
     querySelectorAll: () => [],
   };
-  for (const id of ['channel-list', 'channel-settings-modal', 'channel-settings-btn']) {
+  for (const id of [
+    'channel-list',
+    'channel-settings-modal',
+    'channel-settings-btn',
+    'channel-config-modal',
+    'channel-config-title',
+    'channel-config-form',
+    'wechat-qr-panel',
+    'wechat-qr-image',
+    'wechat-qr-status',
+    'channel-config-error',
+  ]) {
     elements.set(id, new FakeElement('div'));
   }
   const context = {
@@ -153,7 +227,25 @@ async function rendererTests() {
   vm.runInNewContext(source.slice(0, bridgeMarker) + `
 channelListEl = document.getElementById('channel-list');
 channelSettingsModal = document.getElementById('channel-settings-modal');
-globalThis.__testExports = { state, renderChannelList, handleChannelToggle, channelErrorMessage };
+channelConfigModal = document.getElementById('channel-config-modal');
+channelConfigTitle = document.getElementById('channel-config-title');
+channelConfigForm = document.getElementById('channel-config-form');
+wechatQrPanel = document.getElementById('wechat-qr-panel');
+wechatQrImage = document.getElementById('wechat-qr-image');
+wechatQrStatus = document.getElementById('wechat-qr-status');
+channelConfigError = document.getElementById('channel-config-error');
+globalThis.__testExports = {
+  state,
+  renderChannelList,
+  handleChannelToggle,
+  channelErrorMessage,
+  openChannelConfig,
+  renderChannelConfig,
+  saveChannelConfig,
+  closeChannelConfig,
+  startWechatLogin,
+  pollWechatLogin,
+};
 `, context, { filename: appPath });
 
   const t = context.__testExports;
@@ -197,6 +289,45 @@ globalThis.__testExports = { state, renderChannelList, handleChannelToggle, chan
   context.window.zeroAgent = {
     rpc: async (method, params) => {
       calls.push({ method, params });
+      if (method === 'channels/config') {
+        return {
+          ok: true,
+          config: {
+            channelId: 'telegram',
+            source: 'config.yaml',
+            configured: true,
+            fields: [
+              {
+                key: 'tg_bot_token',
+                label: 'Bot Token',
+                kind: 'secret',
+                required: true,
+                configured: true,
+                source: 'file',
+                editable: true,
+              },
+              {
+                key: 'tg_allowed_users',
+                label: 'Allowed Users',
+                kind: 'list',
+                required: true,
+                configured: true,
+                source: 'file',
+                editable: true,
+              },
+            ],
+          },
+        };
+      }
+      if (method === 'channels/config/save') {
+        return {
+          ok: true,
+          config: { channelId: 'telegram', fields: [] },
+          channels: rows,
+          requiresRestart: false,
+        };
+      }
+      if (method === 'channels/list') return { ok: true, channels: rows };
       return {
         ok: true,
         channels: rows.map((row) => row.id === 'telegram' ? { ...row, linked: false } : row),
@@ -209,6 +340,92 @@ globalThis.__testExports = { state, renderChannelList, handleChannelToggle, chan
   assert.equal(calls[0].params.channelId, 'telegram');
   assert.equal(calls[0].params.linked, false);
   assert.equal(t.state.channelStatuses[0].linked, false);
+
+  calls.length = 0;
+  await t.openChannelConfig('telegram');
+  assert.equal(calls[0].method, 'channels/config');
+  assert.equal(calls[0].params.channelId, 'telegram');
+  const configForm = elements.get('channel-config-form');
+  const configModal = elements.get('channel-config-modal');
+  const fields = configForm.querySelectorAll('input, textarea');
+  const tokenInput = fields.find((input) => input.dataset.channelField === 'tg_bot_token');
+  const usersInput = fields.find((input) => input.dataset.channelField === 'tg_allowed_users');
+  assert.ok(tokenInput);
+  assert.ok(usersInput);
+  assert.equal(tokenInput.value, '');
+  assert.equal(tokenInput.placeholder, '已配置；留空保持不变');
+  assert.doesNotMatch(JSON.stringify(fields.map((input) => input.value)), /configured-secret/);
+
+  tokenInput.value = 'new-token';
+  usersInput.value = '1001';
+  await t.saveChannelConfig();
+  const saveCall = calls.find((call) => call.method === 'channels/config/save');
+  assert.deepEqual(JSON.parse(JSON.stringify(saveCall.params)), {
+    channelId: 'telegram',
+    values: { tg_bot_token: 'new-token', tg_allowed_users: ['1001'] },
+  });
+  assert.equal(configModal.classList.contains('hidden'), true);
+
+  let statusPolls = 0;
+  let pollPromise;
+  context.setTimeout = (callback) => {
+    pollPromise = callback();
+    return 1;
+  };
+  context.window.zeroAgent.rpc = async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'channels/wechat/login/start') {
+      return {
+        ok: true,
+        sessionId: 'wx-1',
+        status: 'pending',
+        qrDataUrl: 'data:image/png;base64,qr',
+      };
+    }
+    if (method === 'channels/wechat/login/status') {
+      statusPolls += 1;
+      return { ok: true, sessionId: 'wx-1', status: 'confirmed' };
+    }
+    if (method === 'channels/list') return { ok: true, channels: rows };
+    throw new Error(`unexpected ${method}`);
+  };
+  t.state.channelConfig = {
+    channelId: 'wechat',
+    snapshot: { channelId: 'wechat', fields: [] },
+  };
+  configModal.classList.remove('hidden');
+  await t.startWechatLogin();
+  await pollPromise;
+  assert.match(elements.get('wechat-qr-image').src, /^data:image\/png;base64,/);
+  assert.equal(statusPolls, 1);
+  assert.equal(t.state.wechatLogin.timer, null);
+  assert.equal(elements.get('wechat-qr-status').textContent, 'confirmed');
+
+  t.closeChannelConfig();
+  assert.equal(elements.get('wechat-qr-panel').classList.contains('hidden'), true);
+  assert.equal(elements.get('wechat-qr-image').src, '');
+  assert.equal(elements.get('wechat-qr-status').textContent, '点击扫码登录生成二维码。');
+
+  t.state.channelConfig = {
+    channelId: 'telegram',
+    snapshot: { channelId: 'telegram', fields: [] },
+  };
+  configModal.classList.remove('hidden');
+  tokenInput.value = 'unsaved-token';
+  context.window.zeroAgent.rpc = async (method) => {
+    calls.push({ method });
+    if (method === 'channels/config/save') {
+      const error = new Error('invalid field');
+      error.status = 400;
+      throw error;
+    }
+    if (method === 'channels/list') return { ok: true, channels: rows };
+    return { ok: true, channels: rows };
+  };
+  await t.saveChannelConfig();
+  assert.equal(configModal.classList.contains('hidden'), false);
+  assert.equal(tokenInput.value, 'unsaved-token');
+  assert.ok(elements.get('channel-config-error').textContent);
 }
 
 Promise.all([adapterTests(), rendererTests()])

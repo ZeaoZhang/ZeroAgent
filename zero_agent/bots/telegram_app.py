@@ -1214,13 +1214,12 @@ async def handle_command(update, ctx):
 
 if __name__ == "__main__":
     _LOCK_SOCK = ensure_single_instance(19527, "Telegram")
-    if not ALLOWED:
-        print(
-            "[Telegram] ERROR: tg_allowed_users is empty or missing in bot config. "
-            "Set it to avoid unauthorized access."
-        )
-        sys.exit(1)
-    require_runtime(runner, "Telegram", tg_bot_token=_KEYS.get("tg_bot_token"))
+    require_runtime(
+        runner,
+        "Telegram",
+        tg_bot_token=_KEYS.get("tg_bot_token"),
+        tg_allowed_users=ALLOWED,
+    )
     redirect_log(__file__, "tgapp.log", "Telegram", ALLOWED)
     # AgentRunner 在首次 put_task() 时自动启动后台 worker
 

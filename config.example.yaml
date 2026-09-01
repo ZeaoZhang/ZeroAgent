@@ -26,6 +26,20 @@ log_dir: null
 # Optional local LiteLLM model price/context-window cache.
 # litellm_model_cost_map: ./model_prices_and_context_window.json
 
+bots:
+  tg_bot_token: "${TG_BOT_TOKEN}"
+  # Set TG_ALLOWED_USERS=1001,1002; the environment value overrides this list.
+  tg_allowed_users: []
+  discord_bot_token: "${DISCORD_BOT_TOKEN}"
+  qq_app_id: "${QQ_APP_ID}"
+  qq_app_secret: "${QQ_APP_SECRET}"
+  fs_app_id: "${FS_APP_ID}"
+  fs_app_secret: "${FS_APP_SECRET}"
+  wecom_bot_id: "${WECOM_BOT_ID}"
+  wecom_secret: "${WECOM_SECRET}"
+  dingtalk_client_id: "${DINGTALK_CLIENT_ID}"
+  dingtalk_client_secret: "${DINGTALK_CLIENT_SECRET}"
+
 llm_backends:
   # Claude / Anthropic Messages API through LiteLLM.
   claude:

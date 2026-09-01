@@ -24,6 +24,7 @@ def test_channel_definitions_are_stable():
     ]
     assert channel_control.channel_definition("telegram").required_keys == (
         "tg_bot_token",
+        "tg_allowed_users",
     )
 
 
@@ -68,10 +69,16 @@ def test_unknown_channel_is_rejected(monkeypatch, tmp_path):
 
 def test_required_configuration_is_checked_without_exposing_values():
     telegram = channel_control.channel_definition("telegram")
-    assert channel_control.channel_is_configured(telegram, {"tg_bot_token": "token"}) is True
+    assert channel_control.channel_is_configured(
+        telegram,
+        {"tg_bot_token": "token", "tg_allowed_users": ["1001"]},
+    ) is True
+    assert channel_control.channel_is_configured(
+        telegram,
+        {"tg_bot_token": "token", "tg_allowed_users": []},
+    ) is False
     assert channel_control.channel_is_configured(telegram, {"tg_bot_token": ""}) is False
     assert channel_control.channel_is_configured(telegram, {}) is False
-
 
 class _LiveProcess:
     def __init__(self, pid=4321):

@@ -65,9 +65,8 @@ TEMP_DIR = os.path.join(_PROJECT_ROOT, "temp")
 MEDIA_DIR = os.path.join(TEMP_DIR, "media")
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"}
 
-za = ZeroAgent()
-runner = AgentRunner(za)
-runner.verbose = False
+za = None
+runner = None
 
 
 # —— Helpers ——
@@ -389,6 +388,9 @@ class WeComApp(AgentBotMixin):
 
 # —— Main ——
 if __name__ == "__main__":
+    za = ZeroAgent()
+    runner = AgentRunner(za)
+    runner.verbose = False
     _LOCK = ensure_single_instance(PORT, "WeCom")
     require_runtime(runner, "WeCom", wecom_bot_id=BOT_ID, wecom_secret=SECRET)
     redirect_log(__file__, "wecomapp.log", "WeCom", ALLOWED)

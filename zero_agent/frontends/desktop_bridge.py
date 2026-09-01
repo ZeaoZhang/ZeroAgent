@@ -13,6 +13,11 @@ HTTP API:
   POST   /channels/{channel_id}/start
   POST   /channels/{channel_id}/stop
   POST   /channels/{channel_id}/link
+  GET    /channels/{channel_id}/config
+  POST   /channels/{channel_id}/config
+  POST   /channels/wechat/login
+  GET    /channels/wechat/login/{session_id}
+  POST   /channels/wechat/login/{session_id}/cancel
   GET    /config
   POST   /config
   GET    /model-profiles
@@ -48,6 +53,11 @@ from zero_agent.core.config import AgentConfig, default_config_path, load_defaul
 from zero_agent.core.types import TaskMode
 from zero_agent.frontends.plan_command import create_plan_workspace
 from zero_agent.bots import channel_control
+from zero_agent.bots.channel_config import (
+    ChannelConfigError,
+    channel_config_snapshot,
+    update_channel_config,
+)
 from zero_agent.frontends.session_store import SessionStore
 
 APP_DIR = Path(__file__).resolve().parent
@@ -2009,6 +2019,129 @@ async def channel_link_handler(request):
         )
 
 
+def _channel_config_error_response(exc: ChannelConfigError):
+    message = str(exc).lower()
+    if "environment-managed" in message:
+        return json_ok(
+            {"ok": False, "error": "channel configuration is environment-managed"},
+            status=409,
+        )
+    if "parse" in message:
+        error = "channel configuration source parse error"
+    elif "path" in message:
+        error = "channel configuration source path error"
+    elif "bots section" in message:
+        error = "channel configuration source structure error"
+    else:
+        error = "invalid channel configuration"
+    return json_ok({"ok": False, "error": error}, status=400)
+
+
+async def channel_config_get_handler(request):
+    definition = _channel_definition_from_request(request)
+    try:
+        snapshot = channel_config_snapshot(definition.id)
+    except ChannelConfigError as exc:
+        return _channel_config_error_response(exc)
+    return json_ok({"ok": True, "config": snapshot})
+
+
+async def channel_config_save_handler(request):
+    definition = _channel_definition_from_request(request)
+    try:
+        data = await read_json(request)
+        values = data.get("values")
+        if not isinstance(values, dict):
+            return json_ok(
+                {"ok": False, "error": "values must be an object"},
+                status=400,
+            )
+        snapshot = update_channel_config(definition.id, values)
+        from zero_agent.frontends import desktop_commands
+
+        channels = desktop_commands.channel_statuses()
+        row = next((item for item in channels if item["id"] == definition.id), None)
+        return json_ok({
+            "ok": True,
+            "config": snapshot,
+            "channels": channels,
+            "requiresRestart": bool(row and row.get("running")),
+        })
+    except ChannelConfigError as exc:
+        return _channel_config_error_response(exc)
+    except Exception as exc:
+        return json_ok(
+            {
+                "ok": False,
+                "error": f"Failed to save channel configuration: {type(exc).__name__}",
+            },
+            status=500,
+        )
+
+
+async def wechat_login_start_handler(request):
+    from zero_agent.frontends import desktop_commands
+
+    if "bots/wechat_app.py" in desktop_commands.running_services(use_cache=False):
+        return json_ok(
+            {"ok": False, "error": "WeChat channel is running"},
+            status=409,
+        )
+    manager = request.app["wechat_qr_manager"]
+    try:
+        result = manager.start()
+        if not isinstance(result, dict):
+            raise TypeError("invalid QR manager response")
+    except Exception as exc:
+        return json_ok(
+            {
+                "ok": False,
+                "status": "failed",
+                "error": f"WeChat QR initialization failed: {type(exc).__name__}",
+            },
+            status=503,
+        )
+    if result.get("status") == "failed":
+        return json_ok({"ok": False, **result}, status=503)
+    return json_ok({"ok": True, **result})
+
+
+async def wechat_login_status_handler(request):
+    session_id = request.match_info.get("session_id", "")
+    manager = request.app["wechat_qr_manager"]
+    try:
+        result = manager.status(session_id)
+    except KeyError:
+        return json_ok({"ok": False, "error": "login session not found"}, status=404)
+    except Exception as exc:
+        return json_ok(
+            {
+                "ok": False,
+                "error": f"WeChat QR status failed: {type(exc).__name__}",
+            },
+            status=503,
+        )
+    return json_ok({"ok": True, **result})
+
+
+async def wechat_login_cancel_handler(request):
+    session_id = request.match_info.get("session_id", "")
+    manager = request.app["wechat_qr_manager"]
+    try:
+        result = manager.cancel(session_id)
+    except KeyError:
+        return json_ok({"ok": False, "error": "login session not found"}, status=404)
+    except Exception as exc:
+        return json_ok(
+            {
+                "ok": False,
+                "error": f"WeChat QR cancellation failed: {type(exc).__name__}",
+            },
+            status=503,
+        )
+    return json_ok({"ok": True, **result})
+
+
 async def list_sessions_handler(request):
     with manager.lock:
         sessions = [manager.snapshot(s, include_messages=False) for s in manager.sessions.values()]
@@ -2228,14 +2361,33 @@ async def worldline_restore_handler(request):
 
 
 
-def create_app(*, security: Optional[BridgeSecurity] = None, host: str = "127.0.0.1", port: int = 14168):
+def create_app(
+    *,
+    security: Optional[BridgeSecurity] = None,
+    host: str = "127.0.0.1",
+    port: int = 14168,
+    wechat_qr_manager=None,
+):
     security = _validate_bridge_security(security) if security is not None else load_bridge_security(host, port)
     app = web.Application(middlewares=[security_middleware])
+    if wechat_qr_manager is None:
+        from zero_agent.frontends.channel_onboarding import WechatQrManager
+
+        wechat_qr_manager = WechatQrManager()
     app.router.add_get("/channels", channels_handler)
     app.router.add_post("/channels/{channel_id}/start", channel_start_handler)
     app.router.add_post("/channels/{channel_id}/stop", channel_stop_handler)
     app.router.add_post("/channels/{channel_id}/link", channel_link_handler)
+    app.router.add_get("/channels/{channel_id}/config", channel_config_get_handler)
+    app.router.add_post("/channels/{channel_id}/config", channel_config_save_handler)
+    app.router.add_post("/channels/wechat/login", wechat_login_start_handler)
+    app.router.add_get("/channels/wechat/login/{session_id}", wechat_login_status_handler)
+    app.router.add_post(
+        "/channels/wechat/login/{session_id}/cancel",
+        wechat_login_cancel_handler,
+    )
     app["bridge_security"] = security
+    app["wechat_qr_manager"] = wechat_qr_manager
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/status", status_handler)
     app.router.add_get("/config", get_config_handler)
@@ -2288,6 +2440,9 @@ def create_app(*, security: Optional[BridgeSecurity] = None, host: str = "127.0.
         task = app.get("desktop_parent_monitor")
         if task is not None:
             task.cancel()
+        qr_manager = app.get("wechat_qr_manager")
+        if qr_manager is not None:
+            qr_manager.close()
 
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)

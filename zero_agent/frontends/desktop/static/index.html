@@ -183,6 +183,30 @@
       </div>
     </div>
 
+    <!-- Channel Configuration Modal -->
+    <div id="channel-config-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="channel-config-title">
+      <div class="modal-backdrop" data-close-channel-config></div>
+      <div class="modal-content channel-config-dialog">
+        <div class="modal-header">
+          <h3 id="channel-config-title">渠道配置</h3>
+          <button class="icon-btn" id="close-channel-config" title="关闭" aria-label="关闭渠道配置">✕</button>
+        </div>
+        <div class="modal-body">
+          <div id="channel-config-error" class="msg-error" role="alert" aria-live="polite"></div>
+          <div id="channel-config-form" class="channel-config-form"></div>
+          <div id="wechat-qr-panel" class="wechat-qr-panel hidden">
+            <p id="wechat-qr-status" class="channel-config-source">点击扫码登录生成二维码。</p>
+            <img id="wechat-qr-image" class="wechat-qr-image" alt="微信登录二维码" />
+            <button type="button" class="btn primary" id="wechat-qr-start">扫码登录</button>
+          </div>
+        </div>
+        <div class="modal-footer channel-config-actions">
+          <button type="button" class="btn ghost" id="channel-config-cancel">取消</button>
+          <button type="button" class="btn primary" id="channel-config-save">保存</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Confirm Dialog -->
     <div id="confirm-modal" class="modal hidden">
       <div class="modal-backdrop" data-close-confirm></div>

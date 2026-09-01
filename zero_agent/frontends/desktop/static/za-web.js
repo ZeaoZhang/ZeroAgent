@@ -125,6 +125,30 @@
           body: { linked: params.linked === true },
         });
       }
+      case 'channels/config': {
+        const channelId = params.channelId || params.id;
+        if (!channelId) throw new Error('channels/config missing channelId');
+        return http(`/channels/${encodeURIComponent(channelId)}/config`);
+      }
+      case 'channels/config/save': {
+        const channelId = params.channelId || params.id;
+        if (!channelId) throw new Error('channels/config/save missing channelId');
+        return http(`/channels/${encodeURIComponent(channelId)}/config`, {
+          method: 'POST',
+          body: { values: params.values || {} },
+        });
+      }
+      case 'channels/wechat/login/start':
+        return http('/channels/wechat/login', { method: 'POST', body: {} });
+      case 'channels/wechat/login/status':
+        if (!params.sessionId) throw new Error('channels/wechat/login/status missing sessionId');
+        return http(`/channels/wechat/login/${encodeURIComponent(params.sessionId)}`);
+      case 'channels/wechat/login/cancel':
+        if (!params.sessionId) throw new Error('channels/wechat/login/cancel missing sessionId');
+        return http(`/channels/wechat/login/${encodeURIComponent(params.sessionId)}/cancel`, {
+          method: 'POST',
+          body: {},
+        });
       case 'history/sessions':
         return http(`/history/sessions?limit=${encodeURIComponent(params.limit ?? 10)}`);
       case 'history/resume':

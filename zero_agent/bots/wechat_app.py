@@ -19,10 +19,12 @@ import re
 import socket
 import struct
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Mapping
 from urllib.parse import quote
 
 import requests
@@ -32,11 +34,12 @@ _TEMP_DIR = os.path.join(_PROJECT_ROOT, "temp")
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
+from zero_agent.bots.channel_config import ChannelConfigError
 from zero_agent.bots.common import load_keys
 from zero_agent.bots.common import channel_is_linked
 from zero_agent.bots.common import terminal_notice
 
-_KEYS = load_keys()
+_KEYS = {}
 
 # 清除代理环境变量 (避免影响微信长轮询 SSL)
 for _k in ("HTTPS_PROXY", "https_proxy"):
@@ -56,8 +59,7 @@ CDN_BASE = "https://novac2c.cdn.weixin.qq.com/c2c"
 try:
     from Crypto.Cipher import AES
 except ImportError:
-    print("Please install pycryptodome: pip install pycryptodome")
-    sys.exit(1)
+    AES = None  # type: ignore[assignment]
 
 try:
     import qrcode
@@ -66,9 +68,8 @@ except ImportError:
     qrcode = None  # type: ignore
 
 # —— Agent setup ——
-za = ZeroAgent()
-runner = AgentRunner(za)
-runner.verbose = False
+za = None
+runner = None
 
 
 def _uin():
@@ -98,41 +99,82 @@ class WxBotClient:
             self.bot_id = d.get("ilink_bot_id", "")
             self._buf = d.get("updates_buf", "")
 
+    def _write_token_data(self, data: Mapping[str, str]) -> None:
+        self._tf.parent.mkdir(parents=True, exist_ok=True)
+        temporary_name = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self._tf.parent,
+                prefix=f".{self._tf.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_name = handle.name
+                os.chmod(temporary_name, 0o600)
+                json.dump(data, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_name, self._tf)
+            try:
+                os.chmod(self._tf, 0o600)
+            except OSError:
+                pass
+        except Exception:
+            if temporary_name:
+                try:
+                    os.unlink(temporary_name)
+                except OSError:
+                    pass
+            raise
+
     def _save(self, **kw):
-        d = {
+        data = {
             "bot_token": self.token or "",
             "ilink_bot_id": self.bot_id or "",
             "updates_buf": self._buf or "",
             **kw,
         }
-        self._tf.write_text(json.dumps(d, ensure_ascii=False, indent=2), "utf-8")
+        self._write_token_data(data)
 
-    def _post(self, ep, body, timeout=15):
-        data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        h = {
-            "Content-Type": "application/json",
-            "AuthorizationType": "ilink_bot_token",
-            "Content-Length": str(len(data)),
-            "X-WECHAT-UIN": _uin(),
-            "iLink-App-Id": ILINK_APP_ID,
-            "iLink-App-ClientVersion": str(ILINK_APP_CLIENT_VERSION),
-            "User-Agent": UA,
-        }
-        tok = (self.token or "").strip()
-        if tok:
-            h["Authorization"] = f"Bearer {tok}"
-        r = requests.post(f"{API}/{ep}", data=data, headers=h, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
+    def request_qr(self) -> tuple[str, str]:
+        response = requests.get(
+            f"{API}/ilink/bot/get_bot_qrcode",
+            params={"bot_type": 3},
+            headers={"User-Agent": UA},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return str(data["qrcode"]), str(data.get("qrcode_img_content", "") or "")
+
+    def get_qr_status(self, qr_id: str) -> dict:
+        response = requests.get(
+            f"{API}/ilink/bot/get_qrcode_status",
+            params={"qrcode": qr_id},
+            headers={"User-Agent": UA},
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def save_login_result(self, result: Mapping) -> None:
+        if not isinstance(result, Mapping):
+            raise ValueError("invalid QR login result")
+        self.token = str(result.get("bot_token") or "")
+        self.bot_id = str(result.get("ilink_bot_id") or "")
+        updates_buf = result.get("updates_buf", result.get("get_updates_buf", self._buf))
+        self._buf = str(updates_buf or "")
+        self._write_token_data({
+            "bot_token": self.token,
+            "ilink_bot_id": self.bot_id,
+            "updates_buf": self._buf,
+        })
 
     def login_qr(self, poll_interval=2):
-        r = requests.get(
-            f"{API}/ilink/bot/get_bot_qrcode",
-            params={"bot_type": 3}, headers={"User-Agent": UA}, timeout=10,
-        )
-        r.raise_for_status()
-        d = r.json()
-        qr_id, url = d["qrcode"], d.get("qrcode_img_content", "")
+        qr_id, url = self.request_qr()
         print(f"[QR登录] ID: {qr_id}")
         if url and qrcode:
             img = self._tf.parent / "wx_qr.png"
@@ -145,23 +187,18 @@ class WxBotClient:
         while True:
             time.sleep(poll_interval)
             try:
-                s = requests.get(
-                    f"{API}/ilink/bot/get_qrcode_status",
-                    params={"qrcode": qr_id}, headers={"User-Agent": UA}, timeout=60,
-                ).json()
+                status = self.get_qr_status(qr_id)
             except requests.exceptions.ReadTimeout:
                 continue
-            st = s.get("status", "")
-            if st != last:
-                print(f"  状态: {st}")
-                last = st
-            if st == "confirmed":
-                self.token = s.get("bot_token", "")
-                self.bot_id = s.get("ilink_bot_id", "")
-                self._save(login_time=time.strftime("%Y-%m-%d %H:%M:%S"))
+            state = status.get("status", "")
+            if state != last:
+                print(f"  状态: {state}")
+                last = state
+            if state == "confirmed":
+                self.save_login_result(status)
                 print(f"[QR登录] 成功! bot_id={self.bot_id}")
-                return s
-            if st == "expired":
+                return status
+            if state == "expired":
                 raise RuntimeError("二维码过期")
 
     def get_updates(self, timeout=30):
@@ -605,7 +642,11 @@ def on_message(bot: WxBotClient, msg):
 
 # —— 主入口 ——
 if __name__ == "__main__":
+    za = ZeroAgent()
+    runner = AgentRunner(za)
+    runner.verbose = False
     _do_relogin = "--relogin" in sys.argv
+    interactive = bool(getattr(sys.stdout, "isatty", lambda: False)())
     try:
         _lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         _lock.bind(("127.0.0.1", 19531))
@@ -618,14 +659,24 @@ if __name__ == "__main__":
     )
     sys.stdout = sys.stderr = _logf
     print(f"[NEW] Process starting {time.strftime('%m-%d %H:%M')}")
+    try:
+        _KEYS = load_keys()
+    except ChannelConfigError:
+        print("[Bot] channel configuration is unavailable; check the active config file.")
+        sys.exit(1)
     bot = WxBotClient()
     if _do_relogin or not bot.token:
-        if not sys.stdout.isatty():
-            print("[Bot] no token and not interactive, exit.")
+        if not interactive:
+            print(
+                "[Bot] no token or relogin requested in a non-interactive process; "
+                "run `python -m zero_agent.bots.wechat_app --relogin` in a terminal."
+            )
             sys.exit(1)
         sys.stdout = sys.stderr = sys.__stdout__
-        bot.login_qr()
-        sys.stdout = sys.stderr = _logf
+        try:
+            bot.login_qr()
+        finally:
+            sys.stdout = sys.stderr = _logf
     print(f"WeChat Bot 已启动 (bot_id={bot.bot_id})", file=sys.__stdout__)
     try:
         bot.run_loop(on_message)
