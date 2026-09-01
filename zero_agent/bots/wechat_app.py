@@ -33,6 +33,7 @@ _TEMP_DIR = os.path.join(_PROJECT_ROOT, "temp")
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import load_keys
+from zero_agent.bots.common import channel_is_linked
 from zero_agent.bots.common import terminal_notice
 
 _KEYS = load_keys()
@@ -453,6 +454,8 @@ _task_aborted: dict = {}
 
 
 def on_message(bot: WxBotClient, msg):
+    if not channel_is_linked("wechat"):
+        return
     text = bot.extract_text(msg).strip()
     uid = msg.get("from_user_id", "")
     ctx = msg.get("context_token", "")

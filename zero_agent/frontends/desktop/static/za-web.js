@@ -105,6 +105,26 @@
         return http('/scheduler');
       case 'scheduler/start':
         return http('/scheduler/start', { method: 'POST', body: params || {} });
+      case 'channels/list':
+        return http('/channels');
+      case 'channels/start': {
+        const channelId = params.channelId || params.id;
+        if (!channelId) throw new Error('channels/start missing channelId');
+        return http(`/channels/${encodeURIComponent(channelId)}/start`, { method: 'POST', body: {} });
+      }
+      case 'channels/stop': {
+        const channelId = params.channelId || params.id;
+        if (!channelId) throw new Error('channels/stop missing channelId');
+        return http(`/channels/${encodeURIComponent(channelId)}/stop`, { method: 'POST', body: {} });
+      }
+      case 'channels/link': {
+        const channelId = params.channelId || params.id;
+        if (!channelId) throw new Error('channels/link missing channelId');
+        return http(`/channels/${encodeURIComponent(channelId)}/link`, {
+          method: 'POST',
+          body: { linked: params.linked === true },
+        });
+      }
       case 'history/sessions':
         return http(`/history/sessions?limit=${encodeURIComponent(params.limit ?? 10)}`);
       case 'history/resume':

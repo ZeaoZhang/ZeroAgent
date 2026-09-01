@@ -303,6 +303,16 @@ def allowed_label(allowed: set) -> str:
     return "public" if public_access(allowed) else str(sorted(allowed))
 
 
+
+def channel_is_linked(source: str) -> bool:
+    """Return whether a bot source may send new work to ZeroAgent."""
+    from zero_agent.bots.channel_control import is_channel_linked
+
+    try:
+        return is_channel_linked(source)
+    except KeyError:
+        return True
+
 # —— 单实例锁 ——
 
 def ensure_single_instance(port: int, label: str):
@@ -447,7 +457,8 @@ class AgentBotMixin:
         await self.send_text(chat_id, build_done_text(raw_text), **ctx)
 
     async def handle_command(self, chat_id, cmd, **ctx):
-        """处理斜杠命令."""
+        if not channel_is_linked(self.source):
+            return None
         from zero_agent.bots.shared.continue_cmd import handle_frontend_command, reset_conversation
         from zero_agent.bots.shared.btw_cmd import handle_frontend_command as handle_btw_frontend_command
         from zero_agent.bots.shared.review_cmd import handle as handle_review_command
@@ -521,7 +532,8 @@ class AgentBotMixin:
         return await self.send_text(chat_id, HELP_TEXT, **ctx)
 
     async def run_agent(self, chat_id, text, **ctx):
-        """提交任务到 AgentRunner 并消费 chunk/terminal 队列."""
+        if not channel_is_linked(self.source):
+            return None
         state = {"running": True}
         self.user_tasks[chat_id] = state
         terminal = None

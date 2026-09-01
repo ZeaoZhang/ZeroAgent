@@ -9,6 +9,10 @@ Clear split:
 
 HTTP API:
   GET    /status
+  GET    /channels
+  POST   /channels/{channel_id}/start
+  POST   /channels/{channel_id}/stop
+  POST   /channels/{channel_id}/link
   GET    /config
   POST   /config
   GET    /model-profiles
@@ -43,6 +47,7 @@ from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import AgentConfig, default_config_path, load_default_config
 from zero_agent.core.types import TaskMode
 from zero_agent.frontends.plan_command import create_plan_workspace
+from zero_agent.bots import channel_control
 from zero_agent.frontends.session_store import SessionStore
 
 APP_DIR = Path(__file__).resolve().parent
@@ -1929,6 +1934,81 @@ async def scheduler_start_handler(request):
         return json_ok({"ok": False, "error": f"Failed to start scheduler: {type(e).__name__}: {e}"}, status=500)
 
 
+async def channels_handler(request):
+    try:
+        from zero_agent.frontends import desktop_commands
+        return json_ok({
+            "ok": True,
+            "channels": desktop_commands.channel_statuses(),
+        })
+    except Exception as exc:
+        return json_ok(
+            {"ok": False, "error": f"Failed to read channels: {type(exc).__name__}: {exc}"},
+            status=500,
+        )
+
+
+def _channel_definition_from_request(request):
+    try:
+        return channel_control.channel_definition(request.match_info.get("channel_id", ""))
+    except KeyError:
+        raise web.HTTPNotFound(text="unknown channel")
+
+
+async def channel_start_handler(request):
+    definition = _channel_definition_from_request(request)
+    try:
+        from zero_agent.frontends import desktop_commands
+        ok, message = desktop_commands.start_channel(definition.id)
+        return json_ok({
+            "ok": ok,
+            "message": message,
+            "channels": desktop_commands.channel_statuses(),
+        }, status=200 if ok else 409)
+    except Exception as exc:
+        return json_ok(
+            {"ok": False, "error": f"Failed to start channel: {type(exc).__name__}: {exc}"},
+            status=500,
+        )
+
+
+async def channel_stop_handler(request):
+    definition = _channel_definition_from_request(request)
+    try:
+        from zero_agent.frontends import desktop_commands
+        ok, message = desktop_commands.stop_channel(definition.id)
+        return json_ok({
+            "ok": ok,
+            "message": message,
+            "channels": desktop_commands.channel_statuses(),
+        }, status=200 if ok else 409)
+    except Exception as exc:
+        return json_ok(
+            {"ok": False, "error": f"Failed to stop channel: {type(exc).__name__}: {exc}"},
+            status=500,
+        )
+
+
+async def channel_link_handler(request):
+    definition = _channel_definition_from_request(request)
+    data = await read_json(request)
+    linked = data.get("linked")
+    if not isinstance(linked, bool):
+        return json_ok({"ok": False, "error": "linked must be a boolean"}, status=400)
+    try:
+        channel_control.set_channel_linked(definition.id, linked)
+        from zero_agent.frontends import desktop_commands
+        return json_ok({
+            "ok": True,
+            "channels": desktop_commands.channel_statuses(),
+        })
+    except Exception as exc:
+        return json_ok(
+            {"ok": False, "error": f"Failed to link channel: {type(exc).__name__}: {exc}"},
+            status=500,
+        )
+
+
 async def list_sessions_handler(request):
     with manager.lock:
         sessions = [manager.snapshot(s, include_messages=False) for s in manager.sessions.values()]
@@ -2151,6 +2231,10 @@ async def worldline_restore_handler(request):
 def create_app(*, security: Optional[BridgeSecurity] = None, host: str = "127.0.0.1", port: int = 14168):
     security = _validate_bridge_security(security) if security is not None else load_bridge_security(host, port)
     app = web.Application(middlewares=[security_middleware])
+    app.router.add_get("/channels", channels_handler)
+    app.router.add_post("/channels/{channel_id}/start", channel_start_handler)
+    app.router.add_post("/channels/{channel_id}/stop", channel_stop_handler)
+    app.router.add_post("/channels/{channel_id}/link", channel_link_handler)
     app["bridge_security"] = security
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/status", status_handler)

@@ -566,6 +566,10 @@ def test_create_app_exposes_desktop_http_contract() -> None:
     }
 
     assert ("GET", "/status") in routes
+    assert ("GET", "/channels") in routes
+    assert ("POST", "/channels/{channel_id}/start") in routes
+    assert ("POST", "/channels/{channel_id}/stop") in routes
+    assert ("POST", "/channels/{channel_id}/link") in routes
     assert ("GET", "/config") in routes
     assert ("POST", "/config") in routes
     assert ("GET", "/model-profiles") in routes
@@ -609,6 +613,102 @@ async def _open_test_client(security: desktop_bridge.BridgeSecurity | None = Non
     await client.start_server()
     return client
 
+
+@pytest.mark.asyncio
+async def test_channels_endpoint_returns_status_without_credentials(monkeypatch):
+    from zero_agent.frontends import desktop_commands
+
+    rows = [{
+        "id": "telegram",
+        "label": "Telegram",
+        "module": "bots/telegram_app.py",
+        "source": "telegram",
+        "configured": True,
+        "requiredKeys": ["tg_bot_token"],
+        "running": False,
+        "pid": None,
+        "linked": True,
+    }]
+    monkeypatch.setattr(desktop_commands, "channel_statuses", lambda: rows)
+    client = await _open_test_client()
+    try:
+        response = await client.get("/channels", headers={"Authorization": "Bearer secret"})
+        payload = await response.json()
+        assert response.status == 200
+        assert payload == {"ok": True, "channels": rows}
+        assert "test-secret-value" not in json.dumps(payload)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_channel_link_endpoint_validates_id_and_boolean(monkeypatch, tmp_path):
+    from zero_agent.frontends import desktop_commands
+
+    monkeypatch.setenv("ZA_CHANNEL_SETTINGS_PATH", str(tmp_path / "channels.json"))
+    monkeypatch.setattr(
+        desktop_commands,
+        "channel_statuses",
+        lambda: [{
+            "id": "telegram",
+            "label": "Telegram",
+            "module": "bots/telegram_app.py",
+            "source": "telegram",
+            "configured": False,
+            "requiredKeys": ["tg_bot_token"],
+            "running": False,
+            "pid": None,
+            "linked": False,
+        }],
+    )
+    client = await _open_test_client()
+    try:
+        headers = {"Authorization": "Bearer secret"}
+        invalid = await client.post("/channels/telegram/link", json={"linked": "false"}, headers=headers)
+        assert invalid.status == 400
+
+        updated = await client.post("/channels/telegram/link", json={"linked": False}, headers=headers)
+        assert updated.status == 200
+        assert json.loads((tmp_path / "channels.json").read_text(encoding="utf-8")) == {
+            "telegram": {"linked": False},
+        }
+
+        unknown = await client.post("/channels/nope/link", json={"linked": False}, headers=headers)
+        assert unknown.status == 404
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_channel_lifecycle_endpoints_delegate_and_return_snapshot(monkeypatch):
+    from zero_agent.frontends import desktop_commands
+
+    snapshot = [{"id": "telegram", "running": False, "linked": True}]
+    calls = []
+    monkeypatch.setattr(desktop_commands, "channel_statuses", lambda: snapshot)
+    monkeypatch.setattr(
+        desktop_commands,
+        "start_channel",
+        lambda channel_id: calls.append(("start", channel_id)) or (True, "Started"),
+    )
+    monkeypatch.setattr(
+        desktop_commands,
+        "stop_channel",
+        lambda channel_id: calls.append(("stop", channel_id)) or (True, "Stopped"),
+    )
+    client = await _open_test_client()
+    try:
+        headers = {"Authorization": "Bearer secret"}
+        started = await client.post("/channels/telegram/start", headers=headers)
+        stopped = await client.post("/channels/telegram/stop", headers=headers)
+
+        assert started.status == 200
+        assert await started.json() == {"ok": True, "message": "Started", "channels": snapshot}
+        assert stopped.status == 200
+        assert await stopped.json() == {"ok": True, "message": "Stopped", "channels": snapshot}
+        assert calls == [("start", "telegram"), ("stop", "telegram")]
+    finally:
+        await client.close()
 
 def test_load_bridge_security_generates_token_when_absent(monkeypatch) -> None:
     monkeypatch.delenv("ZA_DESKTOP_BRIDGE_TOKEN", raising=False)

@@ -26,6 +26,7 @@ _TEMP_DIR = os.path.join(_PROJECT_ROOT, "temp")
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import (
+    channel_is_linked,
     FILE_HINT,
     HELP_TEXT,
     TELEGRAM_MENU_COMMANDS,
@@ -951,6 +952,8 @@ def _review_command_body(cmd):
 
 
 async def _handle_review_command(update, ctx, cmd):
+    if not channel_is_linked("telegram"):
+        return
     dq = Q.Queue()
     prompt = handle_review_command(za, _review_command_body(cmd), dq)
     if not prompt:
@@ -970,6 +973,8 @@ async def _handle_review_command(update, ctx, cmd):
 
 
 async def handle_msg(update, ctx):
+    if not channel_is_linked("telegram"):
+        return
     uid = update.effective_user.id
     if ALLOWED and uid not in ALLOWED:
         return await update.message.reply_text("no")
@@ -980,6 +985,8 @@ async def handle_msg(update, ctx):
 
 
 async def handle_ask_callback(update, ctx):
+    if not channel_is_linked("telegram"):
+        return
     query = update.callback_query
     if query is None:
         return
@@ -1070,6 +1077,8 @@ async def _send_llm_menu(message):
 
 
 async def handle_llm_callback(update, ctx):
+    if not channel_is_linked("telegram"):
+        return
     query = update.callback_query
     if query is None:
         return
@@ -1100,12 +1109,16 @@ async def handle_llm_callback(update, ctx):
 
 
 async def cmd_abort(update, ctx):
+    if not channel_is_linked("telegram"):
+        return
     _cancel_stream_task(ctx)
     runner.abort()
     await update.message.reply_text("⏹️ 正在停止...")
 
 
 async def cmd_llm(update, ctx):
+    if not channel_is_linked("telegram"):
+        return
     args = (update.message.text or "").split()
     if len(args) > 1:
         try:
@@ -1119,6 +1132,8 @@ async def cmd_llm(update, ctx):
 
 
 async def handle_photo(update, ctx):
+    if not channel_is_linked("telegram"):
+        return
     uid = update.effective_user.id
     if ALLOWED and uid not in ALLOWED:
         return await update.message.reply_text("no")
@@ -1148,6 +1163,8 @@ async def handle_photo(update, ctx):
 
 
 async def handle_command(update, ctx):
+    if not channel_is_linked("telegram"):
+        return
     uid = update.effective_user.id
     if ALLOWED and uid not in ALLOWED:
         return await update.message.reply_text("no")

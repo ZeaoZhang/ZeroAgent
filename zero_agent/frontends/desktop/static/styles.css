@@ -1618,3 +1618,199 @@ mark.search-highlight.active { background: #ff9800; color: #fff; }
 /* ─── Tab Drag ───────────────────────────────────────────────────────── */
 .tab-btn.drag-over-left { box-shadow: inset 3px 0 0 var(--accent, #4a9eff); }
 .tab-btn.drag-over-right { box-shadow: inset -3px 0 0 var(--accent, #4a9eff); }
+.channel-settings-dialog {
+  width: min(640px, calc(100vw - 32px));
+}
+
+.modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.modal-subtitle {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.channel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.channel-card {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.channel-card:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-subtle);
+}
+
+.channel-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.channel-card-info {
+  min-width: 0;
+}
+
+.channel-card-name {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.channel-card-module {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.channel-status {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: var(--bg-subtle);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.channel-status .status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.channel-status.running {
+  color: var(--ok);
+}
+
+.channel-status.running .status-dot {
+  background: var(--ok);
+}
+
+.channel-status.unconfigured {
+  color: var(--warn);
+}
+
+.channel-status.unconfigured .status-dot {
+  background: var(--warn);
+}
+
+.channel-card-meta {
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.channel-card-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.channel-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  user-select: none;
+}
+
+.channel-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.channel-switch {
+  position: relative;
+  display: inline-block;
+  width: 30px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  transition: background 0.15s;
+}
+
+.channel-switch::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--bg);
+  box-shadow: var(--shadow);
+  content: "";
+  transition: transform 0.15s;
+}
+
+.channel-toggle input:checked + .channel-switch {
+  background: var(--ok);
+}
+
+.channel-toggle input:checked + .channel-switch::after {
+  transform: translateX(12px);
+}
+
+.channel-toggle input:focus-visible + .channel-switch {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.channel-toggle input:disabled + .channel-switch,
+.channel-toggle input:disabled ~ span {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.channel-settings-hint {
+  flex: 1;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+@media (max-width: 620px) {
+  .channel-card-header {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .channel-card-controls {
+    justify-content: space-between;
+  }
+
+  .channel-settings-dialog .modal-footer {
+    align-items: flex-end;
+  }
+}

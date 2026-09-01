@@ -30,6 +30,7 @@ from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import (
     AgentBotMixin,
+    channel_is_linked,
     FILE_HINT,
     build_done_text,
     clean_reply,
@@ -112,6 +113,8 @@ class WeComApp(AgentBotMixin):
 
     # —— frame accept ——
     def _accept(self, frame):
+        if not channel_is_linked(self.source):
+            return None
         body = (
             frame.body if hasattr(frame, "body")
             else frame.get("body", frame) if isinstance(frame, dict)
@@ -186,6 +189,8 @@ class WeComApp(AgentBotMixin):
 
     # —— agent execution ——
     async def run_agent(self, chat_id, text, **_):
+        if not channel_is_linked(self.source):
+            return None
         state = {"running": True}
         self.user_tasks[chat_id] = state
         loop = asyncio.get_running_loop()
@@ -289,6 +294,8 @@ class WeComApp(AgentBotMixin):
 
     # —— lifecycle ——
     async def on_enter_chat(self, frame):
+        if not channel_is_linked(self.source):
+            return
         if WELCOME and self.client:
             try:
                 await self.client.reply_welcome(

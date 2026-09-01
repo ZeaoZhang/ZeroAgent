@@ -20,6 +20,7 @@ from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import (
     AgentBotMixin,
+    channel_is_linked,
     ensure_single_instance,
     load_keys,
     public_access,
@@ -177,6 +178,8 @@ class QQApp(AgentBotMixin):
             data: botpy 消息对象 (C2CMessage / GroupMessage).
             is_group: 是否群聊消息.
         """
+        if not channel_is_linked(self.source):
+            return
         try:
             # 消息去重
             msg_id = getattr(data, "id", None)

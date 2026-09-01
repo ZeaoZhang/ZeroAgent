@@ -1,4 +1,4 @@
-"""Slash command helpers for the ZeroAgent desktop bridge."""
+"""Slash command and channel lifecycle helpers for the desktop bridge."""
 
 from __future__ import annotations
 
@@ -6,12 +6,26 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
 
+from zero_agent.bots import channel_control
+
 _ROOT = Path(__file__).resolve().parents[1]
 _SETTINGS_PATH = _ROOT / "temp" / "desktop_settings.json"
+_RUNNING_CACHE: tuple[float, dict[str, int]] | None = None
+_RUNNING_TTL = 2.0
+_CHANNEL_START_LOCKS = {
+    definition.id: threading.Lock()
+    for definition in channel_control.channel_definitions()
+}
+
+
+def _invalidate_running_cache() -> None:
+    global _RUNNING_CACHE
+    _RUNNING_CACHE = None
 
 
 def _current_lang() -> str:
@@ -160,10 +174,252 @@ def _scheduler_process() -> tuple[str, int] | None:
     return None
 
 
+def _script_matches_cmdline(cmdline, script: Path, module_name: str) -> bool:
+    """Match the script or exact module executed by the Python process."""
+    arguments = [str(argument or "").strip().strip('"') for argument in (cmdline or [])]
+    if len(arguments) < 2:
+        return False
+    skip_next = False
+    for index, raw in enumerate(arguments[1:]):
+        if skip_next:
+            skip_next = False
+            continue
+        if raw == "-c":
+            return False
+        if raw == "-m":
+            module_index = index + 2
+            return module_index < len(arguments) and arguments[module_index] == module_name
+        if raw in {"-W", "-X"}:
+            skip_next = True
+            continue
+        if not raw or raw.startswith("-"):
+            continue
+        try:
+            return Path(raw).expanduser().resolve(strict=False) == script
+        except (OSError, RuntimeError, ValueError):
+            return False
+    return False
+
+
+def _process_create_time(process):
+    try:
+        return process.create_time()
+    except Exception:
+        return None
+
+
+def _process_identity_matches(process, create_time) -> bool:
+    if create_time is None:
+        return False
+    try:
+        return process.create_time() == create_time
+    except Exception:
+        return False
+
+
+def _process_matches_script(process, script: Path, module_name: str) -> bool:
+    """Revalidate a PID's command and identity before acting on it."""
+    try:
+        return _script_matches_cmdline(process.cmdline(), script, module_name)
+    except Exception:
+        return False
+
+
+def _channel_processes() -> dict[str, list[int]]:
+    """Return all running bot frontend PIDs keyed by service name."""
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return {}
+    scripts = {
+        f"bots/{definition.module}": (
+            (_ROOT / "bots" / definition.module).resolve(),
+            f"zero_agent.bots.{Path(definition.module).stem}",
+        )
+        for definition in channel_control.channel_definitions()
+    }
+    out: dict[str, list[int]] = {}
+    for proc in psutil.process_iter(["pid", "name"]):
+        try:
+            if proc.info["pid"] == os.getpid():
+                continue
+            name = (proc.info.get("name") or "").lower()
+            if "python" not in name and "py.exe" not in name:
+                continue
+            cmdline = proc.cmdline()
+        except Exception:
+            continue
+        for marker, (script, module_name) in scripts.items():
+            if _script_matches_cmdline(cmdline, script, module_name):
+                out.setdefault(marker, []).append(int(proc.info["pid"]))
+                break
+    return out
+
+
 def running_services(use_cache: bool = True) -> dict[str, int]:
-    """Return currently running desktop-managed services."""
+    """Return currently running desktop-managed scheduler and bot services."""
+    global _RUNNING_CACHE
+    if use_cache and _RUNNING_CACHE and time.time() - _RUNNING_CACHE[0] < _RUNNING_TTL:
+        return dict(_RUNNING_CACHE[1])
+    out: dict[str, int] = {}
     proc = _scheduler_process()
-    return {proc[0]: proc[1]} if proc else {}
+    if proc:
+        out[proc[0]] = proc[1]
+    for service_name, pids in _channel_processes().items():
+        if pids:
+            out[service_name] = pids[0]
+    _RUNNING_CACHE = (time.time(), dict(out))
+    return out
+
+
+def _channel_service_name(definition: channel_control.ChannelDefinition) -> str:
+    return f"bots/{definition.module}"
+
+
+def channel_statuses() -> list[dict]:
+    """Return non-sensitive status metadata for every supported channel."""
+    running = running_services(use_cache=False)
+    settings = channel_control.get_channel_settings()
+    rows = []
+    for definition in channel_control.channel_definitions():
+        service_name = _channel_service_name(definition)
+        rows.append({
+            "id": definition.id,
+            "label": definition.label,
+            "module": service_name,
+            "source": definition.source,
+            "configured": channel_control.channel_is_configured(definition),
+            "requiredKeys": list(definition.required_keys),
+            "running": service_name in running,
+            "pid": running.get(service_name),
+            "linked": settings.get(definition.id, {}).get("linked", True),
+        })
+    return rows
+
+
+def start_channel(channel_id: str) -> tuple[bool, str]:
+    """Start one configured bot frontend as a detached child process."""
+    try:
+        definition = channel_control.channel_definition(channel_id)
+    except KeyError as exc:
+        return False, str(exc)
+    with _CHANNEL_START_LOCKS[definition.id]:
+        return _start_channel(definition)
+
+
+def _start_channel(definition: channel_control.ChannelDefinition) -> tuple[bool, str]:
+    service_name = _channel_service_name(definition)
+    running = running_services(use_cache=False)
+    if service_name in running:
+        return True, f"Already running {service_name} (pid={running[service_name]})"
+    missing = channel_control.missing_configuration(definition)
+    if missing:
+        return False, f"{definition.label} 未配置: {', '.join(missing)}"
+    script = _ROOT / "bots" / definition.module
+    if not script.is_file():
+        return False, f"{service_name} 不存在"
+    try:
+        flags = 0
+        if os.name == "nt":
+            flags = 0x00000200 | 0x08000000
+        proc = subprocess.Popen(
+            [sys.executable, str(script)],
+            cwd=str(_ROOT.parent),
+            creationflags=flags,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        time.sleep(0.4)
+        rc = proc.poll()
+        if rc is not None:
+            return False, f"启动失败 (退出码 {rc}): {service_name}"
+        _invalidate_running_cache()
+        return True, f"Started {service_name} (pid={proc.pid})"
+    except Exception as exc:
+        return False, f"启动失败: {type(exc).__name__}: {exc}"
+
+
+def stop_channel(channel_id: str) -> tuple[bool, str]:
+    """Stop every matching channel process and its child processes."""
+    try:
+        definition = channel_control.channel_definition(channel_id)
+    except KeyError as exc:
+        return False, str(exc)
+    service_name = _channel_service_name(definition)
+    script = (_ROOT / "bots" / definition.module).resolve()
+    module_name = f"zero_agent.bots.{Path(definition.module).stem}"
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return False, "psutil 未安装，无法停止渠道"
+
+    pids = _channel_processes().get(service_name, [])
+    if not pids:
+        _invalidate_running_cache()
+        return True, f"{service_name} 已停止"
+
+    parents = []
+    for pid in pids:
+        try:
+            process = psutil.Process(pid)
+            if not _process_matches_script(process, script, module_name):
+                continue
+            identity = _process_create_time(process)
+            if identity is not None:
+                parents.append((process, identity))
+        except psutil.NoSuchProcess:
+            continue
+        except Exception:
+            continue
+    if not parents:
+        _invalidate_running_cache()
+        return True, f"{service_name} 已停止"
+
+    targets = []
+    seen_pids = set()
+
+    def add_target(process, identity, is_parent):
+        pid = getattr(process, "pid", None)
+        if pid in seen_pids or identity is None:
+            return
+        seen_pids.add(pid)
+        targets.append((process, identity, is_parent))
+
+    for parent, identity in parents:
+        add_target(parent, identity, True)
+        try:
+            children = parent.children(recursive=True)
+        except Exception:
+            children = []
+        for child in children:
+            add_target(child, _process_create_time(child), False)
+
+    processes = [record[0] for record in targets]
+    for process, identity, is_parent in targets:
+        try:
+            if not _process_identity_matches(process, identity):
+                continue
+            if is_parent and not _process_matches_script(process, script, module_name):
+                continue
+            process.terminate()
+        except Exception:
+            pass
+    _, alive = psutil.wait_procs(processes, timeout=3.0)
+    alive_pids = {process.pid for process in alive}
+    for process, identity, is_parent in targets:
+        try:
+            if process.pid not in alive_pids or not _process_identity_matches(process, identity):
+                continue
+            if is_parent and not _process_matches_script(process, script, module_name):
+                continue
+            process.kill()
+        except Exception:
+            pass
+    _invalidate_running_cache()
+    pid_text = ",".join(str(process.pid) for process, _ in parents)
+    return True, f"Stopped {service_name} (pids={pid_text})"
 
 
 def start_reflect_task(name: str) -> tuple[bool, str]:

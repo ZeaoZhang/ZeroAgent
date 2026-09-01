@@ -65,6 +65,14 @@
               <path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32l1.41-1.41"/>
             </svg>
           </button>
+          <button id="channel-settings-btn" class="icon-btn" title="渠道设置" aria-label="打开渠道设置" aria-expanded="false">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 6h16M4 12h16M4 18h16"/>
+              <circle cx="8" cy="6" r="2" fill="var(--bg)" />
+              <circle cx="16" cy="12" r="2" fill="var(--bg)" />
+              <circle cx="10" cy="18" r="2" fill="var(--bg)" />
+            </svg>
+          </button>
           <button id="toggle-right-drawer-alt" class="icon-btn" title="Toggle agents" aria-label="Toggle agents sidebar">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="3"/>
@@ -145,6 +153,32 @@
         </div>
         <div class="modal-body">
           <div id="model-list" class="model-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Channel Settings Modal -->
+    <div id="channel-settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="channel-settings-title">
+      <div class="modal-backdrop" data-close-channel-settings></div>
+      <div class="modal-content channel-settings-dialog">
+        <div class="modal-header">
+          <div>
+            <h3 id="channel-settings-title">渠道设置</h3>
+            <p class="modal-subtitle">运行控制渠道进程；连接 App 控制是否处理新消息。</p>
+          </div>
+          <div class="modal-header-actions">
+            <button class="icon-btn" id="refresh-channel-settings" title="刷新渠道状态" aria-label="刷新渠道状态">↻</button>
+            <button class="icon-btn" id="close-channel-settings" title="关闭" aria-label="关闭渠道设置">✕</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <div id="channel-list" class="channel-list">
+            <div class="empty-state-small"><span>正在加载渠道状态…</span></div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <span class="channel-settings-hint">未配置渠道不会启动，密钥不会显示在此处。</span>
+          <button class="btn" id="channel-settings-done">完成</button>
         </div>
       </div>
     </div>

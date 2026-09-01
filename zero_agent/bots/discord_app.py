@@ -32,6 +32,7 @@ from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import (
     AgentBotMixin,
+    channel_is_linked,
     FILE_HINT,
     HELP_TEXT,
     clean_reply,
@@ -373,6 +374,8 @@ class DiscordApp(AgentBotMixin):
             chat_id: 会话标识.
             cmd: 完整命令字符串 (如 "/help", "/stop").
         """
+        if not channel_is_linked(self.source):
+            return None
         r = self._get_runner(chat_id)
         parts = (cmd or "").split()
         op = (parts[0] if parts else "").lower()
@@ -432,6 +435,8 @@ class DiscordApp(AgentBotMixin):
 
     async def run_agent(self, chat_id, text, **ctx):
         """在隔离的 per-chat agent 上消费 chunk/terminal 输出."""
+        if not channel_is_linked(self.source):
+            return None
         r = self._get_runner(chat_id)
         state = {"running": True}
         self.user_tasks[chat_id] = state
@@ -492,6 +497,8 @@ class DiscordApp(AgentBotMixin):
         Args:
             message: discord.Message 实例.
         """
+        if not channel_is_linked(self.source):
+            return
         # 忽略自身和其他 bot 的消息
         if message.author == self.client.user or message.author.bot:
             return

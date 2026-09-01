@@ -20,6 +20,7 @@ from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import (
     AgentBotMixin,
+    channel_is_linked,
     ensure_single_instance,
     load_keys,
     public_access,
@@ -247,6 +248,8 @@ class DingTalkApp(AgentBotMixin):
             conversation_type: 会话类型 ("2" 为群聊).
             conversation_id: 会话 ID.
         """
+        if not channel_is_linked(self.source):
+            return
         try:
             if not content:
                 return

@@ -30,6 +30,8 @@ from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import (
     AgentBotMixin,
+    channel_is_linked,
+    ensure_single_instance,
     FILE_HINT,
     bot_config_source,
     split_text,
@@ -292,10 +294,9 @@ def _extract_post_content(content_json):
             if text or imgs:
                 return text or "", imgs
     for val in root.values():
-        if isinstance(val, dict):
-            text, imgs = _parse_block(val)
-            if text or imgs:
-                return text or "", imgs
+        text, imgs = _parse_block(val)
+        if text or imgs:
+            return text or "", imgs
     return "", []
 
 
@@ -682,6 +683,8 @@ class FeishuApp(AgentBotMixin):
         await asyncio.to_thread(_send_generated_files, rid, raw_text, receive_id_type)
 
     async def run_agent(self, chat_id, text, *, receive_id=None, receive_id_type="open_id", images=None, **_):
+        if not channel_is_linked(self.source):
+            return None
         if self.user_tasks:
             await self.send_text(
                 chat_id, "当前会话已有任务在运行, 请等待完成或发送 /stop 后再试。",
@@ -772,6 +775,8 @@ def _run_async(coro):
 
 
 def handle_message(data):
+    if not channel_is_linked("feishu"):
+        return
     event, message, sender = data.event, data.event.message, data.event.sender
     message_id = getattr(message, "message_id", "") or ""
     if not _claim_message_once(message_id):
@@ -840,4 +845,5 @@ if __name__ == "__main__":
     if args.check or args.check_agent:
         print(json.dumps(check_config(init_agent=args.check_agent), ensure_ascii=False, indent=2), flush=True)
     else:
+        _LOCK_SOCK = ensure_single_instance(19533, "Feishu")
         main()

@@ -200,6 +200,13 @@ python -m zero_agent.frontends.desktop_bridge
 The Web UI and Tauri desktop app use the same static frontend under
 `zero_agent/frontends/desktop/static`.
 
+渠道控制设置：
+
+- 在桌面 Web UI 顶部打开“渠道设置”，可查看微信、企业微信、钉钉、QQ、飞书、Telegram、Discord 的配置和运行状态。
+- “运行”控制对应渠道进程的启动与停止；未配置必要凭据的渠道不能启动。
+- “连接 App”控制渠道是否把新的入站消息交给 ZeroAgent；关闭时保留渠道进程，但不会处理新消息，已有任务不会被取消。
+- 连接状态保存到 `temp/channel_settings.json`（可用 `ZA_CHANNEL_SETTINGS_PATH` 覆盖）；缺失或损坏的状态文件默认保持连接，兼容已有安装。
+
 ## 打包桌面 App
 
 桌面 App 使用 Tauri 2 打包，前端静态资源位于

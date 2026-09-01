@@ -11,6 +11,8 @@ const state = {
   bridgeReady: false,
   defaultConfig: { theme: 'auto', llmNo: 0, workspaceDir: '' },
   modelProfiles: [],
+  channelStatuses: [],
+  channelActionIds: new Set(),
   slashCommands: [],
   restartingBridge: false,
   bridgeNoticeMessage: null,
@@ -41,6 +43,7 @@ const $ = (id) => document.getElementById(id);
 let messagesEl, inputEl, sendBtn, sessionListEl, sessionTitleEl, statusBadge, statusText;
 let errorBanner, commandPaletteEl, leftDrawer, rightDrawer, agentList;
 let modelStatus, currentModelEl, tokenUsageEl, modelPickerModal, modelList;
+let channelSettingsModal, channelListEl, channelSettingsBtn;
 let diagnosticsLogEl, diagnosticsPanel;
 
 
@@ -3261,6 +3264,136 @@ async function saveSettings() {
   }
 }
 
+// ─── Channel Settings ────────────────────────────────────────────────────
+function channelRuntimeStatus(channel) {
+  if (!channel.configured) return { className: 'unconfigured', label: '未配置' };
+  if (channel.running) return { className: 'running', label: '运行中' };
+  return { className: 'stopped', label: '已停止' };
+}
+
+function renderChannelList() {
+  if (!channelListEl) return;
+  const channels = Array.isArray(state.channelStatuses) ? state.channelStatuses : [];
+  if (!channels.length) {
+    channelListEl.innerHTML = '<div class="empty-state-small"><span>暂无渠道状态</span></div>';
+    return;
+  }
+  channelListEl.innerHTML = channels.map((channel) => {
+    const status = channelRuntimeStatus(channel);
+    const busy = state.channelActionIds.has(channel.id);
+    const runDisabled = busy || (!channel.configured && !channel.running);
+    const required = channel.configured ? '配置已就绪' : '未配置必要凭据';
+    return `
+      <article class="channel-card">
+        <div class="channel-card-header">
+          <div class="channel-card-info">
+            <div class="channel-card-name">${escapeHtml(channel.label || channel.id)}</div>
+            <code class="channel-card-module">${escapeHtml(channel.module || '')}</code>
+          </div>
+          <span class="channel-status ${status.className}">
+            <span class="status-dot"></span>${status.label}
+          </span>
+        </div>
+        <div class="channel-card-meta">${required}</div>
+        <div class="channel-card-controls">
+          <label class="channel-toggle">
+            <span>运行</span>
+            <input type="checkbox" data-channel-id="${escapeHtml(channel.id)}"
+              data-channel-action="running" ${channel.running ? 'checked' : ''}
+              ${runDisabled ? 'disabled' : ''}>
+            <span class="channel-switch" aria-hidden="true"></span>
+          </label>
+          <label class="channel-toggle">
+            <span>连接 App</span>
+            <input type="checkbox" data-channel-id="${escapeHtml(channel.id)}"
+              data-channel-action="linked" ${channel.linked ? 'checked' : ''}
+              ${busy ? 'disabled' : ''}>
+            <span class="channel-switch" aria-hidden="true"></span>
+          </label>
+        </div>
+      </article>
+    `;
+  }).join('');
+}
+
+function channelErrorMessage(err, operation) {
+  const raw = rawErrorText(err);
+  const status = Number(err?.status || err?.data?.status || 0);
+  if (status >= 400 && status < 500 && status !== 401 && status !== 403 && raw) {
+    return `${operation || '渠道操作'}失败：${raw}`;
+  }
+  return formatRequestError(err, operation || '渠道操作');
+}
+
+async function loadChannelStatuses({ silent = false } = {}) {
+  try {
+    const result = await window.zeroAgent.rpc('channels/list', {});
+    state.channelStatuses = Array.isArray(result?.channels) ? result.channels : [];
+    renderChannelList();
+    return state.channelStatuses;
+  } catch (err) {
+    addDiagnostic('warn', 'Failed to load channel status', err);
+    renderChannelList();
+    if (!silent && typeof showError === 'function') {
+      showError(channelErrorMessage(err, '加载渠道状态'));
+    }
+    return [];
+  }
+}
+
+async function handleChannelToggle(channelId, action, value) {
+  if (!['running', 'linked'].includes(action) || state.channelActionIds.has(channelId)) return;
+  const channel = state.channelStatuses.find((item) => item.id === channelId);
+  if (!channel) return;
+  if (action === 'running' && value && !channel.configured) {
+    renderChannelList();
+    if (typeof showError === 'function') showError('该渠道尚未配置，无法启动。');
+    return;
+  }
+  state.channelActionIds.add(channelId);
+  renderChannelList();
+  try {
+    const method = action === 'running'
+      ? (value ? 'channels/start' : 'channels/stop')
+      : 'channels/link';
+    const params = action === 'running'
+      ? { channelId }
+      : { channelId, linked: Boolean(value) };
+    const result = await window.zeroAgent.rpc(method, params);
+    if (Array.isArray(result?.channels)) {
+      state.channelStatuses = result.channels;
+    } else {
+      await loadChannelStatuses({ silent: true });
+    }
+  } catch (err) {
+    await loadChannelStatuses({ silent: true });
+    addDiagnostic('error', `Channel ${action} failed`, err);
+    if (typeof showError === 'function') showError(channelErrorMessage(err, '渠道操作'));
+  } finally {
+    state.channelActionIds.delete(channelId);
+    renderChannelList();
+  }
+}
+
+async function openChannelSettings() {
+  if (!channelSettingsModal) return;
+  channelSettingsModal.classList.remove('hidden');
+  if (channelSettingsBtn) channelSettingsBtn.setAttribute('aria-expanded', 'true');
+  await loadChannelStatuses();
+}
+
+function closeChannelSettings() {
+  if (!channelSettingsModal) return;
+  channelSettingsModal.classList.add('hidden');
+  if (channelSettingsBtn) channelSettingsBtn.setAttribute('aria-expanded', 'false');
+}
+
+function toggleChannelSettings() {
+  if (!channelSettingsModal) return;
+  if (channelSettingsModal.classList.contains('hidden')) openChannelSettings();
+  else closeChannelSettings();
+}
+
 async function ensureBridgeSession(sess) {
   if (!sess) throw new Error('No active session.');
   if (sess.bridgeSessionId) return sess.bridgeSessionId;
@@ -3853,6 +3986,9 @@ const imagePreviews = document.getElementById('image-previews');
   tokenUsageEl = $('token-usage');
   modelPickerModal = $('model-picker-modal');
   modelList = $('model-list');
+  channelSettingsModal = $('channel-settings-modal');
+  channelListEl = $('channel-list');
+  channelSettingsBtn = $('channel-settings-btn');
 
   // Add platform class to body for platform-specific CSS
   const platform = (window.zeroAgent && window.zeroAgent.platform) || process.platform || 'unknown';
@@ -3968,6 +4104,18 @@ const imagePreviews = document.getElementById('image-previews');
 
   // ─── Button Event Listeners ────────────────────────────────────────────
   $('new-session-btn')?.addEventListener('click', newSession);
+
+  // ─── Channel Settings ───────────────────────────────────────────────────
+  channelSettingsBtn?.addEventListener('click', toggleChannelSettings);
+  $('close-channel-settings')?.addEventListener('click', closeChannelSettings);
+  $('channel-settings-done')?.addEventListener('click', closeChannelSettings);
+  $('refresh-channel-settings')?.addEventListener('click', () => loadChannelStatuses());
+  channelSettingsModal?.querySelector('.modal-backdrop')?.addEventListener('click', closeChannelSettings);
+  channelListEl?.addEventListener('change', (event) => {
+    const input = event.target;
+    if (!input?.dataset?.channelId || !input.dataset.channelAction) return;
+    handleChannelToggle(input.dataset.channelId, input.dataset.channelAction, input.checked);
+  });
   $('error-dismiss')?.addEventListener('click', hideError);
 
   // ─── Drawer Toggles ─────────────────────────────────────────────────────
@@ -4092,6 +4240,11 @@ const imagePreviews = document.getElementById('image-previews');
 
   // ─── Keyboard Shortcuts ─────────────────────────────────────────────────
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && channelSettingsModal && !channelSettingsModal.classList.contains('hidden')) {
+      e.preventDefault();
+      closeChannelSettings();
+      return;
+    }
     // Cmd/Ctrl+B - Toggle left drawer
     if ((e.metaKey || e.ctrlKey) && e.key === 'b' && !e.shiftKey && !e.altKey) {
       e.preventDefault();
