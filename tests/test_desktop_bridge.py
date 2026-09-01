@@ -570,6 +570,11 @@ def test_create_app_exposes_desktop_http_contract() -> None:
     assert ("POST", "/channels/{channel_id}/start") in routes
     assert ("POST", "/channels/{channel_id}/stop") in routes
     assert ("POST", "/channels/{channel_id}/link") in routes
+    assert ("GET", "/channels/{channel_id}/config") in routes
+    assert ("POST", "/channels/{channel_id}/config") in routes
+    assert ("POST", "/channels/wechat/login") in routes
+    assert ("GET", "/channels/wechat/login/{session_id}") in routes
+    assert ("POST", "/channels/wechat/login/{session_id}/cancel") in routes
     assert ("GET", "/config") in routes
     assert ("POST", "/config") in routes
     assert ("GET", "/model-profiles") in routes
@@ -606,10 +611,14 @@ def _bridge_security(token: str = "secret", origin: str = "http://127.0.0.1:1416
         allowed_origins=frozenset({origin}),
         allow_remote=False,
     )
-
-
-async def _open_test_client(security: desktop_bridge.BridgeSecurity | None = None) -> TestClient:
-    client = TestClient(TestServer(desktop_bridge.create_app(security=security or _bridge_security())))
+async def _open_test_client(
+    security: desktop_bridge.BridgeSecurity | None = None,
+    wechat_qr_manager=None,
+) -> TestClient:
+    client = TestClient(TestServer(desktop_bridge.create_app(
+        security=security or _bridge_security(),
+        wechat_qr_manager=wechat_qr_manager,
+    )))
     await client.start_server()
     return client
 
@@ -641,6 +650,239 @@ async def test_channels_endpoint_returns_status_without_credentials(monkeypatch)
         await client.close()
 
 
+@pytest.mark.asyncio
+async def test_channel_config_get_masks_secret_metadata(monkeypatch, tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "bots:\n  tg_bot_token: configured-token\n  tg_allowed_users: ['1001']\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("TG_BOT_TOKEN", raising=False)
+    monkeypatch.setenv("ZA_CONFIG_PATH", str(config))
+    client = await _open_test_client()
+    try:
+        response = await client.get(
+            "/channels/telegram/config",
+            headers={"Authorization": "Bearer secret"},
+        )
+        payload = await response.json()
+        assert response.status == 200
+        assert payload["ok"] is True
+        assert payload["config"]["configured"] is True
+        assert payload["config"]["source"] == str(config)
+        assert "configured-token" not in json.dumps(payload)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_channel_config_save_returns_status_and_restart_requirement(
+    monkeypatch, tmp_path
+):
+    from zero_agent.frontends import desktop_commands
+
+    config = tmp_path / "config.yaml"
+    config.write_text("default_backend: default\nbots:\n  old_key: keep\n", encoding="utf-8")
+    monkeypatch.delenv("TG_BOT_TOKEN", raising=False)
+    monkeypatch.setenv("ZA_CONFIG_PATH", str(config))
+    rows = [{
+        "id": "telegram",
+        "running": True,
+        "configured": True,
+    }]
+    monkeypatch.setattr(desktop_commands, "channel_statuses", lambda: rows)
+    client = await _open_test_client()
+    try:
+        response = await client.post(
+            "/channels/telegram/config",
+            json={
+                "values": {
+                    "tg_bot_token": "new-token",
+                    "tg_allowed_users": ["1001"],
+                },
+            },
+            headers={"Authorization": "Bearer secret"},
+        )
+        payload = await response.json()
+        assert response.status == 200
+        assert payload["ok"] is True
+        assert payload["channels"] == rows
+        assert payload["requiresRestart"] is True
+        assert "new-token" not in json.dumps(payload)
+        assert "tg_bot_token: new-token" in config.read_text(encoding="utf-8")
+        assert "tg_allowed_users:" in config.read_text(encoding="utf-8")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_channel_config_rejects_invalid_fields_and_environment_overrides(
+    monkeypatch, tmp_path
+):
+    config = tmp_path / "config.yaml"
+    config.write_text("bots: {}\n", encoding="utf-8")
+    monkeypatch.setenv("ZA_CONFIG_PATH", str(config))
+    client = await _open_test_client()
+    try:
+        headers = {"Authorization": "Bearer secret"}
+        unknown = await client.post(
+            "/channels/telegram/config",
+            json={"values": {"unknown": "value"}},
+            headers=headers,
+        )
+        scalar = await client.post(
+            "/channels/telegram/config",
+            json={"values": {"tg_allowed_users": "1001"}},
+            headers=headers,
+        )
+        monkeypatch.setenv("TG_BOT_TOKEN", "environment-token")
+        environment = await client.post(
+            "/channels/telegram/config",
+            json={"values": {"tg_bot_token": "file-token"}},
+            headers=headers,
+        )
+        assert unknown.status == 400
+        assert scalar.status == 400
+        assert environment.status == 409
+        assert "file-token" not in await environment.text()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_channel_config_unknown_id_and_missing_token_are_rejected():
+    client = await _open_test_client()
+    try:
+        headers = {"Authorization": "Bearer secret"}
+        unknown_get = await client.get("/channels/unknown/config", headers=headers)
+        unknown_post = await client.post(
+            "/channels/unknown/config",
+            json={"values": {}},
+            headers=headers,
+        )
+        missing_token = await client.get("/channels/telegram/config")
+        assert unknown_get.status == 404
+        assert unknown_post.status == 404
+        assert missing_token.status == 401
+    finally:
+        await client.close()
+
+
+def test_telegram_status_requires_allow_list(monkeypatch, tmp_path):
+    from zero_agent.frontends import desktop_commands
+
+    config = tmp_path / "config.yaml"
+    config.write_text("bots:\n  tg_bot_token: token-only\n", encoding="utf-8")
+    monkeypatch.delenv("TG_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TG_ALLOWED_USERS", raising=False)
+    monkeypatch.setenv("ZA_CONFIG_PATH", str(config))
+    monkeypatch.setattr(desktop_commands, "running_services", lambda use_cache=False: {})
+    row = next(item for item in desktop_commands.channel_statuses() if item["id"] == "telegram")
+
+    assert row["configured"] is False
+    assert row["requiredKeys"] == ["tg_bot_token", "tg_allowed_users"]
+
+
+
+@pytest.mark.asyncio
+async def test_wechat_login_routes_use_authenticated_manager(monkeypatch):
+    from zero_agent.frontends import desktop_commands
+
+    class FakeQrManager:
+        def __init__(self):
+            self.closed = False
+            self.session = {
+                "sessionId": "session-1",
+                "status": "pending",
+                "qrDataUrl": "data:image/png;base64,qr",
+            }
+
+        def start(self):
+            return dict(self.session)
+
+        def status(self, session_id):
+            if session_id != "session-1":
+                raise KeyError(session_id)
+            return dict(self.session)
+
+        def cancel(self, session_id):
+            if session_id != "session-1":
+                raise KeyError(session_id)
+            self.session["status"] = "cancelled"
+            return dict(self.session)
+
+        def close(self):
+            self.closed = True
+
+    manager = FakeQrManager()
+    monkeypatch.setattr(desktop_commands, "running_services", lambda use_cache=False: {})
+    client = await _open_test_client(wechat_qr_manager=manager)
+    try:
+        headers = {"Authorization": "Bearer secret"}
+        started = await client.post("/channels/wechat/login", headers=headers)
+        started_session = dict(manager.session)
+        status = await client.get("/channels/wechat/login/session-1", headers=headers)
+        cancelled = await client.post(
+            "/channels/wechat/login/session-1/cancel",
+            headers=headers,
+        )
+        unknown = await client.get("/channels/wechat/login/missing", headers=headers)
+        assert started.status == 200
+        assert await started.json() == {"ok": True, **started_session}
+        assert status.status == 200
+        assert (await status.json())["status"] == "pending"
+        assert cancelled.status == 200
+        assert (await cancelled.json())["status"] == "cancelled"
+        assert unknown.status == 404
+        assert "bot_token" not in await started.text()
+    finally:
+        await client.close()
+    assert manager.closed is True
+
+
+@pytest.mark.asyncio
+async def test_wechat_login_start_rejects_running_process_and_failed_initialization(
+    monkeypatch,
+):
+    from zero_agent.frontends import desktop_commands
+
+    class FailedQrManager:
+        def start(self):
+            return {
+                "sessionId": "failed-1",
+                "status": "failed",
+                "error": "QR initialization failed",
+            }
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        desktop_commands,
+        "running_services",
+        lambda use_cache=False: {"bots/wechat_app.py": 4321},
+    )
+    client = await _open_test_client(wechat_qr_manager=FailedQrManager())
+    try:
+        blocked = await client.post(
+            "/channels/wechat/login",
+            headers={"Authorization": "Bearer secret"},
+        )
+        assert blocked.status == 409
+    finally:
+        await client.close()
+
+    monkeypatch.setattr(desktop_commands, "running_services", lambda use_cache=False: {})
+    client = await _open_test_client(wechat_qr_manager=FailedQrManager())
+    try:
+        failed = await client.post(
+            "/channels/wechat/login",
+            headers={"Authorization": "Bearer secret"},
+        )
+        assert failed.status == 503
+        assert (await failed.json())["status"] == "failed"
+    finally:
+        await client.close()
 @pytest.mark.asyncio
 async def test_channel_link_endpoint_validates_id_and_boolean(monkeypatch, tmp_path):
     from zero_agent.frontends import desktop_commands

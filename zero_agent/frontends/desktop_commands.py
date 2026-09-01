@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from zero_agent.bots import channel_control
+from zero_agent.bots.channel_config import ChannelConfigError
 
 _ROOT = Path(__file__).resolve().parents[1]
 _SETTINGS_PATH = _ROOT / "temp" / "desktop_settings.json"
@@ -276,6 +277,17 @@ def _channel_service_name(definition: channel_control.ChannelDefinition) -> str:
     return f"bots/{definition.module}"
 
 
+def _channel_config_error_category(error: ChannelConfigError) -> str:
+    message = str(error).lower()
+    if "parse" in message:
+        return "config source parse error"
+    if "path" in message:
+        return "config source path error"
+    if "bots section" in message:
+        return "config source structure error"
+    return "config source error"
+
+
 def channel_statuses() -> list[dict]:
     """Return non-sensitive status metadata for every supported channel."""
     running = running_services(use_cache=False)
@@ -283,17 +295,26 @@ def channel_statuses() -> list[dict]:
     rows = []
     for definition in channel_control.channel_definitions():
         service_name = _channel_service_name(definition)
-        rows.append({
+        config_error = None
+        try:
+            configured = channel_control.channel_is_configured(definition)
+        except ChannelConfigError as exc:
+            configured = False
+            config_error = _channel_config_error_category(exc)
+        row = {
             "id": definition.id,
             "label": definition.label,
             "module": service_name,
             "source": definition.source,
-            "configured": channel_control.channel_is_configured(definition),
+            "configured": configured,
             "requiredKeys": list(definition.required_keys),
             "running": service_name in running,
             "pid": running.get(service_name),
             "linked": settings.get(definition.id, {}).get("linked", True),
-        })
+        }
+        if config_error:
+            row["configError"] = config_error
+        rows.append(row)
     return rows
 
 

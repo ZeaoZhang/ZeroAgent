@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
 from zero_agent.bots.common import (
     AgentBotMixin,
@@ -245,6 +246,34 @@ class TestCommonHelpers:
         keys = load_keys()
 
         assert keys["tg_allowed_users"] == ["1001", "1002"]
+
+    def test_config_example_documents_canonical_bot_schema(self):
+        root = Path(__file__).resolve().parents[1]
+        document = yaml.safe_load((root / "config.example.yaml").read_text(encoding="utf-8"))
+        bots = document["bots"]
+        expected_env_values = {
+            "tg_bot_token": "TG_BOT_TOKEN",
+            "discord_bot_token": "DISCORD_BOT_TOKEN",
+            "qq_app_id": "QQ_APP_ID",
+            "qq_app_secret": "QQ_APP_SECRET",
+            "fs_app_id": "FS_APP_ID",
+            "fs_app_secret": "FS_APP_SECRET",
+            "wecom_bot_id": "WECOM_BOT_ID",
+            "wecom_secret": "WECOM_SECRET",
+            "dingtalk_client_id": "DINGTALK_CLIENT_ID",
+            "dingtalk_client_secret": "DINGTALK_CLIENT_SECRET",
+        }
+
+        assert set(expected_env_values) | {"tg_allowed_users"} <= set(bots)
+        for key, env_name in expected_env_values.items():
+            assert bots[key] == f"${{{env_name}}}"
+        assert bots["tg_allowed_users"] == []
+
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        assert "ZA_BOT_CONFIG_PATH" in readme
+        assert "bots:" in readme
+        assert "扫码登录" in readme
+        assert "~/.wxbot/token.json" in readme
 
 
 # —— continue_cmd.py ——

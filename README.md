@@ -116,6 +116,13 @@ llm_backends:
     model: claude-sonnet-4-6
 ```
 
+`config.yaml` 可以同时包含 `llm_backends` 和可选的 `bots:` 配置。机器人配置也可以单独放在 `ZA_BOT_CONFIG_PATH` 指定的 YAML 或 JSON 文件中；相对路径以项目根目录为基准。环境变量始终覆盖文件中的机器人字段。
+
+`TG_ALLOWED_USERS` 通过环境变量传入时使用逗号分隔（例如 `1001,1002`）；示例中的空 YAML 列表仅在不启动 Telegram 渠道时有效。
+
+前端“渠道配置”弹窗只显示字段是否已配置，不会回显已有的 token、secret 等敏感值。可编辑字段留空会保留原值；由环境变量管理的字段不能在弹窗中修改。
+
+
 多后端示例:
 
 ```yaml
@@ -203,8 +210,10 @@ The Web UI and Tauri desktop app use the same static frontend under
 渠道控制设置：
 
 - 在桌面 Web UI 顶部打开“渠道设置”，可查看微信、企业微信、钉钉、QQ、飞书、Telegram、Discord 的配置和运行状态。
+- 打开渠道的“配置”弹窗可编辑文件管理的字段；环境变量管理的字段会标记为不可编辑，已有敏感值不会显示。
+- 微信使用“扫码登录”生成二维码；登录成功后凭据保存到 `~/.wxbot/token.json`，不会自动启动进程，必须再点击“运行”。
 - “运行”控制对应渠道进程的启动与停止；未配置必要凭据的渠道不能启动。
-- “连接 App”控制渠道是否把新的入站消息交给 ZeroAgent；关闭时保留渠道进程，但不会处理新消息，已有任务不会被取消。
+- “连接 App”仅控制本地是否把新的入站消息交给 ZeroAgent；关闭时保留渠道进程，但不会处理新消息，已有任务不会被取消。
 - 连接状态保存到 `temp/channel_settings.json`（可用 `ZA_CHANNEL_SETTINGS_PATH` 覆盖）；缺失或损坏的状态文件默认保持连接，兼容已有安装。
 
 ## 打包桌面 App

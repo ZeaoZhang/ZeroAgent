@@ -15,6 +15,17 @@ _SETTINGS_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
+class ChannelField:
+    """Editable credential metadata for one channel."""
+
+    key: str
+    label: str
+    kind: str
+    required: bool = False
+    env_name: str | None = None
+
+
+@dataclass(frozen=True)
 class ChannelDefinition:
     """Static metadata for one supported bot frontend."""
 
@@ -23,6 +34,7 @@ class ChannelDefinition:
     source: str
     module: str
     required_keys: tuple[str, ...]
+    config_fields: tuple[ChannelField, ...] = ()
 
 
 _CHANNELS = (
@@ -33,6 +45,22 @@ _CHANNELS = (
         "wecom",
         "wecom_app.py",
         ("wecom_bot_id", "wecom_secret"),
+        (
+            ChannelField("wecom_bot_id", "Bot ID", "text", True, "WECOM_BOT_ID"),
+            ChannelField("wecom_secret", "Secret", "secret", True, "WECOM_SECRET"),
+            ChannelField(
+                "wecom_welcome_message",
+                "Welcome Message",
+                "text",
+                env_name="WECOM_WELCOME_MESSAGE",
+            ),
+            ChannelField(
+                "wecom_allowed_users",
+                "Allowed Users",
+                "list",
+                env_name="WECOM_ALLOWED_USERS",
+            ),
+        ),
     ),
     ChannelDefinition(
         "dingtalk",
@@ -40,6 +68,28 @@ _CHANNELS = (
         "dingtalk",
         "dingtalk_app.py",
         ("dingtalk_client_id", "dingtalk_client_secret"),
+        (
+            ChannelField(
+                "dingtalk_client_id",
+                "Client ID",
+                "text",
+                True,
+                "DINGTALK_CLIENT_ID",
+            ),
+            ChannelField(
+                "dingtalk_client_secret",
+                "Client Secret",
+                "secret",
+                True,
+                "DINGTALK_CLIENT_SECRET",
+            ),
+            ChannelField(
+                "dingtalk_allowed_users",
+                "Allowed Users",
+                "list",
+                env_name="DINGTALK_ALLOWED_USERS",
+            ),
+        ),
     ),
     ChannelDefinition(
         "qq",
@@ -47,6 +97,16 @@ _CHANNELS = (
         "qq",
         "qq_app.py",
         ("qq_app_id", "qq_app_secret"),
+        (
+            ChannelField("qq_app_id", "App ID", "text", True, "QQ_APP_ID"),
+            ChannelField("qq_app_secret", "App Secret", "secret", True, "QQ_APP_SECRET"),
+            ChannelField(
+                "qq_allowed_users",
+                "Allowed Users",
+                "list",
+                env_name="QQ_ALLOWED_USERS",
+            ),
+        ),
     ),
     ChannelDefinition(
         "feishu",
@@ -54,13 +114,33 @@ _CHANNELS = (
         "feishu",
         "feishu_app.py",
         ("fs_app_id", "fs_app_secret"),
+        (
+            ChannelField("fs_app_id", "App ID", "text", True, "FS_APP_ID"),
+            ChannelField("fs_app_secret", "App Secret", "secret", True, "FS_APP_SECRET"),
+            ChannelField(
+                "fs_allowed_users",
+                "Allowed Users",
+                "list",
+                env_name="FS_ALLOWED_USERS",
+            ),
+        ),
     ),
     ChannelDefinition(
         "telegram",
         "Telegram",
         "telegram",
         "telegram_app.py",
-        ("tg_bot_token",),
+        ("tg_bot_token", "tg_allowed_users"),
+        (
+            ChannelField("tg_bot_token", "Bot Token", "secret", True, "TG_BOT_TOKEN"),
+            ChannelField(
+                "tg_allowed_users",
+                "Allowed Users",
+                "list",
+                True,
+                "TG_ALLOWED_USERS",
+            ),
+        ),
     ),
     ChannelDefinition(
         "discord",
@@ -68,6 +148,21 @@ _CHANNELS = (
         "discord",
         "discord_app.py",
         ("discord_bot_token",),
+        (
+            ChannelField(
+                "discord_bot_token",
+                "Bot Token",
+                "secret",
+                True,
+                "DISCORD_BOT_TOKEN",
+            ),
+            ChannelField(
+                "discord_allowed_users",
+                "Allowed Users",
+                "list",
+                env_name="DISCORD_ALLOWED_USERS",
+            ),
+        ),
     ),
 )
 _CHANNELS_BY_ID = {definition.id: definition for definition in _CHANNELS}
@@ -183,12 +278,23 @@ def _wechat_token_present() -> bool:
     return isinstance(data, dict) and bool(str(data.get("bot_token") or "").strip())
 
 
+def _value_is_missing(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (bytes, bytearray)):
+        return not value.strip()
+    if isinstance(value, (dict, list, tuple, set, frozenset)):
+        return len(value) == 0
+    return False
+
+
 def missing_configuration(
     definition: ChannelDefinition,
     keys: Mapping | None = None,
 ) -> tuple[str, ...]:
     """Return names of required values that are not configured."""
-
     if definition.id == "wechat":
         return () if _wechat_token_present() else ("wechat_bot_token",)
     if keys is None:
@@ -196,7 +302,7 @@ def missing_configuration(
 
         keys = load_keys()
     return tuple(
-        key for key in definition.required_keys if not str(keys.get(key) or "").strip()
+        key for key in definition.required_keys if _value_is_missing(keys.get(key))
     )
 
 
