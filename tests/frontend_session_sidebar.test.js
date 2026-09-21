@@ -133,7 +133,6 @@ const testExports = `
     deleteGroup,
     renderSessionList,
     toggleGroup,
-    getSessionTimeBucket: typeof getSessionTimeBucket === 'function' ? getSessionTimeBucket : null,
     sessionHasUserMessage: typeof sessionHasUserMessage === 'function' ? sessionHasUserMessage : null,
     compareSessionsByUpdatedAt: typeof compareSessionsByUpdatedAt === 'function' ? compareSessionsByUpdatedAt : null,
     setConfirmHook: (fn) => { showConfirmDialog = fn; },
@@ -174,7 +173,8 @@ async function testEmptySessionsAreNotShownInSidebar() {
 
   const rows = [];
   for (const section of list.children) {
-    for (const row of section.children[1]?.children || []) rows.push(row);
+    if (section.className === 'session-item') rows.push(section);
+    else for (const row of section.children[1]?.children || []) rows.push(row);
   }
   assert.deepEqual(rows.map(row => row.dataset.sessionId), [valid.id]);
 }
@@ -299,7 +299,7 @@ async function testSoleSession404RecoversWithNewRemoteSession() {
   assert.deepEqual(calls.map(call => call.method), ['session/replace', 'session/new']);
 }
 
-async function testRenderSessionListBucketsAndGroupActions() {
+async function testRenderSessionListFlatAndGroupActions() {
   resetState();
   state.leftDrawerCollapsed = false;
   state.rightDrawerCollapsed = false;
@@ -321,13 +321,16 @@ async function testRenderSessionListBucketsAndGroupActions() {
   assert.equal(group.className, 'session-group');
   assert.equal(group.children[1].children.length, 1);
   assert.equal(group.children[1].children[0].dataset.sessionId, grouped.id);
-  const allSections = list.children;
-  const headers = allSections.map(s => s.children[0]).filter(h => h && h.className && h.className.includes('session-group-header'));
-  assert.deepEqual(headers.map(header => header.children[1].textContent), ['Work', '今天', '昨天', '最近 7 天', '更早']);
-  const todaySection = allSections[1];
-  const todaySessions = todaySection.children[1];
-  assert.equal(todaySessions.children[0].dataset.sessionId, todayNewest.id);
-  assert.equal(todaySessions.children[1].dataset.sessionId, todayOld.id);
+  const allChildren = [...list.children];
+  const headers = allChildren
+    .filter(child => child.className === 'session-group')
+    .map(section => section.children[0]);
+  assert.deepEqual(headers.map(header => header.children[1].textContent), ['Work']);
+  assert.deepEqual(
+    allChildren.slice(1).map(item => item.dataset.sessionId),
+    [todayOld.id, todayNewest.id, yesterday.id, week.id, older.id],
+    'ungrouped sessions should render as one flat list without time sorting',
+  );
 
   context.window.zeroAgent = { rpc: async () => ({ ok: true, sessionIds: [grouped.id] }) };
   exported.setConfirmHook(async () => true);
@@ -361,7 +364,7 @@ async function testConcurrentDeletesSharePromise() {
   await first;
   assert.equal(calls, 1);
 }
-async function testGroupAssignmentAndTimeHelpers() {
+async function testGroupAssignmentAndSessionOrdering() {
   resetState();
   const session = { id: 'local-grouped', bridgeSessionId: 'bridge-grouped', title: 'Grouped', messages: [], groupId: null };
   state.sessions.set(session.id, session);
@@ -388,13 +391,8 @@ async function testGroupAssignmentAndTimeHelpers() {
   assert.equal(calls[2].params.sessionId, 'bridge-grouped');
   assert.equal(calls[2].params.groupId, null);
 
-  assert.equal(typeof exported.getSessionTimeBucket, 'function');
   assert.equal(typeof exported.compareSessionsByUpdatedAt, 'function');
   const now = new Date('2026-08-05T12:00:00').getTime();
-  assert.equal(exported.getSessionTimeBucket(now - 1_000, now), 'today');
-  assert.equal(exported.getSessionTimeBucket(now - 86400000, now), 'yesterday');
-  assert.equal(exported.getSessionTimeBucket(now - 3 * 86400000, now), 'week');
-  assert.equal(exported.getSessionTimeBucket(now - 8 * 86400000, now), 'older');
   assert.ok(exported.compareSessionsByUpdatedAt({ updatedAt: now }, { updatedAt: now - 1 }) < 0);
 }
 async function testCollapsibleSectionAndDragPayload() {
@@ -443,8 +441,8 @@ async function testGroupCreationUsesPersistedBridgeEntity() {
   await testSoleSessionUsesReplacementAndKeepsLocalContainer();
   await testSoleSession404RecoversWithNewRemoteSession();
   await testConcurrentDeletesSharePromise();
-  await testGroupAssignmentAndTimeHelpers();
-  await testRenderSessionListBucketsAndGroupActions();
+  await testGroupAssignmentAndSessionOrdering();
+  await testRenderSessionListFlatAndGroupActions();
   await testCollapsibleSectionAndDragPayload();
   await testGroupCreationUsesPersistedBridgeEntity();
   await testEmptySessionsAreNotShownInSidebar();

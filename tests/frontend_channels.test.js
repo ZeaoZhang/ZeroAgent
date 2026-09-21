@@ -271,6 +271,16 @@ globalThis.__testExports = {
       pid: 321,
       linked: true,
     },
+    {
+      id: 'wechat',
+      label: '微信',
+      module: 'bots/wechat_app.py',
+      configured: false,
+      requiredKeys: [],
+      running: false,
+      pid: null,
+      linked: true,
+    },
   ];
   t.state.channelStatuses = rows;
   t.renderChannelList();
@@ -280,6 +290,24 @@ globalThis.__testExports = {
   assert.match(channelList.innerHTML, /运行中/);
   assert.doesNotMatch(channelList.innerHTML, /tg_bot_token/);
   assert.doesNotMatch(channelList.innerHTML, /test-secret-value/);
+  assert.doesNotMatch(channelList.innerHTML, /连接 App/);
+  assert.doesNotMatch(channelList.innerHTML, /扫码登录/);
+  assert.doesNotMatch(
+    channelList.innerHTML,
+    /data-channel-action="linked"/,
+  );
+  assert.match(channelList.innerHTML, /连接状态[\s\S]*未连接/);
+  assert.match(
+    channelList.innerHTML,
+    /data-channel-id="wechat"[^>]+data-channel-action="running"[^>]+disabled>/,
+  );
+  rows[2].configured = true;
+  rows[2].linked = true;
+  t.renderChannelList();
+  assert.match(channelList.innerHTML, /连接状态[\s\S]*已连接/);
+  rows[2].linked = false;
+  t.renderChannelList();
+  assert.match(channelList.innerHTML, /连接状态[\s\S]*已断开/);
   assert.equal(
     t.channelErrorMessage({ status: 409, message: 'Telegram 未配置: tg_bot_token' }, '启动渠道'),
     '启动渠道失败：Telegram 未配置: tg_bot_token',
@@ -345,6 +373,13 @@ globalThis.__testExports = {
   await t.openChannelConfig('telegram');
   assert.equal(calls[0].method, 'channels/config');
   assert.equal(calls[0].params.channelId, 'telegram');
+  const configError = elements.get('channel-config-error');
+  assert.equal(configError.textContent, '');
+  assert.equal(
+    configError.classList.contains('hidden'),
+    true,
+    'an empty channel-config error must not render a red alert bar',
+  );
   const configForm = elements.get('channel-config-form');
   const configModal = elements.get('channel-config-modal');
   const fields = configForm.querySelectorAll('input, textarea');
@@ -426,6 +461,7 @@ globalThis.__testExports = {
   assert.equal(configModal.classList.contains('hidden'), false);
   assert.equal(tokenInput.value, 'unsaved-token');
   assert.ok(elements.get('channel-config-error').textContent);
+  assert.equal(elements.get('channel-config-error').classList.contains('hidden'), false);
 }
 
 Promise.all([adapterTests(), rendererTests()])

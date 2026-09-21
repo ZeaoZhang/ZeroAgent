@@ -2421,11 +2421,42 @@ def create_app(
     app.router.add_delete("/groups/{gid}", delete_group_handler)
     app.router.add_post("/path/open", path_open_handler)
 
-    # Serve static frontend (desktop/static/)
+    # Serve static frontend (desktop/static/). The Tauri WebView keeps an HTTP
+    # cache across app reinstalls, so each app navigation gets a fresh asset
+    # key and the document itself is explicitly non-cacheable.
     static_dir = APP_DIR / "desktop" / "static"
 
+    def frontend_cache_key(request: web.Request) -> str:
+        requested = (request.query.get("za_ui") or "").strip()
+        if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", requested):
+            return requested
+        files = (
+            static_dir / "index.html",
+            static_dir / "styles.css",
+            static_dir / "za-web.js",
+            static_dir / "app.js",
+        )
+        mtimes = [path.stat().st_mtime_ns for path in files if path.exists()]
+        return str(max(mtimes, default=0))
+
+    def version_frontend_assets(body: str, cache_key: str) -> str:
+        for attribute, asset in (
+            ("href", "styles.css"),
+            ("src", "vendor/marked.min.js"),
+            ("src", "za-web.js"),
+            ("src", "app.js"),
+        ):
+            pattern = rf'({attribute}="{re.escape(asset)})(?:\?[^" ]*)?(")'
+            body = re.sub(pattern, rf"\1?v={cache_key}\2", body)
+        return body
+
     async def index_handler(request):
-        return web.FileResponse(static_dir / "index.html")
+        body = (static_dir / "index.html").read_text(encoding="utf-8")
+        body = version_frontend_assets(body, frontend_cache_key(request))
+        response = web.Response(text=body, content_type="text/html")
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
 
     app.router.add_get("/", index_handler)
     app.router.add_static("/", static_dir, show_index=False)

@@ -232,20 +232,25 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  width: 100%;
   padding: 6px 8px;
+  border: 0;
+  background: transparent;
   font-size: 12px;
+  font-family: var(--font);
   font-weight: 600;
   color: var(--text-muted);
+  text-align: left;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   cursor: pointer;
   user-select: none;
-  transition: background 0.15s;
-  border-radius: var(--radius-sm);
+  appearance: none;
+  transition: color 0.15s;
 }
 
 .session-group-header:hover {
-  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .session-group-header .expand-icon {
@@ -279,23 +284,21 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  border-radius: var(--radius-sm);
-  background: transparent;
+  padding: 8px 4px;
   color: var(--text);
   font-size: 13px;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: color 0.15s, opacity 0.15s;
   position: relative;
 }
 
 .session-item:hover {
-  background: var(--bg-hover);
+  color: var(--text-muted);
 }
 
 .session-item.active {
-  background: var(--bg-active);
-  font-weight: 500;
+  color: var(--text);
+  font-weight: 600;
 }
 
 .session-item .session-dot {
@@ -367,7 +370,6 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
 
 .session-item .session-delete:hover,
 .session-item .session-delete:focus-visible {
-  background: var(--bg-active);
   color: var(--err);
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -1397,7 +1399,6 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
 
 .session-group-header .group-delete:hover,
 .session-group-header .group-delete:focus-visible {
-  background: var(--bg-active);
   color: var(--err);
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -1423,9 +1424,7 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
   font-size: 11px;
   font-weight: 500;
   color: var(--text-faint);
-  background: var(--bg-hover);
-  border-radius: 8px;
-  padding: 1px 7px;
+  padding: 1px 0 1px 4px;
 }
 
 
@@ -1846,6 +1845,46 @@ mark.search-highlight.active { background: #ff9800; color: #fff; }
 .channel-toggle input:disabled ~ span {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+.channel-link-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+  user-select: none;
+}
+
+.channel-link-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+}
+
+.channel-link-value .status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.channel-link-state.linked .channel-link-value {
+  color: var(--ok);
+}
+
+.channel-link-state.linked .status-dot {
+  background: var(--ok);
+}
+
+.channel-link-state.unlinked .channel-link-value {
+  color: var(--warn);
+}
+
+.channel-link-state.unlinked .status-dot,
+.channel-link-state.unconfigured .status-dot {
+  background: var(--warn);
 }
 
 .channel-settings-hint {

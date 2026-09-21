@@ -1056,22 +1056,6 @@ function compareSessionsByUpdatedAt(a, b) {
   return getSessionTimestamp(b) - getSessionTimestamp(a);
 }
 
-function getSessionTimeBucket(timestamp, now = Date.now()) {
-  const current = normalizeSessionTimestamp(now) || Date.now();
-  const ts = normalizeSessionTimestamp(timestamp) || current;
-  const age = current - ts;
-  if (isSameDay(ts, current)) return 'today';
-  if (isSameDay(ts, current - 86400000)) return 'yesterday';
-  if (age >= 0 && age < 7 * 86400000) return 'week';
-  return 'older';
-}
-
-function isSameDay(ts, refTs) {
-  const d = new Date(ts);
-  const r = new Date(refTs);
-  return d.getFullYear() === r.getFullYear() && d.getMonth() === r.getMonth() && d.getDate() === r.getDate();
-}
-
 function sessionHasUserMessage(sess) {
   return !!sess?.messages?.some(message => {
     if (!message || message.role !== 'user') return false;
@@ -1089,7 +1073,7 @@ function loadSessionGroups() {
 }
 
 
-// ─── Time helpers & render ────────────────────────────────────────────────
+// ─── Session list render ──────────────────────────────────────────────────
 function renderSessionList() {
   sessionListEl.innerHTML = '';
   const grouped = new Map();
@@ -1103,15 +1087,14 @@ function renderSessionList() {
       ungrouped.push(sess);
     }
   }
-  const byRecent = compareSessionsByUpdatedAt;
   const sorted = [...state.sessionGroups.entries()]
     .sort(([, a], [, b]) => (a.position ?? 0) - (b.position ?? 0));
   for (const [groupId, group] of sorted) {
-    const sessions = (grouped.get(groupId) || []).slice().sort(byRecent);
+    const sessions = grouped.get(groupId) || [];
     const g = { ...group, collapsed: isSectionCollapsed(groupId) ? true : !!group.collapsed };
     sessionListEl.appendChild(buildGroupElement(g, sessions));
   }
-  renderTimeBuckets(ungrouped, byRecent);
+  ungrouped.forEach(sess => sessionListEl.appendChild(createSessionItem(sess)));
   if (state.leftDrawerCollapsed) leftDrawer.classList.add('collapsed');
   if (state.rightDrawerCollapsed) rightDrawer.classList.add('collapsed');
 }
@@ -1193,7 +1176,7 @@ function buildGroupElement(group, sessions) {
   const onDelete = async () => {
     const confirmed = await showConfirmDialog({
       title: '删除分组',
-      message: `删除分组「${group.name}」后,其中的 ${sessions.length} 个会话将移回时间分组。`,
+      message: `删除分组「${group.name}」后,其中的 ${sessions.length} 个会话将移回会话列表。`,
       okLabel: '删除',
       danger: true,
     });
@@ -1237,35 +1220,6 @@ function toggleSectionCollapse(sectionId) {
   return saved[sectionId];
 }
 
-function renderTimeBuckets(sessions, sortFn) {
-  const buckets = [
-    { key: 'today', label: '今天' },
-    { key: 'yesterday', label: '昨天' },
-    { key: 'week', label: '最近 7 天' },
-    { key: 'older', label: '更早' },
-  ];
-  const byBucket = new Map();
-  for (const sess of sessions.slice().sort(sortFn)) {
-    const bucketKey = getSessionTimeBucket(getSessionTimestamp(sess));
-    if (!byBucket.has(bucketKey)) byBucket.set(bucketKey, []);
-    byBucket.get(bucketKey).push(sess);
-  }
-  for (const bucket of buckets) {
-    const items = byBucket.get(bucket.key);
-    if (!items || items.length === 0) continue;
-    const collapsed = isSectionCollapsed(bucket.key);
-    sessionListEl.appendChild(buildSessionSection(
-      {
-        id: bucket.key,
-        label: bucket.label,
-        collapsed,
-        count: items.length,
-        onToggle: () => { toggleSectionCollapse(bucket.key); renderSessionList(); },
-      },
-      items,
-    ));
-  }
-}
 function createSessionItem(sess) {
   const item = document.createElement('div');
   item.className = 'session-item' + (sess.id === state.activeId ? ' active' : '');
@@ -3275,6 +3229,12 @@ function channelRuntimeStatus(channel) {
   return { className: 'stopped', label: '已停止' };
 }
 
+function channelLinkStatus(channel) {
+  if (!channel.configured) return { className: 'unconfigured', label: '未连接' };
+  if (channel.linked !== false) return { className: 'linked', label: '已连接' };
+  return { className: 'unlinked', label: '已断开' };
+}
+
 function renderChannelList() {
   if (!channelListEl) return;
   const channels = Array.isArray(state.channelStatuses) ? state.channelStatuses : [];
@@ -3287,11 +3247,14 @@ function renderChannelList() {
     const busy = state.channelActionIds.has(channel.id);
     const runDisabled = busy || (!channel.configured && !channel.running);
     const required = channel.configured ? '配置已就绪' : '未配置必要凭据';
-    const wechatAction = channel.id === 'wechat'
-      ? `<button type="button" class="btn ghost channel-config-action"
-          data-channel-config-id="${escapeHtml(channel.id)}"
-          data-channel-login="wechat">扫码登录</button>`
-      : '';
+    const linkStatus = channelLinkStatus(channel);
+    const linkControl = `<div class="channel-link-state ${linkStatus.className}" role="status"
+        aria-label="连接状态：${linkStatus.label}">
+        <span>连接状态</span>
+        <span class="channel-link-value">
+          <span class="status-dot" aria-hidden="true"></span>${linkStatus.label}
+        </span>
+      </div>`;
     return `
       <article class="channel-card">
         <div class="channel-card-header">
@@ -3312,18 +3275,11 @@ function renderChannelList() {
               ${runDisabled ? 'disabled' : ''}>
             <span class="channel-switch" aria-hidden="true"></span>
           </label>
-          <label class="channel-toggle">
-            <span>连接 App</span>
-            <input type="checkbox" data-channel-id="${escapeHtml(channel.id)}"
-              data-channel-action="linked" ${channel.linked ? 'checked' : ''}
-              ${busy ? 'disabled' : ''}>
-            <span class="channel-switch" aria-hidden="true"></span>
-          </label>
+          ${linkControl}
         </div>
         <div class="channel-config-actions">
           <button type="button" class="btn ghost channel-config-action"
             data-channel-config-id="${escapeHtml(channel.id)}">配置</button>
-          ${wechatAction}
         </div>
       </article>
     `;
@@ -3394,11 +3350,16 @@ async function handleChannelToggle(channelId, action, value) {
 
 
 function _clearChannelConfigError() {
-  if (channelConfigError) channelConfigError.textContent = '';
+  if (!channelConfigError) return;
+  channelConfigError.textContent = '';
+  channelConfigError.classList.add('hidden');
 }
 
 function _setChannelConfigError(message) {
-  if (channelConfigError) channelConfigError.textContent = message || '';
+  if (!channelConfigError) return;
+  const text = message || '';
+  channelConfigError.textContent = text;
+  channelConfigError.classList.toggle('hidden', !text);
 }
 
 function _clearElementChildren(element) {
@@ -4376,12 +4337,7 @@ const imagePreviews = document.getElementById('image-previews');
     const action = event.target?.closest?.('[data-channel-config-id]');
     if (!action) return;
     event.preventDefault();
-    const channelId = action.dataset.channelConfigId;
-    if (action.dataset.channelLogin === 'wechat') {
-      openChannelConfig(channelId).then(() => startWechatLogin());
-    } else {
-      openChannelConfig(channelId);
-    }
+    openChannelConfig(action.dataset.channelConfigId);
   });
   $('close-channel-config')?.addEventListener('click', closeChannelConfig);
   $('channel-config-cancel')?.addEventListener('click', closeChannelConfig);

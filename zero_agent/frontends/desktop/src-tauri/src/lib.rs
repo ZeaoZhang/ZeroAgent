@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
 #[cfg(windows)]
@@ -194,7 +194,14 @@ fn configured_bridge_token() -> (String, bool) {
 
 fn bridge_url_with_token(token: &str) -> tauri::Url {
     let encoded = urlencoding::encode(token);
-    tauri::Url::parse(&format!("http://{}:{}/#token={}", BRIDGE_HOST, BRIDGE_PORT, encoded)).unwrap()
+    let cache_buster = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    tauri::Url::parse(&format!(
+        "http://{}:{}/?za_ui={}#token={}",
+        BRIDGE_HOST, BRIDGE_PORT, cache_buster, encoded,
+    )).unwrap()
 }
 
 fn is_bridge_running() -> bool {

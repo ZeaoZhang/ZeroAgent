@@ -1179,6 +1179,21 @@ def test_web_bridge_and_tauri_share_desktop_static_frontend() -> None:
     assert tauri_conf["build"]["frontendDist"] == "../static"
 
 
+@pytest.mark.asyncio
+async def test_frontend_root_busts_webview_cache_for_each_app_load() -> None:
+    client = await _open_test_client()
+    try:
+        response = await client.get("/?za_ui=webview-test-123")
+        body = await response.text()
+        assert response.status == 200
+        assert response.headers["Cache-Control"].startswith("no-store")
+        assert 'styles.css?v=webview-test-123' in body
+        assert 'app.js?v=webview-test-123' in body
+        assert 'za-web.js?v=webview-test-123' in body
+    finally:
+        await client.close()
+
+
 def test_desktop_bridge_cli_opens_browser_but_tauri_disables_it() -> None:
     root = Path(__file__).resolve().parents[1]
     bridge_source = (root / "zero_agent" / "frontends" / "desktop_bridge.py").read_text(encoding="utf-8")
@@ -1192,6 +1207,7 @@ def test_desktop_bridge_cli_opens_browser_but_tauri_disables_it() -> None:
     assert "#token=" in bridge_source
     assert "ZA_DESKTOP_BRIDGE_NO_BROWSER" in bridge_source
     assert '.env("ZA_DESKTOP_BRIDGE_NO_BROWSER", "1")' in tauri_source
+    assert "?za_ui=" in tauri_source
 
 
 def test_desktop_bridge_resolves_zeroagent_mode_prompts() -> None:
