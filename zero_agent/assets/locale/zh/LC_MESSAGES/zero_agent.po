@@ -39,6 +39,9 @@ msgstr "今天："
 msgid "prompt.peer_hint"
 msgstr "[Peer] 用户提及其他会话/后台任务状态时: temp/model_responses/ (只找近期修改的文件尾部)"
 
+msgid "prompt.file_delivery"
+msgstr "发送图片等文件时，请在最终回复中加入 [FILE:相对路径]；仅提及路径不算发送。"
+
 msgid "weekday.monday"
 msgstr "周一"
 

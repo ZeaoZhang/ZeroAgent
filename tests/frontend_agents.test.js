@@ -85,7 +85,7 @@ async function appTests() {
   assert.match(agentList.children[0].innerHTML, /session-agent/);
   assert.match(agentList.children[0].innerHTML, /completed/);
   assert.match(agentList.children[0].innerHTML, /Runtime:/);
-  assert.equal(rightDrawer.classList.contains('collapsed'), false);
+  assert.equal(rightDrawer.classList.contains('collapsed'), true);
 
   const sessionB = t.createLocalSession('local-b', 'B', 'bridge-b');
   const calls = [];

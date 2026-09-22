@@ -896,6 +896,15 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
   height: 100%;
   object-fit: cover;
 }
+.assistant-local-image-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  object-fit: contain;
+}
 .image-preview-item .remove-img,
 .file-preview-item .remove-img {
   position: absolute;

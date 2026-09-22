@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import time
 
@@ -27,6 +28,7 @@ from zero_agent.bots.common import (
     redirect_log,
     require_runtime,
     split_text,
+    IMAGE_EXTS,
 )
 
 try:
@@ -233,6 +235,45 @@ class DingTalkApp(AgentBotMixin):
             await self._send_batch_message(
                 chat_id, "sampleMarkdown", {"text": part, "title": "Agent Reply"}
             )
+
+    async def send_file(self, chat_id, file_path, **_):
+        """Upload a local image and send it with DingTalk's image template."""
+        if os.path.splitext(file_path)[1].lower() not in IMAGE_EXTS:
+            await self.send_text(
+                chat_id, f"⚠️ 钉钉当前仅支持自动发送图片: {os.path.basename(file_path)}",
+            )
+            return
+        token = await self._get_access_token()
+        if not token:
+            return
+
+        def _upload():
+            with open(file_path, "rb") as media:
+                response = requests.post(
+                    "https://oapi.dingtalk.com/media/upload",
+                    params={"access_token": token, "type": "image"},
+                    files={"media": (os.path.basename(file_path), media)},
+                    timeout=60,
+                )
+            response.raise_for_status()
+            result = response.json()
+            if result.get("errcode", 0) not in (0, None):
+                raise RuntimeError(f"media upload errcode={result['errcode']}: {result.get('errmsg', '')}")
+            media_id = result.get("media_id") or result.get("mediaId")
+            if not media_id:
+                raise RuntimeError(f"media upload response missing media_id: {result}")
+            return media_id
+
+        try:
+            media_id = await asyncio.to_thread(_upload)
+            sent = await self._send_batch_message(
+                chat_id, "sampleImageMsg", {"photoURL": media_id},
+            )
+            if not sent:
+                raise RuntimeError("image message request failed")
+        except Exception as exc:
+            print(f"[DingTalk] failed to send image {file_path}: {exc}")
+            await self.send_text(chat_id, f"⚠️ 图片发送失败: {os.path.basename(file_path)}")
 
     async def on_message(self, content, sender_id, sender_name,
                          conversation_type=None, conversation_id=None):

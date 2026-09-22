@@ -37,7 +37,9 @@ from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.channel_config import ChannelConfigError
 from zero_agent.bots.common import load_keys
 from zero_agent.bots.common import channel_is_linked
+from zero_agent.bots.common import file_delivery_hint, resolve_output_files, runner_workspace_dir
 from zero_agent.bots.common import terminal_notice
+from zero_agent.bots.common import terminal_reply_text
 
 _KEYS = {}
 
@@ -554,7 +556,7 @@ def on_message(bot: WxBotClient, msg):
     def _handle():
         prompt = (
             text if text.startswith("/")
-            else f"If you need to show files to user, use [FILE:filepath] in your response.\n\n{text}"
+            else f"{file_delivery_hint(runner)}\n\n{text}"
         )
         dq = runner.put_task(prompt, source="wechat")
         _typing_stop = threading.Event()
@@ -572,10 +574,6 @@ def on_message(bot: WxBotClient, msg):
 
         threading.Thread(target=_keep_typing, daemon=True).start()
         result = ""
-        latest_chunk = ""
-        sent_chunk = ""
-        mi = 0
-        last_send = 0
         terminal = None
 
         def _wx_send(text):
@@ -592,33 +590,14 @@ def on_message(bot: WxBotClient, msg):
                 )
                 return False
 
-        def _send(show):
-            nonlocal mi, last_send
-            now = time.time()
-            if mi >= 9 or not show.strip():
-                return False
-            if mi and now - last_send < 6 * mi:
-                return None
-            if _wx_send(show[:3000]):
-                mi += 1
-                last_send = time.time()
-                return True
-            return False
-
         try:
             while True:
                 item = dq.get(timeout=300)
                 if item.get("type") == "chunk":
-                    current = str(item.get("text", ""))
-                    latest_chunk = latest_chunk + current if getattr(runner, "inc_out", False) else current
-                    if latest_chunk != sent_chunk:
-                        merged = _clean(latest_chunk)
-                        if _send(merged):
-                            sent_chunk = latest_chunk
                     continue
                 if item.get("type") == "terminal":
                     terminal = item
-                    result = str(item.get("text", ""))
+                    result = terminal_reply_text(item)
                     break
         except queue.Empty:
             terminal = {
@@ -637,19 +616,16 @@ def on_message(bot: WxBotClient, msg):
         if final_text:
             _wx_send(final_text[-3000:])
         _task_aborted.pop(uid, None)
-        files = re.findall(r"\[FILE:([^\]]+)\]", result) if status == "completed" else []
-        bad = {"filepath", "<filepath>", "path", "<path>", "file_path", "<file_path>", "..."}
-        files = [
-            f for f in files
-            if f.strip().lower() not in bad
-            and (f if os.path.isabs(f) else os.path.join(_TEMP_DIR, f)) not in media_paths
-        ]
-        for fpath in set(files):
-            if not os.path.isabs(fpath):
-                fpath = os.path.join(_TEMP_DIR, fpath)
+        files = resolve_output_files(
+            result,
+            workspace_dir=runner_workspace_dir(runner),
+            fallback_dirs=(_TEMP_DIR, MEDIA_DIR),
+        ) if status == "completed" else []
+        input_media = {os.path.realpath(path) for path in media_paths}
+        for fpath in files:
+            if os.path.realpath(fpath) in input_media:
+                continue
             try:
-                if not os.path.exists(fpath):
-                    raise FileNotFoundError(f"文件不存在: {fpath}")
                 ext = os.path.splitext(fpath)[1].lower()
                 sender = (
                     bot.send_video if ext in {".mp4", ".mov", ".m4v", ".webm"}

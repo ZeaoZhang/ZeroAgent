@@ -3,7 +3,7 @@
 使用 lark-oapi SDK (WebSocket 长连接)。适配 ZeroAgent 的 AgentRunner 接口。
 
 支持:
-- Rich card-based UI (collapsible turn panels)
+- Rich card-based UI (single task status and final answer)
 - 全媒体管线 (图片/文件/音视频上传下载)
 - 富消息解析 (post/interactive/share/system 等)
 - 配置检查模式 (--check / --check-agent)
@@ -32,11 +32,14 @@ from zero_agent.bots.common import (
     AgentBotMixin,
     channel_is_linked,
     ensure_single_instance,
-    FILE_HINT,
+    file_delivery_hint,
     bot_config_source,
     split_text,
     load_keys,
+    terminal_reply_text,
     terminal_notice,
+    resolve_output_files,
+    runner_workspace_dir,
 )
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -505,7 +508,12 @@ def _send_local_file(receive_id, file_path, receive_id_type="open_id"):
 
 
 def _send_generated_files(receive_id, raw_text, receive_id_type="open_id"):
-    for file_path in _extract_files(raw_text):
+    files = resolve_output_files(
+        raw_text,
+        workspace_dir=runner_workspace_dir(runner),
+        fallback_dirs=(MEDIA_DIR, TEMP_DIR),
+    )
+    for file_path in files:
         _send_local_file(receive_id, file_path, receive_id_type)
 
 
@@ -558,51 +566,17 @@ def _build_user_message(message):
 
 
 # —— Task Card ——
-def _fmt_tool_call(tc):
-    name = tc.get("tool_name", "?")
-    args = {k: v for k, v in (tc.get("args") or {}).items() if not k.startswith("_")}
-    return f"- `{name}`({json.dumps(args, ensure_ascii=False)[:200]})"
-
-
-def _build_step_detail(resp, tool_calls):
-    parts = []
-    thinking = (getattr(resp, "thinking", "") or "").strip() if resp else ""
-    if thinking:
-        parts.append(f"### 💭 Thinking\n{thinking}")
-    if tool_calls:
-        parts.append("### 🛠 Tool Calls\n" + "\n".join(_fmt_tool_call(tc) for tc in tool_calls))
-    content = _display_text((getattr(resp, "content", "") or "")).strip() if resp else ""
-    if content and content != "...":
-        parts.append(f"### 📝 Output\n{content}")
-    return "\n\n".join(parts)
-
-
 class _TaskCard:
-    _DETAIL_LIMIT = 8000
-
     def __init__(self, receive_id, rid_type):
         self.rid, self.rtype = receive_id, rid_type
-        self.steps: list = []
         self.status = "🤔 思考中..."
         self.final = None
         self.msg_id = None
         self.start_fallback_sent = False
         self.final_fallback_sent = False
 
-    def _step_panel(self, idx, summary, detail):
-        detail = detail or "_(无输出)_"
-        if len(detail) > self._DETAIL_LIMIT:
-            detail = detail[:self._DETAIL_LIMIT] + f"\n\n…(已截断,共 {len(detail)} 字符)"
-        return {
-            "tag": "collapsible_panel", "expanded": False,
-            "header": {"title": {"tag": "plain_text", "content": f"Turn {idx} · {summary}"}},
-            "elements": [{"tag": "markdown", "content": detail}],
-        }
-
     def _build(self):
         els = [{"tag": "markdown", "content": f"**{self.status}**"}]
-        for i, (s, d) in enumerate(self.steps, 1):
-            els.append(self._step_panel(i, s, d))
         if self.final:
             els += [{"tag": "hr"}, {"tag": "markdown", "content": self.final}]
         return _card_raw(els)
@@ -627,9 +601,10 @@ class _TaskCard:
         if not self._push():
             self._fallback_text("🤔 思考中...")
 
-    def step(self, summary, detail=""):
-        self.steps.append((summary, detail))
-        self.status = f"⏳ 工作中 · Turn {len(self.steps)}"
+    def step(self):
+        if self.status == "⏳ 正在处理...":
+            return
+        self.status = "⏳ 正在处理..."
         self._push()
 
     def done(self, text):
@@ -658,8 +633,7 @@ def _make_task_hook(card, task_id):
             if getattr(parent, "_fs_active_task_id", None) != task_id:
                 return
             if ctx.get("summary"):
-                detail = _build_step_detail(ctx.get("response"), ctx.get("tool_calls") or [])
-                card.step(ctx["summary"], detail)
+                card.step()
         except Exception as e:
             print(f"[fs hook] error: {e}")
     return hook
@@ -707,7 +681,11 @@ class FeishuApp(AgentBotMixin):
             await asyncio.to_thread(card.start)
             za._turn_end_hooks[hook_key] = _make_task_hook(card, task_id)
             za._fs_active_task_id = task_id
-            dq = runner.put_task(f"{FILE_HINT}\n\n{text}", source=self.source, images=images or None)
+            dq = runner.put_task(
+                f"{file_delivery_hint(runner)}\n\n{text}",
+                source=self.source,
+                images=images or None,
+            )
             start = time.time()
             while state["running"]:
                 try:
@@ -718,7 +696,7 @@ class FeishuApp(AgentBotMixin):
                     terminal = item
                     status = item.get("status")
                     if status == "completed":
-                        await asyncio.to_thread(_complete, item.get("text", ""))
+                        await asyncio.to_thread(_complete, terminal_reply_text(item))
                     else:
                         await asyncio.to_thread(card.terminal, terminal_notice(item))
                     break

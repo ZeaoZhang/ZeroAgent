@@ -39,6 +39,9 @@ msgstr "Today:"
 msgid "prompt.peer_hint"
 msgstr "[Peer] When the user mentions other sessions or background task status: temp/model_responses/ (only inspect the tails of recently modified files)"
 
+msgid "prompt.file_delivery"
+msgstr "To send images or other files, include [FILE:relative-path] in the final reply; mentioning a path alone does not send it."
+
 msgid "weekday.monday"
 msgstr "Mon"
 

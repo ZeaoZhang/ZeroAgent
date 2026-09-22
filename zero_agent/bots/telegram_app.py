@@ -27,18 +27,20 @@ from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import (
     channel_is_linked,
-    FILE_HINT,
+    file_delivery_hint,
     HELP_TEXT,
     TELEGRAM_MENU_COMMANDS,
     clean_reply,
     ensure_single_instance,
-    extract_files,
+    resolve_output_files,
+    runner_workspace_dir,
     format_restore,
     load_keys,
     redirect_log,
     require_runtime,
     split_text,
     extract_waiting_event,
+    terminal_reply_text,
     terminal_notice,
 )
 from zero_agent.bots.shared.continue_cmd import handle_frontend_command, reset_conversation
@@ -108,13 +110,6 @@ _MD_TOKEN_RE = re.compile(
     ),
     re.DOTALL,
 )
-_TURN_MARKER_RE = re.compile(r"^\*{0,2}LLM Running \(Turn (\d+)\) \.\.\.\*{0,2}\s*$")
-_CODE_FENCE_RE = re.compile(r"^\s*(`{3,})(.*)$")
-_TURN_SUMMARY_LIMIT = 160
-_TURN_SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL)
-_TURN_SUMMARY_SEARCH_STRIP_RE = re.compile(
-    r"`{3,}[\s\S]*?`{3,}|<thinking>[\s\S]*?</thinking>", re.DOTALL
-)
 
 
 # —— Markdown 工具 ——
@@ -163,57 +158,6 @@ def _markdown_safe_segments(text, limit=None):
     return parts
 
 
-def _line_complete(line):
-    return (line or "").endswith(("\n", "\r"))
-
-
-def _turn_marker_number(line):
-    match = _TURN_MARKER_RE.fullmatch((line or "").strip())
-    return int(match.group(1)) if match else None
-
-
-def _maybe_partial_turn_marker(line):
-    text = (line or "").strip().lstrip("*")
-    if not text:
-        return False
-    marker_head = "LLM Running (Turn "
-    return marker_head.startswith(text) or text.startswith(marker_head)
-
-
-def _maybe_partial_code_fence(line):
-    return bool(re.match(r"^\s*`{1,}[^`\r\n]*$", line or ""))
-
-
-def _extract_turn_summary(raw_text):
-    search_text = _TURN_SUMMARY_SEARCH_STRIP_RE.sub("", raw_text or "")
-    match = _TURN_SUMMARY_RE.search(search_text)
-    if not match:
-        return ""
-    summary = re.sub(r"\s+", " ", match.group(1)).strip()
-    if len(summary) > _TURN_SUMMARY_LIMIT:
-        summary = summary[:_TURN_SUMMARY_LIMIT - 3].rstrip() + "..."
-    return summary
-
-
-def _quote_tag(text):
-    safe_text = (text or "").strip().replace(_QUOTE_OPEN_TAG, "").replace(_QUOTE_CLOSE_TAG, "")
-    return f"{_QUOTE_OPEN_TAG}{safe_text}{_QUOTE_CLOSE_TAG}"
-
-
-def _inject_turn_summary(body, summary):
-    if not (body or "").strip() or not (summary or "").strip():
-        return body
-    lines = (body or "").splitlines()
-    if not lines or _turn_marker_number(lines[0]) is None:
-        return body
-    title = lines[0].strip()
-    rest = "\n".join(lines[1:]).strip()
-    summary_line = _quote_tag(summary)
-    if rest:
-        return f"{title}\n\n{summary_line}\n\n{rest}"
-    return f"{title}\n\n{summary_line}"
-
-
 def _resolve_files(paths):
     files, seen = [], set()
     for fpath in paths:
@@ -232,9 +176,13 @@ def _render_file_markers(text):
     return re.sub(r"\[FILE:([^\]]+)\]", repl, text or "").strip()
 
 
-def _files_from_text(text):
+def _files_from_text(text, workspace_dir=None):
     cleaned = clean_reply(text) if (text or "").strip() else ""
-    return _resolve_files(extract_files(cleaned))
+    return resolve_output_files(
+        cleaned,
+        workspace_dir=workspace_dir or runner_workspace_dir(runner),
+        fallback_dirs=(_TEMP_DIR,),
+    )
 
 
 async def _send_files(root_msg, files):
@@ -371,7 +319,7 @@ def _parse_ask_callback_data(data):
 
 
 def _build_text_prompt(text):
-    return f"{FILE_HINT}\n\n{text}"
+    return f"{file_delivery_hint(runner)}\n\n{text}"
 
 
 def _normalize_ask_menu_event(stored):
@@ -455,8 +403,9 @@ async def _send_ask_user_menu(root_msg, event):
 # —— Telegram 流式会话 ——
 
 class _TelegramStreamSession:
-    def __init__(self, root_msg):
+    def __init__(self, root_msg, workspace_dir=None):
         self.root_msg = root_msg
+        self.workspace_dir = workspace_dir or runner_workspace_dir(runner)
         self.private_chat = getattr(getattr(root_msg, "chat", None), "type", "") == ChatType.PRIVATE
         self.can_use_draft = self.private_chat
         self.draft_id = _make_draft_id()
@@ -564,10 +513,9 @@ class _TelegramStreamSession:
         self.active_display = ""
 
     async def _refresh(self, done, send_files):
-        summary = _extract_turn_summary(self.raw_text)
         cleaned = clean_reply(self.raw_text) if self.raw_text.strip() else ""
-        self.files = _files_from_text(cleaned)
-        body = _inject_turn_summary(_render_file_markers(cleaned), summary)
+        self.files = _files_from_text(cleaned, self.workspace_dir)
+        body = _render_file_markers(cleaned)
         if done and not body and self.files:
             body = "已生成附件"
         elif done and not body:
@@ -755,138 +703,27 @@ class _TelegramStreamSession:
             self.live_msg = await self._edit_text(self.live_msg, text, wait_retry=wait_retry)
 
 
-class _TelegramTurnStreamCoordinator:
-    def __init__(self, root_msg):
-        self.root_msg = root_msg
-        self.session = None
-        self.pending_line = ""
-        self.code_fence_len = 0
-        self.last_turn = 0
-
-    async def prime(self):
-        await self._ensure_session()
-
-    async def add_chunk(self, chunk):
-        if not chunk:
-            return
-        text = self.pending_line + chunk
-        self.pending_line = ""
-        for line in text.splitlines(keepends=True):
-            if _line_complete(line):
-                await self._process_line(line)
-            elif _maybe_partial_turn_marker(line) or _maybe_partial_code_fence(line):
-                self.pending_line = line
-            else:
-                await self._process_line(line)
-
-    async def finalize(self, done_text="", send_files=True):
-        await self._flush_pending_line()
-        if self.session is None:
-            if done_text:
-                await self._add_to_current(done_text)
-        elif not self.session.raw_text.strip() and done_text:
-            await self.session.finalize(done_text, send_files=False)
-            if send_files:
-                await _send_files_from_text(self.root_msg, done_text)
-            return
-        if self.session is not None:
-            await self.session.finalize(send_files=False)
-        if send_files:
-            await _send_files_from_text(self.root_msg, done_text)
-
-    async def finish_with_notice(self, notice):
-        await self._flush_pending_line()
-        await self._ensure_session()
-        await self.session.finish_with_notice(notice)
-
-    async def _ensure_session(self):
-        if self.session is None:
-            self.session = _TelegramStreamSession(self.root_msg)
-            await self.session.prime()
-
-    async def _start_turn(self, marker):
-        if self.session is not None and self.session.raw_text.strip():
-            await self.session.finalize(send_files=False)
-            self.session = None
-        await self._ensure_session()
-        await self.session.add_chunk(marker)
-
-    async def _add_to_current(self, text):
-        if not text:
-            return
-        await self._ensure_session()
-        await self.session.add_chunk(text)
-
-    async def _process_line(self, line):
-        turn_no = _turn_marker_number(line)
-        if self.code_fence_len == 0 and turn_no == self.last_turn + 1:
-            self.last_turn = turn_no
-            await self._start_turn(line)
-            return
-        await self._add_to_current(line)
-        self._update_code_fence(line)
-
-    async def _flush_pending_line(self):
-        if not self.pending_line:
-            return
-        line = self.pending_line
-        self.pending_line = ""
-        await self._add_to_current(line)
-
-    def _update_code_fence(self, line):
-        match = _CODE_FENCE_RE.match(line or "")
-        if not match:
-            return
-        fence_len = len(match.group(1))
-        if self.code_fence_len:
-            if fence_len >= self.code_fence_len:
-                self.code_fence_len = 0
-            return
-        self.code_fence_len = fence_len
-
-
-# —— 流式消费 ——
+# —— 任务结果消费 ——
 
 async def _stream(dq, msg):
-    stream = _TelegramTurnStreamCoordinator(msg)
+    stream = _TelegramStreamSession(msg, runner_workspace_dir(runner))
     await stream.prime()
-    previous_chunk_text = ""
     try:
         while True:
             try:
-                first = await asyncio.to_thread(dq.get, True, _QUEUE_WAIT_SECONDS)
+                item = await asyncio.to_thread(dq.get, True, _QUEUE_WAIT_SECONDS)
             except Q.Empty:
                 continue
-            items = [first]
-            try:
-                while True:
-                    items.append(dq.get_nowait())
-            except Q.Empty:
-                pass
-            terminal = None
-            for item in items:
-                if item.get("type") == "chunk":
-                    current = str(item.get("text", ""))
-                    if getattr(runner, "inc_out", False):
-                        chunk = current
-                    else:
-                        chunk = current[len(previous_chunk_text):] if current.startswith(previous_chunk_text) else current
-                        previous_chunk_text = current
-                    if chunk:
-                        await stream.add_chunk(chunk)
-                    continue
-                if item.get("type") == "terminal":
-                    terminal = item
-                    break
-            if terminal is None:
+            if item.get("type") != "terminal":
                 continue
+            terminal = item
             status = terminal.get("status")
             if status == "completed":
-                await stream.finalize(terminal.get("text", ""))
+                await stream.finalize(terminal_reply_text(terminal))
             elif status == "waiting":
                 event = _extract_ask_user_event(terminal)
                 if event:
-                    await stream.finalize(send_files=False)
+                    await stream.finish_with_notice("⏸️ 请从下方选项中选择")
                     await _send_ask_user_menu(msg, event)
                 else:
                     await stream.finish_with_notice(terminal_notice(terminal))
@@ -897,11 +734,10 @@ async def _stream(dq, msg):
         await stream.finish_with_notice("⏹️ 已停止")
     except RetryAfter as exc:
         print(f"[TG stream retry_after] {type(exc).__name__}: {exc}", flush=True)
-        if stream.session is not None:
-            stream.session._set_retry_after(exc)
+        stream._set_retry_after(exc)
     except Exception as exc:
         print(f"[TG stream error] {type(exc).__name__}: {exc}", flush=True)
-        if stream.session is not None and stream.session._is_retrying():
+        if stream._is_retrying():
             return
         try:
             await stream.finish_with_notice(f"❌ 输出失败: {exc}")

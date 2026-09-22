@@ -1828,6 +1828,10 @@ def _request_auth_tokens(request: web.Request) -> tuple[str, ...]:
         return (request.query.get("token", "").strip(),)
 
     candidates: list[str] = []
+    # <img> requests cannot attach Authorization headers. Allow the bridge
+    # token in the query only for the read-only, session-scoped image route.
+    if request.method == "GET" and re.fullmatch(r"/session/[^/]+/image", request.path):
+        candidates.append(request.query.get("token", "").strip())
     auth = request.headers.get("Authorization", "")
     scheme, _, value = auth.partition(" ")
     if scheme.lower() == "bearer" and value:
@@ -2254,6 +2258,48 @@ async def messages_handler(request):
     return json_ok(manager.messages(sid, after=after, limit=limit))
 
 
+async def session_image_handler(request):
+    """Serve a session's local raster images for Markdown previews."""
+    sid = request.match_info["sid"]
+    raw_path = str(request.query.get("path") or "").strip()
+    if not raw_path:
+        raise web.HTTPNotFound(text="image not found")
+
+    with manager.lock:
+        sess = manager.sessions.get(sid)
+        if sess is None:
+            raise web.HTTPNotFound(text="image not found")
+        cwd = sess.cwd or manager.workspace_dir
+
+    image_types = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+        ".avif": "image/avif",
+    }
+    try:
+        root = Path(cwd).expanduser().resolve(strict=True)
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        image_path = candidate.resolve(strict=True)
+        image_path.relative_to(root)
+        content_type = image_types[image_path.suffix.lower()]
+        if not image_path.is_file():
+            raise ValueError("not a regular image file")
+    except (OSError, RuntimeError, ValueError, KeyError):
+        raise web.HTTPNotFound(text="image not found")
+
+    response = web.FileResponse(image_path)
+    response.headers["Content-Type"] = content_type
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
 async def cancel_handler(request):
     sid = request.match_info["sid"]
     return json_ok(manager.cancel(sid))
@@ -2463,6 +2509,7 @@ def create_app(
     app.router.add_delete("/session/{sid}", delete_session_handler)
     app.router.add_post("/session/{sid}/prompt", prompt_handler)
     app.router.add_get("/session/{sid}/messages", messages_handler)
+    app.router.add_get("/session/{sid}/image", session_image_handler)
     app.router.add_post("/session/{sid}/cancel", cancel_handler)
     app.router.add_post("/session/{sid}/plan", plan_handler)
     app.router.add_post("/session/{sid}/plan/execute", plan_execute_handler)

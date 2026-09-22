@@ -4,7 +4,7 @@
 
 支持:
 - 文本/图片/文件消息处理
-- 流式回复 + turn-end hook 进度推送
+- 单条处理提示与最终答复
 - 媒体下载/上传
 - 终端 CLI (status/stop/exit)
 
@@ -24,24 +24,24 @@ import time
 import traceback
 from collections import deque
 from datetime import datetime
-from typing import Any, Callable, Dict, Optional
-
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import (
     AgentBotMixin,
     channel_is_linked,
-    FILE_HINT,
+    file_delivery_hint,
     build_done_text,
     clean_reply,
     ensure_single_instance,
-    extract_files,
     load_keys,
     public_access,
     redirect_log,
     require_runtime,
     split_text,
+    resolve_output_files,
+    runner_workspace_dir,
     strip_files,
+    terminal_reply_text,
     terminal_notice,
 )
 
@@ -81,15 +81,6 @@ def _tprint(*a, **kw):
         sys.__stdout__.flush()
 
 
-def _fmt_tool(tc):
-    name = tc.get("tool_name", "?")
-    args = {k: v for k, v in (tc.get("args") or {}).items() if not k.startswith("_")}
-    return f"{name}({str(args)[:120]})"
-
-
-TurnHookFn = Callable[[Dict[str, Any]], None]
-
-
 class WeComApp(AgentBotMixin):
     label = "WeCom"
     source = "wecom"
@@ -102,13 +93,6 @@ class WeComApp(AgentBotMixin):
         self.chat_frames: dict = {}
         self._seen = deque(maxlen=1000)
         self._stats = {"received": 0, "completed": 0}
-
-    # —— hook management ——
-    def _register_hook(self, key: str, fn: TurnHookFn) -> None:
-        za._turn_end_hooks[key] = fn
-
-    def _unregister_hook(self, key: str) -> None:
-        za._turn_end_hooks.pop(key, None)
 
     # —— frame accept ——
     def _accept(self, frame):
@@ -172,18 +156,26 @@ class WeComApp(AgentBotMixin):
             print(f"[WeCom] send_media error: {e}")
             await self.send_text(chat_id, f"📎 {os.path.basename(file_path)}（发送失败: {e}）")
 
-    async def send_done(self, chat_id, raw_text):
-        files = extract_files(raw_text)
+    async def send_done(self, chat_id, raw_text, **ctx):
+        files = resolve_output_files(
+            raw_text,
+            workspace_dir=runner_workspace_dir(self.runner),
+            fallback_dirs=(MEDIA_DIR, TEMP_DIR),
+        )
         if not files:
-            return await self.send_text(chat_id, build_done_text(raw_text))
+            return await self.send_text(
+                chat_id,
+                build_done_text(
+                    raw_text,
+                    workspace_dir=runner_workspace_dir(self.runner),
+                    fallback_dirs=(MEDIA_DIR, TEMP_DIR),
+                ),
+                **ctx,
+            )
         clean = clean_reply(strip_files(raw_text))
         if clean and clean != "...":
-            await self.send_text(chat_id, clean)
+            await self.send_text(chat_id, clean, **ctx)
         for fp in files:
-            if not os.path.isabs(fp) and not os.path.isfile(fp):
-                resolved = os.path.join(TEMP_DIR, fp)
-                if os.path.isfile(resolved):
-                    fp = resolved
             await self.send_media(chat_id, fp)
 
     # —— agent execution ——
@@ -192,32 +184,11 @@ class WeComApp(AgentBotMixin):
             return None
         state = {"running": True}
         self.user_tasks[chat_id] = state
-        loop = asyncio.get_running_loop()
-        hook_key = f"wecom_{chat_id}"
         terminal = None
-
-        def _on_turn(ctx):
-            try:
-                summary = ctx.get("summary")
-                if not summary:
-                    return
-                turn = ctx.get("turn", "?")
-                tools = ctx.get("tool_calls") or []
-                parts = [f"⏳ Turn {turn}: {summary}"]
-                if tools:
-                    parts.append(f"🛠 {', '.join(_fmt_tool(tc) for tc in tools[:3])}")
-                _tprint(f"[{_ts()}] {parts[0]}")
-                asyncio.run_coroutine_threadsafe(
-                    self.send_text(chat_id, "\n".join(parts)), loop,
-                )
-            except Exception as e:
-                print(f"[WeCom hook] {e}")
-                traceback.print_exc()
 
         try:
             await self.send_text(chat_id, "🤔 思考中...")
-            self._register_hook(hook_key, _on_turn)
-            dq = runner.put_task(f"{FILE_HINT}\n\n{text}", source=self.source)
+            dq = runner.put_task(f"{file_delivery_hint(runner)}\n\n{text}", source=self.source)
             while state["running"]:
                 try:
                     item = await asyncio.to_thread(dq.get, True, 1)
@@ -231,7 +202,7 @@ class WeComApp(AgentBotMixin):
                 status = item.get("status")
                 if status == "completed":
                     self._stats["completed"] += 1
-                    raw = item.get("text", "")
+                    raw = terminal_reply_text(item)
                     await self.send_done(chat_id, raw)
                     _tprint(f"[{_ts()}] ✅ Done ({chat_id}) — {len(raw)} 字")
                 else:
@@ -244,7 +215,6 @@ class WeComApp(AgentBotMixin):
             traceback.print_exc()
             await self.send_text(chat_id, f"❌ 错误: {e}")
         finally:
-            self._unregister_hook(hook_key)
             self.user_tasks.pop(chat_id, None)
 
     # —— message handlers ——

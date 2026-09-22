@@ -10,11 +10,13 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import sys
 import threading
 import time
 from collections import deque
+from pathlib import Path
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
@@ -27,10 +29,12 @@ from zero_agent.bots.common import (
     redirect_log,
     require_runtime,
     split_text,
+    IMAGE_EXTS,
 )
 
 try:
     import botpy
+    from botpy.http import Route
     from botpy.message import C2CMessage, GroupMessage
 except ImportError:
     print("Please install qq-botpy: pip install qq-botpy")
@@ -167,6 +171,56 @@ class QQApp(AgentBotMixin):
                     key: chat_id, "msg_type": 0, "content": part,
                     "msg_id": msg_id, "msg_seq": seq,
                 })
+
+    async def send_file(self, chat_id, file_path, *, msg_id=None, is_group=False, **_):
+        """Upload a local image and deliver it as a QQ rich-media message."""
+        if not self.client:
+            return
+        if Path(file_path).suffix.lower() not in IMAGE_EXTS:
+            await self.send_text(
+                chat_id, f"⚠️ QQ 当前仅支持自动发送图片: {os.path.basename(file_path)}",
+                msg_id=msg_id, is_group=is_group,
+            )
+            return
+
+        try:
+            image_data = await asyncio.to_thread(Path(file_path).read_bytes)
+            encoded = base64.b64encode(image_data).decode("ascii")
+            api = self.client.api
+            if is_group:
+                route = Route(
+                    "POST", "/v2/groups/{group_openid}/files", group_openid=chat_id,
+                )
+                upload_payload = {
+                    "group_openid": chat_id, "file_type": 1, "file_data": encoded,
+                }
+                send_media = api.post_group_message
+                target = {"group_openid": chat_id}
+            else:
+                route = Route(
+                    "POST", "/v2/users/{openid}/files", openid=chat_id,
+                )
+                upload_payload = {"openid": chat_id, "file_type": 1, "file_data": encoded}
+                send_media = api.post_c2c_message
+                target = {"openid": chat_id}
+
+            uploader = getattr(api, "post_group_base64file" if is_group else "post_c2c_base64file", None)
+            if uploader:
+                upload = await uploader(**{
+                    **target, "file_type": 1, "file_data": encoded,
+                })
+            else:
+                upload = await api._http.request(route, json=upload_payload)
+            await send_media(**{
+                **target, "msg_type": 7, "media": upload, "msg_id": msg_id,
+                "msg_seq": _next_msg_seq(),
+            })
+        except Exception as exc:
+            print(f"[QQ] failed to send image {file_path}: {exc}")
+            await self.send_text(
+                chat_id, f"⚠️ 图片发送失败: {os.path.basename(file_path)}",
+                msg_id=msg_id, is_group=is_group,
+            )
 
     async def on_message(self, data, is_group=False):
         """处理收到的消息.

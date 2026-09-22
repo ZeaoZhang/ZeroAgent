@@ -33,18 +33,20 @@ from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import (
     AgentBotMixin,
     channel_is_linked,
-    FILE_HINT,
+    file_delivery_hint,
     HELP_TEXT,
     clean_reply,
     ensure_single_instance,
-    extract_files,
     format_restore,
     load_keys,
     public_access,
     redirect_log,
     require_runtime,
+    resolve_output_files,
+    runner_workspace_dir,
     split_text,
     strip_files,
+    terminal_reply_text,
     terminal_notice,
 )
 from zero_agent.bots.shared.continue_cmd import handle_frontend_command, reset_conversation
@@ -59,15 +61,6 @@ try:
 except ImportError:
     print("Please install discord.py: pip install discord.py")
     sys.exit(1)
-
-
-def _extract_discord_progress(text):
-    """Return the newest concise <summary> from a streaming transcript."""
-    matches = re.findall(r"<summary>\s*(.*?)\s*</summary>", text or "", flags=re.DOTALL)
-    if not matches:
-        return ""
-    summary = re.sub(r"\s+", " ", matches[-1]).strip()
-    return summary[:120]
 
 
 def _strip_discord_transcript(text):
@@ -347,7 +340,11 @@ class DiscordApp(AgentBotMixin):
             chat_id: 会话标识.
             raw_text: Agent 的原始输出文本.
         """
-        files = [p for p in extract_files(raw_text) if os.path.exists(p)]
+        files = resolve_output_files(
+            raw_text,
+            workspace_dir=runner_workspace_dir(self._get_runner(chat_id)),
+            fallback_dirs=(MEDIA_DIR, _TEMP_DIR),
+        )
         body = _display_done_text(raw_text)
         if body and body != "...":
             await self.send_text(chat_id, body, **ctx)
@@ -443,11 +440,8 @@ class DiscordApp(AgentBotMixin):
         terminal = None
         try:
             await self.send_text(chat_id, "思考中...", **ctx)
-            dq = r.put_task(f"{FILE_HINT}\n\n{text}", source=self.source)
+            dq = r.put_task(f"{file_delivery_hint(r)}\n\n{text}", source=self.source)
             last_ping = time.time()
-            last_step = ""
-            step_no = 0
-            chunk_text = ""
             while state["running"]:
                 try:
                     item = await asyncio.to_thread(dq.get, True, 3)
@@ -457,20 +451,12 @@ class DiscordApp(AgentBotMixin):
                         last_ping = time.time()
                     continue
                 if item.get("type") == "chunk":
-                    current = str(item.get("text", ""))
-                    chunk_text = chunk_text + current if getattr(r, "inc_out", False) else current
-                    step = _extract_discord_progress(chunk_text)
-                    if step and step != last_step:
-                        step_no += 1
-                        await self.send_text(chat_id, f"步骤{step_no}: {step}", **ctx)
-                        last_step = step
-                        last_ping = time.time()
                     continue
                 if item.get("type") != "terminal":
                     continue
                 terminal = item
                 if item.get("status") == "completed":
-                    await self.send_done(chat_id, item.get("text", ""), **ctx)
+                    await self.send_done(chat_id, terminal_reply_text(item), **ctx)
                 else:
                     await self.send_text(chat_id, terminal_notice(item), **ctx)
                 break

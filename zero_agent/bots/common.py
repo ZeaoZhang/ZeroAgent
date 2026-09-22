@@ -8,14 +8,18 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from functools import lru_cache
 import glob
 import json
 import os
+from pathlib import Path
 import queue as Q
 import re
 import socket
 import sys
 import time
+
+from zero_agent.core.localization import PROMPT_FILE_DELIVERY, PromptLocalizer
 
 
 # —— 命令列表 ——
@@ -52,7 +56,9 @@ def build_help_text(commands=HELP_COMMANDS) -> str:
 
 
 HELP_TEXT = build_help_text()
-FILE_HINT = "If you need to show files to user, use [FILE:filepath] in your response."
+IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif"})
+_INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(<?([^\s)>]+)>?(?:\s+[^)]*)?\)")
 TAG_PATS = [r"<" + t + r">.*?</" + t + r">" for t in ("thinking", "summary", "tool_use", "file_content")]
 BOT_CONFIG_ENV = "ZA_BOT_CONFIG_PATH"
 
@@ -70,6 +76,18 @@ HISTORY_RE = re.compile(r"<history>\s*(.*?)\s*</history>", re.DOTALL)
 SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL)
 
 
+@lru_cache(maxsize=4)
+def _localized_file_delivery_hint(language: str) -> str:
+    return PromptLocalizer(language).text(PROMPT_FILE_DELIVERY)
+
+
+def file_delivery_hint(runner) -> str:
+    """Return the file-delivery instruction in the runner's prompt language."""
+    config = getattr(runner, "config", None)
+    language = getattr(config, "resolved_language", "en")
+    return _localized_file_delivery_hint(str(language or "en"))
+
+
 # —— 文本处理 ——
 
 def clean_reply(text: str) -> str:
@@ -82,6 +100,78 @@ def clean_reply(text: str) -> str:
 def extract_files(text: str) -> list:
     """从文本中提取 [FILE:path] 引用."""
     return re.findall(r"\[FILE:([^\]]+)\]", text or "")
+
+
+def extract_output_file_refs(text: str) -> list[str]:
+    """Extract inline-code and Markdown local-image references."""
+    text = text or ""
+    refs = []
+    refs.extend(
+        match.group(1).strip()
+        for match in _INLINE_CODE_RE.finditer(text)
+        if Path(match.group(1).strip()).suffix.lower() in IMAGE_EXTS
+    )
+    refs.extend(
+        match.group(1).strip()
+        for match in _MARKDOWN_IMAGE_RE.finditer(text)
+        if Path(match.group(1).strip()).suffix.lower() in IMAGE_EXTS
+    )
+    return refs
+
+
+def runner_workspace_dir(runner) -> str:
+    """Return an absolute workspace path for a runner, if available."""
+    config = getattr(runner, "config", None)
+    workspace = getattr(config, "workspace_dir", None)
+    return os.path.abspath(os.path.expanduser(str(workspace))) if workspace else os.getcwd()
+
+
+def resolve_output_files(
+    text: str,
+    *,
+    workspace_dir: str | os.PathLike | None = None,
+    fallback_dirs=(),
+) -> list[str]:
+    """Resolve output file references relative to a runner workspace and legacy roots."""
+    roots = []
+    workspace_root = None
+    if workspace_dir:
+        workspace_root = Path(os.path.abspath(os.path.expanduser(os.fspath(workspace_dir)))).resolve()
+        roots.append(os.fspath(workspace_root))
+    else:
+        workspace_root = Path.cwd()
+        roots.append(os.fspath(workspace_root))
+    roots.append(os.getcwd())
+    roots.extend(os.path.abspath(os.path.expanduser(os.fspath(root))) for root in fallback_dirs if root)
+
+    resolved, seen = [], set()
+    explicit_refs = extract_files(text)
+    refs = [(path, True) for path in explicit_refs]
+    refs.extend((path, False) for path in extract_output_file_refs(text))
+    for raw_path, explicit in refs:
+        raw_path = raw_path.strip().strip("<>").strip()
+        if not raw_path or re.match(r"^(?:https?|data|blob):", raw_path, re.IGNORECASE):
+            continue
+        candidate_path = Path(raw_path).expanduser()
+        candidates = [candidate_path] if candidate_path.is_absolute() else [Path(root) / candidate_path for root in roots]
+        for candidate in candidates:
+            try:
+                path = candidate.resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if not path.is_file():
+                continue
+            if not explicit:
+                try:
+                    path.relative_to(workspace_root)
+                except ValueError:
+                    continue
+            normalized = os.fspath(path)
+            if normalized not in seen:
+                resolved.append(normalized)
+                seen.add(normalized)
+            break
+    return resolved
 
 
 def strip_files(text: str) -> str:
@@ -101,12 +191,17 @@ def split_text(text: str, limit: int) -> list:
     return parts + ([text] if text else []) or ["..."]
 
 
-def build_done_text(raw_text: str) -> str:
+def build_done_text(raw_text: str, *, workspace_dir=None, fallback_dirs=()) -> str:
     """从 raw LLM 输出构建最终展示文本."""
-    files = [p for p in extract_files(raw_text) if os.path.exists(p)]
+    files = resolve_output_files(
+        raw_text, workspace_dir=workspace_dir, fallback_dirs=fallback_dirs,
+    )
     body = strip_files(clean_reply(raw_text))
     if files:
-        body = (body + "\n\n" if body else "") + "\n".join(f"生成文件: {p}" for p in files)
+        if extract_files(raw_text):
+            body = (body + "\n\n" if body else "") + "\n".join(
+                f"生成文件: {p}" for p in files
+            )
     return body or "..."
 
 
@@ -151,6 +246,18 @@ def terminal_notice(item: dict) -> str:
     if status == "failed":
         return f"❌ 任务失败（{reason}）"
     return f"❌ 未知终态 {status}（{reason}）"
+
+
+def terminal_reply_text(item: dict) -> str:
+    """Return the completed user-facing answer, excluding internal turn output."""
+    certificate = item.get("certificate") if isinstance(item, dict) else None
+    if isinstance(certificate, dict):
+        final_text = certificate.get("final_text")
+    else:
+        final_text = getattr(certificate, "final_text", None)
+    if isinstance(final_text, str) and final_text.strip():
+        return final_text
+    return str(item.get("text") or "") if isinstance(item, dict) else ""
 
 
 # —— 历史恢复 ——
@@ -214,8 +321,11 @@ def _native_first_user_line(prompt_text: str) -> str:
     text = (prompt_text or "").strip()
     if not text or "<history>" in text or text.startswith("### [WORKING MEMORY]"):
         return ""
-    if text.startswith(FILE_HINT):
-        text = text[len(FILE_HINT):].lstrip()
+    for language in ("zh", "en"):
+        hint = _localized_file_delivery_hint(language)
+        if text.startswith(hint):
+            text = text[len(hint):].lstrip()
+            break
     if "### 用户当前消息" in text:
         text = text.split("### 用户当前消息", 1)[-1].strip()
     return text
@@ -406,7 +516,23 @@ class AgentBotMixin:
 
     async def send_done(self, chat_id, raw_text, **ctx):
         """发送任务完成消息 (默认调用 send_text)."""
-        await self.send_text(chat_id, build_done_text(raw_text), **ctx)
+        workspace_dir = runner_workspace_dir(self.runner)
+        fallback_dirs = getattr(self, "output_file_fallback_dirs", ())
+        files = resolve_output_files(
+            raw_text, workspace_dir=workspace_dir, fallback_dirs=fallback_dirs,
+        )
+        await self.send_text(
+            chat_id,
+            build_done_text(raw_text, workspace_dir=workspace_dir, fallback_dirs=fallback_dirs),
+            **ctx,
+        )
+        send_file = getattr(self, "send_file", None)
+        if send_file:
+            for file_path in files:
+                try:
+                    await send_file(chat_id, file_path, **ctx)
+                except Exception as exc:
+                    print(f"[{self.label}] failed to send file {file_path}: {exc}")
 
     async def handle_command(self, chat_id, cmd, **ctx):
         if not channel_is_linked(self.source):
@@ -492,7 +618,7 @@ class AgentBotMixin:
         try:
             await self.send_text(chat_id, "思考中...", **ctx)
             dq = self.runner.put_task(
-                f"{FILE_HINT}\n\n{text}", source=self.source
+                f"{file_delivery_hint(self.runner)}\n\n{text}", source=self.source
             )
             last_ping = time.time()
             while state["running"]:
@@ -507,7 +633,7 @@ class AgentBotMixin:
                     continue
                 terminal = item
                 if item.get("status") == "completed":
-                    await self.send_done(chat_id, item.get("text", ""), **ctx)
+                    await self.send_done(chat_id, terminal_reply_text(item), **ctx)
                 else:
                     await self.send_text(chat_id, terminal_notice(item), **ctx)
                 break

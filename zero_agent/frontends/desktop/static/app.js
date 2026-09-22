@@ -22,7 +22,7 @@ const state = {
   sessionGroups: new Map(),  // groupId -> { name, sessionIds: [], collapsed: false }
   activeAgents: new Map(),   // sessionId -> [agent]
   leftDrawerCollapsed: localStorage.getItem('leftDrawerCollapsed') === 'true',
-  rightDrawerCollapsed: localStorage.getItem('rightDrawerCollapsed') !== 'false',
+  rightDrawerCollapsed: true,
 };
 const sessionDeletionPromises = new Map();
 const agentRefreshTokens = new Map();
@@ -170,6 +170,49 @@ if (typeof marked !== 'undefined') {
 }
 
 const ALLOWED_URI_RE = /^(https?:|mailto:|tel:|#|\/)/i;
+const LOCAL_IMAGE_ROOTS = new Set(['users', 'home', 'tmp', 'private', 'var', 'volumes', 'mnt', 'media', 'root', 'workspace']);
+
+function localImagePathFromSource(source) {
+  let value = String(source || '').trim();
+  if (!value || !/\.(?:png|jpe?g|gif|webp|bmp|avif)$/i.test(value)) return '';
+
+  if (/^file:/i.test(value)) {
+    try {
+      const fileUrl = new URL(value);
+      if (fileUrl.hostname && fileUrl.hostname !== 'localhost') return '';
+      value = decodeURIComponent(fileUrl.pathname);
+      if (window.zeroAgent?.platform === 'win32' && /^\/[a-z]:\//i.test(value)) {
+        value = value.slice(1);
+      }
+    } catch (_) {
+      return '';
+    }
+  } else if (/^[a-z]:[\\/]/i.test(value)) {
+    value = value.replaceAll('\\', '/');
+  } else {
+    if (/^(?:https?:|data:|blob:|\/\/)/i.test(value) || /^[a-z][a-z\d+.-]*:/i.test(value)) return '';
+    try { value = decodeURIComponent(value); } catch (_) { /* Keep literal percent characters. */ }
+  }
+
+  if (value.startsWith('/')) {
+    const firstPathPart = value.split('/')[1].toLowerCase();
+    if (!/^[a-z]:$/i.test(firstPathPart) && !LOCAL_IMAGE_ROOTS.has(firstPathPart)) return '';
+  }
+  return value.replace(/^\.\//, '');
+}
+
+function createLocalImagePreview(filePath) {
+  const sessionImageUrl = window.zeroAgent?.sessionImageUrl;
+  const imageUrl = sessionImageUrl?.(state.activeId, filePath);
+  if (!imageUrl) return null;
+  const image = document.createElement('img');
+  image.className = 'assistant-local-image-preview';
+  image.alt = filePath.split(/[\\/]/).pop() || 'Image preview';
+  image.loading = 'lazy';
+  image.src = imageUrl;
+  image.addEventListener('error', () => image.remove(), { once: true });
+  return image;
+}
 
 function renderMarkdown(text) {
   if (typeof marked === 'undefined') {
@@ -195,6 +238,19 @@ function sanitizeMarkdown(html) {
     if (blockedTags.has(el.tagName)) {
       removals.push(el);
       continue;
+    }
+    if (el.tagName === 'IMG') {
+      const localPath = localImagePathFromSource(el.getAttribute('src'));
+      const preview = localPath ? createLocalImagePreview(localPath) : null;
+      if (preview) {
+        el.setAttribute('src', preview.src);
+        continue;
+      }
+    }
+    if (el.tagName === 'CODE' && !el.parentElement?.closest('pre')) {
+      const localPath = localImagePathFromSource(el.textContent);
+      const preview = localPath ? createLocalImagePreview(localPath) : null;
+      if (preview) el.after(preview);
     }
     for (const attr of Array.from(el.attributes)) {
       const name = attr.name.toLowerCase();
@@ -1096,7 +1152,7 @@ function renderSessionList() {
   }
   ungrouped.forEach(sess => sessionListEl.appendChild(createSessionItem(sess)));
   if (state.leftDrawerCollapsed) leftDrawer.classList.add('collapsed');
-  if (state.rightDrawerCollapsed) rightDrawer.classList.add('collapsed');
+  rightDrawer.classList.toggle('collapsed', state.rightDrawerCollapsed);
 }
 
 function buildSessionSection(section, sessions) {
@@ -3997,7 +4053,6 @@ function toggleLeftDrawer() {
 
 function toggleRightDrawer() {
   state.rightDrawerCollapsed = !state.rightDrawerCollapsed;
-  localStorage.setItem('rightDrawerCollapsed', state.rightDrawerCollapsed);
   if (state.rightDrawerCollapsed) {
     rightDrawer.classList.add('collapsed');
   } else {
@@ -4096,17 +4151,7 @@ function renderAgentPanel() {
 
   if (agents.length === 0) {
     agentList.innerHTML = '<div class="empty-state-small"><span>No active agents</span></div>';
-    if (!state.rightDrawerCollapsed) {
-      rightDrawer.classList.add('collapsed');
-      state.rightDrawerCollapsed = true;
-    }
     return;
-  }
-
-  // Auto-show right drawer when agents exist
-  if (state.rightDrawerCollapsed) {
-    state.rightDrawerCollapsed = false;
-    rightDrawer.classList.remove('collapsed');
   }
 
   agentList.innerHTML = '';
