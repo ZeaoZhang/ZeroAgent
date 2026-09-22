@@ -13,6 +13,31 @@ from zero_agent.frontends import channel_onboarding
 from zero_agent.frontends.channel_onboarding import WechatQrManager
 
 
+def test_wechat_client_posts_updates_with_auth_headers(monkeypatch, tmp_path):
+    import zero_agent.bots.wechat_app as wechat_app
+
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"msgs": [], "get_updates_buf": "next"}
+
+    def fake_post(url, **kwargs):
+        captured.update(url=url, kwargs=kwargs)
+        return Response()
+
+    monkeypatch.setattr(wechat_app.requests, "post", fake_post)
+    client = WxBotClient(token="token-1", token_file=tmp_path / "token.json")
+
+    assert client.get_updates(timeout=1) == []
+    assert captured["url"] == f"{wechat_app.API}/ilink/bot/getupdates"
+    assert captured["kwargs"]["headers"]["Authorization"] == "Bearer token-1"
+    assert client._buf == "next"
+
+
 class FakeWechatClient:
     instances = []
 

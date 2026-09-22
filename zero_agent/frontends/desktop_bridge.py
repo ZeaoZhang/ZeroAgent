@@ -480,6 +480,9 @@ class AgentManager:
         self.config: Dict[str, Any] = _public_config_snapshot(base_config)
         self.sessions: Dict[str, Session] = {}
         self.active_session_id: Optional[str] = None
+        # The desktop model selection is inherited by newly-created sessions.
+        # Existing sessions retain their own override.
+        self.current_model_override: Optional[str] = None
         self.session_idempotency_results: OrderedDict[tuple[str, str], dict] = OrderedDict()
         self.groups: OrderedDict[str, SessionGroup] = OrderedDict()
         self.session_store = SessionStore(
@@ -488,6 +491,10 @@ class AgentManager:
         self.session_store.initialize()
         self._load_persisted_groups()
         self._load_persisted_sessions()
+        if self.active_session_id in self.sessions:
+            self.current_model_override = self.sessions[
+                self.active_session_id
+            ].model_override
         self._last_persisted_state = self._capture_session_state()
 
     def _persist_groups(self, *, raise_on_error: bool = False) -> None:
@@ -725,17 +732,29 @@ class AgentManager:
                 del sess.messages[message_count:]
                 raise
         return msg
-    def create_session(self, cwd: Optional[str] = None) -> Session:
+    def create_session(
+        self,
+        cwd: Optional[str] = None,
+        model_override: Optional[str] = None,
+    ) -> Session:
         sid = "sess-" + uuid.uuid4().hex[:12]
         os.makedirs(self.sessions_dir, exist_ok=True)
+        selected_model = (
+            str(model_override).strip()
+            if model_override is not None and str(model_override).strip()
+            else self.current_model_override
+        )
         sess = Session(
             id=sid,
             cwd=str(cwd or self.workspace_dir),
+            model_override=selected_model,
             log_path=_desktop_log_path(self.sessions_dir, sid),
         )
         with self.lock:
             self.sessions[sid] = sess
             self.active_session_id = sid
+            if selected_model:
+                self.current_model_override = selected_model
         emit_session_state(sess, "created")
         return sess
 
@@ -961,6 +980,7 @@ class AgentManager:
             replacement = Session(
                 id=replacement_id,
                 cwd=sess.cwd,
+                model_override=sess.model_override or self.current_model_override,
                 log_path=_desktop_log_path(self.sessions_dir, replacement_id),
             )
             was_active = previous_active == sid
@@ -1373,6 +1393,21 @@ class AgentManager:
                 if sess.agent is None:
                     sess.agent = self.make_agent(sess)
                 agent = sess.agent
+                # A runner may have been created by an earlier turn. Apply a
+                # newly selected model before reusing that runner.
+                desired_backend = sess.model_override or self.config.get(
+                    "default_backend",
+                )
+                za = getattr(agent, "_agent", None)
+                switch_backend = getattr(za, "switch_backend", None)
+                if za is not None and desired_backend and callable(switch_backend):
+                    active_backend = getattr(
+                        za,
+                        "_get_active_backend_name",
+                        lambda: None,
+                    )()
+                    if active_backend != desired_backend:
+                        switch_backend(str(desired_backend))
                 if self.sessions.get(sess.id) is not sess:
                     return None
                 if not hasattr(agent, "put_task"):
@@ -2166,7 +2201,18 @@ async def history_resume_handler(request):
 
 async def new_session_handler(request):
     data = await read_json(request)
-    sess = manager.create_session(cwd=data.get("cwd") or data.get("path"))
+    requested_model = data.get("modelName")
+    if requested_model is None:
+        requested_model = data.get("modelNo")
+    model_override = (
+        str(requested_model).strip()
+        if requested_model is not None and str(requested_model).strip()
+        else None
+    )
+    sess = manager.create_session(
+        cwd=data.get("cwd") or data.get("path"),
+        model_override=model_override,
+    )
     return json_ok({"ok": True, "sessionId": sess.id, "session": manager.snapshot(sess)}, status=201)
 
 
@@ -2263,11 +2309,22 @@ async def set_model_handler(request):
     """Set model override for a session"""
     sid = request.match_info["sid"]
     data = await read_json(request)
-    model_name = data.get("modelName") or data.get("modelNo")
+    model_name = data.get("modelName")
+    if model_name is None:
+        model_name = data.get("modelNo")
+    model_name = (
+        str(model_name).strip()
+        if model_name is not None and str(model_name).strip()
+        else None
+    )
 
-    sess = manager.get_session(sid)
-    sess.model_override = str(model_name) if model_name else None
-    sess.updated_at = time.time()
+    with manager.lock:
+        sess = manager.get_session(sid)
+        sess.model_override = model_name
+        manager.current_model_override = model_name
+        sess.updated_at = time.time()
+        if session_has_user_message(sess):
+            manager._persist_sessions()
 
     emit_session_state(sess, "model-changed")
     return json_ok({"ok": True, "sessionId": sid, "modelOverride": sess.model_override})

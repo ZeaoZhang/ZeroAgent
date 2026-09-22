@@ -120,7 +120,15 @@ web_execute_js script='{"cmd": "batch", "commands": [...]}'
 - ⭐**一键释放与登录**：bringToFront → mousePressed点任一字段(无需Released，一个释放全页) → 等500ms → 补input/change事件 → 点登录
 
 ## 验证码/页面视觉截图
-- ⭐首选CDP截图：`Page.captureScreenshot`(format:'png')→返回base64，无需前台/后台tab也行，全页高清
+- ⭐首选 `web_screenshot`：它通过 CDP `Page.captureScreenshot` 截取当前或指定标签页，并把 PNG 文件保存到 workspace，默认覆盖 `screenshots/browser.png`。
+- 调用顺序：页面切换/操作完成后 → `web_screenshot(save_to_file="screenshots/browser.png", switch_tab_id="TAB_ID")` → 检查返回的 `path` 和 `bytes` → 如需视觉判断，再把返回路径交给 `vision(image_path=path, prompt=...)`。
+- 默认 `capture_beyond_viewport=true` 用于整页截图；只需要当前视口时设为 `false`。截图不要求标签页前台，后台标签也可通过 `switch_tab_id` 截取。
+- 截图用于验证码、弹窗、布局或操作结果验证时，必须在动作完成后重新截图，不要只凭 `web_scan` 的 HTML 判断视觉状态。
+- 若环境尚未注册 `web_screenshot`，可用已有 CDP 透传验证：
+  ```text
+  web_execute_js script='{"cmd":"cdp","tabId":TAB_ID,"method":"Page.captureScreenshot","params":{"format":"png","captureBeyondViewport":true}}'
+  ```
+  该回退会返回 base64；需要保存成文件或交给 `vision` 时，仍应优先使用 `web_screenshot`，不要把整段 base64 继续塞回模型上下文。
 - 验证码canvas/img：JS `canvas.toDataURL()` 直接拿base64最干净
 
 ## simphtml与TMWebDriver调试

@@ -57,6 +57,25 @@ def test_bridge_tests_never_write_the_production_session_store(tmp_path) -> None
     assert (tmp_path / "sessions" / "sessions.sqlite3").exists()
 
 
+def test_new_desktop_sessions_inherit_the_current_model_selection() -> None:
+    manager = desktop_bridge.AgentManager()
+    manager.current_model_override = "alternate"
+
+    session = manager.create_session()
+
+    assert session.model_override == "alternate"
+
+
+def test_explicit_new_session_model_becomes_the_next_session_selection() -> None:
+    manager = desktop_bridge.AgentManager()
+
+    first = manager.create_session(model_override="alternate")
+    second = manager.create_session()
+
+    assert first.model_override == "alternate"
+    assert second.model_override == "alternate"
+
+
 def test_web_frontend_folds_tool_markers() -> None:
     root = Path(__file__).resolve().parents[1] / "zero_agent" / "frontends"
     app_source = (root / "desktop" / "static" / "app.js").read_text(encoding="utf-8")

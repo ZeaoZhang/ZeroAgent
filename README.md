@@ -43,7 +43,7 @@ pip install -e .
 # Web2 / Tauri UI
 pip install -e ".[ui]"
 
-# Browser control runtime (web_scan / web_execute_js)
+# Browser control runtime (web_scan / web_execute_js / web_screenshot)
 pip install -e ".[browser]"
 # Then load/connect the bundled browser extension from:
 # zero_agent/assets/tmwd_cdp_bridge
@@ -68,6 +68,7 @@ pip install -e ".[all-extras]"
 - `file_patch`
 - `web_scan`
 - `web_execute_js`
+- `web_screenshot`
 - `update_working_checkpoint`
 - `start_long_term_update`
 - `ask_user`

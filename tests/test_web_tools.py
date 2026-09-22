@@ -1,5 +1,7 @@
 """Tests for ZeroAgent browser tools."""
 
+import base64
+import json
 from importlib import resources
 
 from zero_agent.core.handler import BaseHandler
@@ -101,6 +103,67 @@ def test_web_execute_js_handler_uses_javascript_code_block(
     assert captured["script"] == "return location.href"
     data = outcome.data
     assert data["status"] == "success"
+
+
+def test_web_screenshot_decodes_cdp_payload_and_saves_png(tmp_path, monkeypatch) -> None:
+    captured = {}
+    encoded = base64.b64encode(b"fake-png").decode("ascii")
+
+    def fake_web_execute_js(script, switch_tab_id=None, no_monitor=False):
+        captured.update({
+            "script": script,
+            "switch_tab_id": switch_tab_id,
+            "no_monitor": no_monitor,
+        })
+        return {"status": "success", "js_return": {"data": encoded}, "tab_id": "7"}
+
+    monkeypatch.setattr(web, "web_execute_js", fake_web_execute_js)
+    target = tmp_path / "screenshots" / "browser.png"
+
+    result = web.web_screenshot(str(target), switch_tab_id="7")
+
+    assert result["status"] == "success"
+    assert result["path"] == str(target.resolve())
+    assert target.read_bytes() == b"fake-png"
+    assert captured["switch_tab_id"] == "7"
+    assert captured["no_monitor"] is True
+    command = json.loads(captured["script"])
+    assert command["method"] == "Page.captureScreenshot"
+    assert command["tabId"] == 7
+    assert command["params"]["captureBeyondViewport"] is True
+
+
+def test_web_screenshot_uses_the_current_controlled_tab_when_unspecified(
+    tmp_path, monkeypatch
+) -> None:
+    captured = {}
+    encoded = base64.b64encode(b"fake-png").decode("ascii")
+
+    def fake_web_execute_js(script, switch_tab_id=None, no_monitor=False):
+        captured["script"] = script
+        return {"status": "success", "js_return": {"data": encoded}}
+
+    monkeypatch.setattr(web, "web_execute_js", fake_web_execute_js)
+    result = web.web_screenshot(str(tmp_path / "browser.png"))
+
+    assert result["status"] == "success"
+    assert "tabId" not in json.loads(captured["script"])
+
+
+def test_web_screenshot_tool_defaults_to_workspace_path(tmp_path, mock_config, monkeypatch) -> None:
+    mock_config.workspace_dir = str(tmp_path)
+    monkeypatch.setattr(
+        web,
+        "web_screenshot",
+        lambda path, **kwargs: {"status": "success", "path": path, **kwargs},
+    )
+    registry = ToolRegistry.with_builtins(mock_config)
+    handler = BaseHandler(registry=registry, cwd=str(tmp_path))
+
+    outcome = _exhaust(handler.dispatch("web_screenshot", {}, MockResponse(content="")))
+
+    assert outcome.data["status"] == "success"
+    assert outcome.data["path"] == str(tmp_path / "screenshots" / "browser.png")
 
 
 def test_web_execute_js_handler_missing_script_returns_error(

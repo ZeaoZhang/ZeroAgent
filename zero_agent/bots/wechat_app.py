@@ -139,6 +139,30 @@ class WxBotClient:
         }
         self._write_token_data(data)
 
+    def _post(self, endpoint, body, timeout=15):
+        """Call an iLink bot endpoint with the current bot token."""
+        data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "AuthorizationType": "ilink_bot_token",
+            "Content-Length": str(len(data)),
+            "X-WECHAT-UIN": _uin(),
+            "iLink-App-Id": ILINK_APP_ID,
+            "iLink-App-ClientVersion": str(ILINK_APP_CLIENT_VERSION),
+            "User-Agent": UA,
+        }
+        token = (self.token or "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        response = requests.post(
+            f"{API}/{endpoint}",
+            data=data,
+            headers=headers,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def request_qr(self) -> tuple[str, str]:
         response = requests.get(
             f"{API}/ilink/bot/get_bot_qrcode",

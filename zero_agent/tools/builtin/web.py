@@ -8,7 +8,10 @@ web_execute_js: 在浏览器中执行 JavaScript 并捕获结果.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import os
 import time
 from importlib import resources
 from typing import Any, Dict, Generator, Optional
@@ -238,6 +241,64 @@ def web_execute_js(
         return {"status": "error", "msg": format_error(e)}
 
 
+def web_screenshot(
+    save_to_file: str,
+    switch_tab_id: Optional[str] = None,
+    image_format: str = "png",
+    capture_beyond_viewport: bool = True,
+) -> dict:
+    """Capture the selected browser tab through CDP and save an image file."""
+    image_format = str(image_format or "png").lower().strip()
+    if image_format not in {"png", "jpeg", "webp"}:
+        return {"status": "error", "msg": f"unsupported screenshot format: {image_format}"}
+
+    tab_id: Any = switch_tab_id
+    if switch_tab_id not in (None, "") and str(switch_tab_id).isdigit():
+        tab_id = int(switch_tab_id)
+    command = {
+        "cmd": "cdp",
+        "method": "Page.captureScreenshot",
+        "params": {
+            "format": image_format,
+            "captureBeyondViewport": bool(capture_beyond_viewport),
+        },
+    }
+    # Omitting tabId lets the extension fill in the current controlled tab.
+    # Sending null would prevent that fallback in the websocket bridge.
+    if tab_id is not None:
+        command["tabId"] = tab_id
+    script = json.dumps(command, ensure_ascii=False)
+    result = web_execute_js(script, switch_tab_id=switch_tab_id, no_monitor=True)
+    if result.get("status") != "success":
+        return result
+
+    payload = result.get("js_return")
+    encoded = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(encoded, str) or not encoded.strip():
+        return {"status": "error", "msg": "browser returned no screenshot data"}
+    if encoded.startswith("data:") and "," in encoded:
+        encoded = encoded.split(",", 1)[1]
+    try:
+        image_bytes = base64.b64decode("".join(encoded.split()), validate=True)
+    except (ValueError, binascii.Error) as exc:
+        return {"status": "error", "msg": f"invalid screenshot data: {exc}"}
+
+    try:
+        os.makedirs(os.path.dirname(save_to_file) or ".", exist_ok=True)
+        with open(save_to_file, "wb") as output:
+            output.write(image_bytes)
+    except OSError as exc:
+        return {"status": "error", "msg": f"cannot save screenshot: {exc}"}
+
+    return {
+        "status": "success",
+        "path": os.path.abspath(save_to_file),
+        "format": image_format,
+        "bytes": len(image_bytes),
+        "tab_id": result.get("tab_id"),
+    }
+
+
 def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
     """注册浏览器工具到 ToolRegistry.
 
@@ -343,6 +404,49 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         category="browser",
     ))
 
+    registry.register(ToolDefinition(
+        name="web_screenshot",
+        description=_t(
+            "使用浏览器 CDP 截取当前或指定标签页，并保存为图片文件；适合截图后交给 vision 分析。默认覆盖 workspace/screenshots/browser.png。",
+            "Capture the current or selected tab through browser CDP and save an image file for vision analysis. "
+            "Defaults to workspace/screenshots/browser.png and overwrites it.",
+            lang,
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "save_to_file": {
+                    "type": "string",
+                    "description": _t(
+                        "workspace 下的图片路径，默认 screenshots/browser.png",
+                        "Image path under workspace; defaults to screenshots/browser.png",
+                        lang,
+                    ),
+                },
+                "switch_tab_id": {
+                    "type": "string",
+                    "description": _t("可选标签页 ID", "Optional browser tab ID", lang),
+                },
+                "image_format": {
+                    "type": "string",
+                    "enum": ["png", "jpeg", "webp"],
+                    "description": _t("图片格式，默认 png", "Image format; defaults to png", lang),
+                },
+                "capture_beyond_viewport": {
+                    "type": "boolean",
+                    "description": _t(
+                        "是否截取视口外页面内容，默认 true",
+                        "Whether to capture content beyond the viewport; defaults to true",
+                        lang,
+                    ),
+                },
+            },
+        },
+        handler=_make_web_screenshot_handler(config),
+        evidence_kind="web",
+        category="browser",
+    ))
+
 
 def _make_web_scan_handler(config: AgentConfig):
     """创建 web_scan 的 ToolHandler 适配器."""
@@ -438,4 +542,24 @@ def _make_web_execute_js_handler(config: AgentConfig):
             result,
             action=StepAction.CONTINUE,
         )
+    return _handler
+
+
+def _make_web_screenshot_handler(config: AgentConfig):
+    """Create the screenshot tool adapter and resolve paths inside workspace."""
+    def _handler(
+        args: Dict[str, Any],
+        _response: Any,
+        _handler_obj: Any,
+    ) -> Generator[str, None, dict | StepOutcome]:
+        relative_path = str(args.get("save_to_file") or "screenshots/browser.png")
+        save_path = os.path.join(config.workspace_dir, relative_path)
+        result = web_screenshot(
+            save_path,
+            switch_tab_id=args.get("switch_tab_id") or args.get("tab_id"),
+            image_format=str(args.get("image_format") or "png"),
+            capture_beyond_viewport=bool(args.get("capture_beyond_viewport", True)),
+        )
+        yield f"浏览器截图结果:\n{json.dumps(result, ensure_ascii=False)}\n"
+        return StepOutcome(result, action=StepAction.CONTINUE)
     return _handler

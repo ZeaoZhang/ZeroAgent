@@ -902,7 +902,7 @@ function isUntitledSessionTitle(title) {
   return !title || /^new\s+chat$/i.test(String(title).trim());
 }
 
-function createLocalSession(id, title, bridgeSessionId = id) {
+function createLocalSession(id, title, bridgeSessionId = id, modelOverride = null) {
   const now = Date.now();
   const sess = {
     id, bridgeSessionId, title: title || 'New chat', messages: [], cwd: null,
@@ -913,7 +913,7 @@ function createLocalSession(id, title, bridgeSessionId = id) {
     untitled: isUntitledSessionTitle(title),
     config: { ...state.defaultConfig },
     diagnostics: [],
-    modelOverride: null,
+    modelOverride: modelOverride ?? null,
     tokenUsage: {
       input: 0, output: 0, total: 0, limit: 200000,
       cacheRead: 0, cacheCreation: 0, cacheMiss: 0,
@@ -1547,12 +1547,25 @@ async function newSession() {
   let createdSess = null;
   try {
     const cwd = await getCwd();
-    const res = await window.zeroAgent.rpc('session/new', { cwd, mcp_servers: [] });
+    const activeModel = state.sessions.get(state.activeId)?.modelOverride || null;
+    const res = await window.zeroAgent.rpc('session/new', {
+      cwd,
+      mcp_servers: [],
+      ...(activeModel ? { modelName: activeModel } : {}),
+    });
     if (res.error) throw new Error(typeof res.error === 'string' ? res.error : (res.error.message || JSON.stringify(res.error)));
     const bridgeSessionId = res.sessionId;
     const localSessionId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    createdSess = createLocalSession(localSessionId, 'New chat', bridgeSessionId);
-    createdSess.cwd = cwd;
+    const snapshot = res.session || {};
+    createdSess = createLocalSession(
+      localSessionId,
+      snapshot.title || 'New chat',
+      bridgeSessionId,
+      snapshot.modelOverride ?? activeModel,
+    );
+    createdSess.cwd = snapshot.cwd || cwd;
+    if (snapshot.createdAt) createdSess.createdAt = Number(snapshot.createdAt);
+    if (snapshot.updatedAt) createdSess.updatedAt = Number(snapshot.updatedAt);
     setActiveSession(localSessionId);
   } catch (e) {
     showError('Failed to create session: ' + e.message);
@@ -3223,16 +3236,12 @@ async function saveSettings() {
 }
 
 // ─── Channel Settings ────────────────────────────────────────────────────
-function channelRuntimeStatus(channel) {
+function channelConnectionStatus(channel) {
   if (!channel.configured) return { className: 'unconfigured', label: '未配置' };
-  if (channel.running) return { className: 'running', label: '运行中' };
-  return { className: 'stopped', label: '已停止' };
-}
-
-function channelLinkStatus(channel) {
-  if (!channel.configured) return { className: 'unconfigured', label: '未连接' };
-  if (channel.linked !== false) return { className: 'linked', label: '已连接' };
-  return { className: 'unlinked', label: '已断开' };
+  if (channel.running && channel.linked !== false) {
+    return { className: 'connected', label: '已连接' };
+  }
+  return { className: 'configured', label: '已配置' };
 }
 
 function renderChannelList() {
@@ -3243,18 +3252,9 @@ function renderChannelList() {
     return;
   }
   channelListEl.innerHTML = channels.map((channel) => {
-    const status = channelRuntimeStatus(channel);
+    const status = channelConnectionStatus(channel);
     const busy = state.channelActionIds.has(channel.id);
     const runDisabled = busy || (!channel.configured && !channel.running);
-    const required = channel.configured ? '配置已就绪' : '未配置必要凭据';
-    const linkStatus = channelLinkStatus(channel);
-    const linkControl = `<div class="channel-link-state ${linkStatus.className}" role="status"
-        aria-label="连接状态：${linkStatus.label}">
-        <span>连接状态</span>
-        <span class="channel-link-value">
-          <span class="status-dot" aria-hidden="true"></span>${linkStatus.label}
-        </span>
-      </div>`;
     return `
       <article class="channel-card">
         <div class="channel-card-header">
@@ -3266,7 +3266,6 @@ function renderChannelList() {
             <span class="status-dot"></span>${status.label}
           </span>
         </div>
-        <div class="channel-card-meta">${required}</div>
         <div class="channel-card-controls">
           <label class="channel-toggle">
             <span>运行</span>
@@ -3275,7 +3274,6 @@ function renderChannelList() {
               ${runDisabled ? 'disabled' : ''}>
             <span class="channel-switch" aria-hidden="true"></span>
           </label>
-          ${linkControl}
         </div>
         <div class="channel-config-actions">
           <button type="button" class="btn ghost channel-config-action"
@@ -3641,7 +3639,12 @@ async function hydrateBridgeSessions(listRes) {
     const messages = msgRes?.messages || [];
     if (!sessionHasUserMessage({ messages })) continue;
     const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const sess = createLocalSession(localId, bSess.title || 'Restored', sid);
+    const sess = createLocalSession(
+      localId,
+      bSess.title || 'Restored',
+      sid,
+      bSess.modelOverride ?? null,
+    );
     replaceSessionAgents(sess, bSess.subAgents);
     if (bSess.createdAt) sess.createdAt = Number(bSess.createdAt);
     if (bSess.updatedAt) sess.updatedAt = Number(bSess.updatedAt);

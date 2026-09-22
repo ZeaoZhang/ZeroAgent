@@ -175,6 +175,7 @@ class TestToolRegistry:
             "file_write",
             "web_scan",
             "web_execute_js",
+            "web_screenshot",
             "update_working_checkpoint",
             "ask_user",
             "start_long_term_update",

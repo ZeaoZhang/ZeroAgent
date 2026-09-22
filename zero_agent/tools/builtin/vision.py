@@ -26,9 +26,9 @@ def register_vision_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         ToolDefinition(
             name="vision",
             description=_t(
-                "使用已配置的视觉模型理解图片。DeepSeek Flash 不支持视觉；backend 留空时使用默认 backend。",
+                "使用视觉模型理解图片。未指定 backend 时优先使用当前会话模型；当前模型不支持视觉时再回退到已配置的视觉 backend。",
                 "Understand an image with a configured vision backend. DeepSeek Flash is text-only; "
-                "omit backend to use the configured default backend.",
+                "when backend is omitted, prefer the active session backend and fall back to a configured vision backend only when needed.",
                 lang,
             ),
             parameters={
@@ -62,6 +62,31 @@ def register_vision_tools(registry: ToolRegistry, config: AgentConfig) -> None:
 
 
 def _make_vision_handler(config: AgentConfig):
+    def _active_backend_name(handler: Any, sessions: dict[str, Any]) -> str:
+        """Resolve the backend currently selected by the running agent."""
+        parent = getattr(handler, "parent", None)
+        active_name_getter = getattr(parent, "_get_active_backend_name", None)
+        if callable(active_name_getter):
+            active_name = active_name_getter()
+            if active_name in config.llm_backends:
+                return str(active_name)
+        active_client = getattr(parent, "client", None) or getattr(handler, "client", None)
+        if active_client is not None:
+            active_config = getattr(active_client, "config", None)
+            for name, session in sessions.items():
+                if session is active_client:
+                    return name
+                session_config = getattr(session, "config", None)
+                if active_config is not None and session_config is active_config:
+                    return name
+            client_name = getattr(active_client, "name", None)
+            if client_name in config.llm_backends:
+                return str(client_name)
+            config_name = getattr(active_config, "name", None)
+            if config_name in config.llm_backends:
+                return str(config_name)
+        return config.default_backend
+
     def _handler(
         args: Dict[str, Any],
         _response: Any,
@@ -72,9 +97,11 @@ def _make_vision_handler(config: AgentConfig):
         if requested_backend:
             backend_name = str(requested_backend)
         else:
-            default_config = config.llm_backends.get(config.default_backend)
+            sessions = getattr(getattr(handler, "parent", None), "_sessions", {})
+            backend_name = _active_backend_name(handler, sessions)
+            default_config = config.llm_backends.get(backend_name)
             if default_config is not None and default_config.vision:
-                backend_name = config.default_backend
+                pass
             else:
                 backend_name = next(
                     (

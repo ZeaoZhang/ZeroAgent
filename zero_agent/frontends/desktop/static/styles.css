@@ -1756,12 +1756,16 @@ mark.search-highlight.active { background: #ff9800; color: #fff; }
   background: var(--text-faint);
 }
 
-.channel-status.running {
+.channel-status.connected {
   color: var(--ok);
 }
 
-.channel-status.running .status-dot {
+.channel-status.connected .status-dot {
   background: var(--ok);
+}
+
+.channel-status.configured {
+  color: var(--text-muted);
 }
 
 .channel-status.unconfigured {

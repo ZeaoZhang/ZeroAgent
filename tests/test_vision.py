@@ -149,6 +149,63 @@ def test_vision_tool_uses_first_visual_backend_when_default_is_text_only() -> No
     assert outcome.next_prompt is None
 
 
+def test_vision_tool_prefers_the_live_selected_visual_backend() -> None:
+    calls = []
+    config = AgentConfig(
+        default_backend="text",
+        llm_backends={
+            "text": LLMBackendConfig(
+                name="text",
+                provider="openai",
+                api_key="key",
+                api_base="https://relay.example/v1",
+                model="text-model",
+                vision=False,
+            ),
+            "visual": LLMBackendConfig(
+                name="visual",
+                provider="openai",
+                api_key="key",
+                api_base="https://relay.example/v1",
+                model="visual-model",
+                vision=True,
+            ),
+            "other-visual": LLMBackendConfig(
+                name="other-visual",
+                provider="openai",
+                api_key="key",
+                api_base="https://relay.example/v1",
+                model="other-visual-model",
+                vision=True,
+            ),
+        },
+    )
+    tool = ToolRegistry.with_builtins(config).get("vision")
+    assert tool is not None
+
+    class VisualSession:
+        def vision(self, image_path, prompt):
+            calls.append((image_path, prompt))
+            return "selected backend understood"
+
+    selected = VisualSession()
+
+    class Parent:
+        client = selected
+        _sessions = {"text": object(), "visual": selected, "other-visual": object()}
+
+    class Handler:
+        parent = Parent()
+
+    result = tool.handler({"image_path": "screen.png", "prompt": "describe"}, None, Handler())
+    next(result)
+    with pytest.raises(StopIteration) as stopped:
+        next(result)
+
+    assert stopped.value.value.data["backend"] == "visual"
+    assert calls == [("screen.png", "describe")]
+
+
 def test_vision_tool_rejects_explicit_text_only_backend() -> None:
     config = AgentConfig(
         default_backend="text",

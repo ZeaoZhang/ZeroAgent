@@ -287,16 +287,14 @@ globalThis.__testExports = {
   assert.match(channelList.innerHTML, /Telegram/);
   assert.match(channelList.innerHTML, /Discord/);
   assert.match(channelList.innerHTML, /未配置/);
-  assert.match(channelList.innerHTML, /运行中/);
+  assert.doesNotMatch(channelList.innerHTML, /运行中|已停止/);
   assert.doesNotMatch(channelList.innerHTML, /tg_bot_token/);
   assert.doesNotMatch(channelList.innerHTML, /test-secret-value/);
   assert.doesNotMatch(channelList.innerHTML, /连接 App/);
   assert.doesNotMatch(channelList.innerHTML, /扫码登录/);
-  assert.doesNotMatch(
-    channelList.innerHTML,
-    /data-channel-action="linked"/,
-  );
-  assert.match(channelList.innerHTML, /连接状态[\s\S]*未连接/);
+  assert.doesNotMatch(channelList.innerHTML, /连接状态/);
+  assert.match(channelList.innerHTML, /已连接/);
+  assert.doesNotMatch(channelList.innerHTML, /未连接|已断开/);
   assert.match(
     channelList.innerHTML,
     /data-channel-id="wechat"[^>]+data-channel-action="running"[^>]+disabled>/,
@@ -304,10 +302,14 @@ globalThis.__testExports = {
   rows[2].configured = true;
   rows[2].linked = true;
   t.renderChannelList();
-  assert.match(channelList.innerHTML, /连接状态[\s\S]*已连接/);
+  assert.match(channelList.innerHTML, /已配置/);
+  rows[2].running = true;
+  t.renderChannelList();
+  assert.match(channelList.innerHTML, /已连接/);
   rows[2].linked = false;
   t.renderChannelList();
-  assert.match(channelList.innerHTML, /连接状态[\s\S]*已断开/);
+  assert.match(channelList.innerHTML, /已配置/);
+  assert.doesNotMatch(channelList.innerHTML, /已断开/);
   assert.equal(
     t.channelErrorMessage({ status: 409, message: 'Telegram 未配置: tg_bot_token' }, '启动渠道'),
     '启动渠道失败：Telegram 未配置: tg_bot_token',
@@ -358,10 +360,19 @@ globalThis.__testExports = {
       if (method === 'channels/list') return { ok: true, channels: rows };
       return {
         ok: true,
-        channels: rows.map((row) => row.id === 'telegram' ? { ...row, linked: false } : row),
+        channels: rows.map((row) => row.id === 'telegram'
+          ? { ...row, linked: false, running: true, pid: 456 }
+          : row),
       };
     },
   };
+  rows[0].configured = true;
+  await t.handleChannelToggle('telegram', 'running', true);
+  assert.equal(calls[0].method, 'channels/start');
+  assert.equal(calls[0].params.channelId, 'telegram');
+  assert.equal(t.state.channelStatuses[0].running, true);
+
+  calls.length = 0;
   await t.handleChannelToggle('telegram', 'linked', false);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].method, 'channels/link');
