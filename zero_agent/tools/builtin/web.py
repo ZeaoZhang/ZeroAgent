@@ -198,6 +198,7 @@ def web_execute_js(
     script: str,
     switch_tab_id: Optional[str] = None,
     no_monitor: bool = False,
+    timeout_seconds: int = 15,
 ) -> dict:
     """在浏览器中执行 JavaScript 并捕获结果和页面变化.
 
@@ -208,6 +209,7 @@ def web_execute_js(
         script: 待执行的 JavaScript 代码.
         switch_tab_id: 可选，执行前切换到指定标签页.
         no_monitor: True 时不监控页面变化.
+        timeout_seconds: JavaScript 等待时间上限，范围 1–25 秒.
 
     Returns:
         {"status": "success"|"error", "js_return": ..., ...}
@@ -235,7 +237,13 @@ def web_execute_js(
         except ImportError:
             return {"status": "error", "msg": _BROWSER_EXTRA_HINT}
 
-        result = simphtml.execute_js_rich(script, driver, no_monitor=no_monitor)
+        timeout_seconds = max(1, min(int(timeout_seconds), 25))
+        result = simphtml.execute_js_rich(
+            script,
+            driver,
+            no_monitor=no_monitor,
+            timeout=timeout_seconds,
+        )
         return result
     except Exception as e:
         return {"status": "error", "msg": format_error(e)}
@@ -356,8 +364,10 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         name="web_execute_js",
         description=_t(
             "执行JS。支持Multi-call，用不同switch_tab_id并行操作多标签页。"
+            "异步等待可用 timeout_seconds 设置上限（1-25秒）。"
             "禁止猜测，准确操作以减少 web_scan 调用。无script参数时执行正文 ```javascript 块，以免转义",
             "Execute JS. Multi-call OK with different switch_tab_id. No guessing. "
+            "Use timeout_seconds (1-25) to bound awaited page results. "
             "Act accurately to reduce web_scan calls. Execute JS in ```javascript "
             "blocks if no script arg, prefer to avoid escaping",
             lang,
@@ -386,6 +396,17 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
                     "description": _t(
                         "跳过页面变更监控，省2-3秒。仅在纯读取信息时设置，页面操作时不要设置",
                         "Skip page change monitoring, saves 2-3s. Only for reads, not for page actions",
+                        lang,
+                    ),
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 25,
+                    "default": 15,
+                    "description": _t(
+                        "等待异步页面结果的超时秒数，默认15，最多25",
+                        "Timeout in seconds for awaited page results; defaults to 15, maximum 25",
                         lang,
                     ),
                 },
@@ -515,10 +536,21 @@ def _make_web_execute_js_handler(config: AgentConfig):
         save_to_file = args.get("save_to_file", "")
         switch_tab_id = args.get("switch_tab_id") or args.get("tab_id")
         no_monitor = args.get("no_monitor", False)
+        timeout_seconds = args.get("timeout_seconds")
 
-        result = web_execute_js(
-            script, switch_tab_id=switch_tab_id, no_monitor=no_monitor,
-        )
+        execute_kwargs: Dict[str, Any] = {
+            "switch_tab_id": switch_tab_id,
+            "no_monitor": no_monitor,
+        }
+        if timeout_seconds is not None:
+            try:
+                execute_kwargs["timeout_seconds"] = max(
+                    1,
+                    min(int(timeout_seconds), 25),
+                )
+            except (TypeError, ValueError, OverflowError):
+                execute_kwargs["timeout_seconds"] = 15
+        result = web_execute_js(script, **execute_kwargs)
 
         # 保存结果到文件
         if save_to_file and "js_return" in result:

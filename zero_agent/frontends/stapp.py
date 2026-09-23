@@ -5,11 +5,50 @@ Usage:
 """
 
 import streamlit as st
+from pathlib import Path
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import load_default_config
 from zero_agent.core.types import TerminalEvent, TerminalStatus
 from zero_agent.runners.agent_runner import _consume_agent_run
+from zero_agent.bots.common import resolve_output_files, strip_files
+from zero_agent.bots.common import runner_workspace_dir
+from zero_agent.core.localization import PROMPT_CAPABILITY_FILE_DELIVERY
+
+
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif"}
+
+
+def _output_files(agent: ZeroAgent, text: str) -> list[str]:
+    workspace = Path(runner_workspace_dir(agent)).resolve()
+    files = []
+    for raw_path in resolve_output_files(text, workspace_dir=workspace):
+        try:
+            path = Path(raw_path).resolve(strict=True)
+            path.relative_to(workspace)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if path.is_file():
+            files.append(str(path))
+    return files
+
+
+def _render_output_files(files: list[str], key_prefix: str) -> None:
+    for index, raw_path in enumerate(files):
+        path = Path(raw_path)
+        try:
+            content = path.read_bytes()
+        except OSError:
+            st.caption(f"File is no longer available: {path.name}")
+            continue
+        if path.suffix.lower() in _IMAGE_EXTS:
+            st.image(content, caption=path.name, use_container_width=True)
+        st.download_button(
+            f"Download {path.name}",
+            data=content,
+            file_name=path.name,
+            key=f"{key_prefix}-file-{index}",
+        )
 
 
 def _waiting_text(terminal: TerminalEvent) -> str:
@@ -68,6 +107,8 @@ def main():
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+            if msg.get("files"):
+                _render_output_files(msg["files"], f"history-{msg.get('id', 'message')}")
 
     # Chat input
     if prompt := st.chat_input("Type your message..."):
@@ -80,7 +121,10 @@ def main():
             placeholder = st.empty()
             full_text = ""
             try:
-                gen = agent.run(prompt)
+                gen = agent.run(
+                    prompt,
+                    prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+                )
             except Exception as exc:
                 terminal = TerminalEvent(
                     status=TerminalStatus.FAILED,
@@ -96,11 +140,17 @@ def main():
 
                 terminal = _consume_agent_run(gen, on_chunk)
             if terminal.status == TerminalStatus.COMPLETED:
-                placeholder.markdown(full_text or terminal.text)
-                if full_text or terminal.text:
+                answer = terminal.text or full_text
+                files = _output_files(agent, answer)
+                visible_answer = strip_files(answer) or answer
+                placeholder.markdown(visible_answer)
+                _render_output_files(files, f"turn-{len(st.session_state.messages)}")
+                if visible_answer or files:
                     st.session_state.messages.append({
                         "role": "assistant",
-                        "content": full_text or terminal.text,
+                        "content": visible_answer,
+                        "files": files,
+                        "id": len(st.session_state.messages),
                     })
             elif terminal.status == TerminalStatus.WAITING:
                 message = _waiting_text(terminal)

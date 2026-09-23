@@ -40,7 +40,7 @@ msgid "prompt.peer_hint"
 msgstr "[Peer] When the user mentions other sessions or background task status: temp/model_responses/ (only inspect the tails of recently modified files)"
 
 msgid "prompt.file_delivery"
-msgstr "To send images or other files, include [FILE:relative-path] in the final reply; mentioning a path alone does not send it."
+msgstr "To deliver an image or other file in this channel, include exactly one [FILE:relative-path] marker per file in the final reply; do not use Markdown image links or mention the path alone."
 
 msgid "weekday.monday"
 msgstr "Mon"

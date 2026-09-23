@@ -10,6 +10,7 @@ from zero_agent.core.handler import BaseHandler
 from zero_agent.core.config import AgentConfig, LLMBackendConfig, _config_mtime
 from zero_agent.core.exceptions import ConfigError
 from zero_agent.core.hooks import HookSystem
+from zero_agent.core.localization import PROMPT_CAPABILITY_FILE_DELIVERY
 from zero_agent.core.types import (
     EvidenceLedger,
     EvidenceRecord,
@@ -1512,6 +1513,7 @@ class TestZeroAgentInitialMode:
                 seen["ledger_records"] = list(self.handler.evidence_ledger.records)
                 seen["loop_max_turns"] = self.max_turns
                 seen["system_prompt"] = kwargs["system_prompt"]
+                seen["user_input"] = kwargs["user_input"]
                 if False:
                     yield None
                 return TerminalEvent(status=TerminalStatus.FAILED, reason="blocked")
@@ -1551,6 +1553,40 @@ class TestZeroAgentInitialMode:
         assert seen["mode"] is TaskMode.OPEN
         assert seen["plan_path"] is None
         assert '<task_control state="open">' in seen["system_prompt"]
+        assert "[FILE:relative-path]" not in seen["system_prompt"]
+
+    @pytest.mark.parametrize(
+        ("language", "localized_rule"),
+        [
+            (
+                "zh",
+                "要在当前渠道发送图片或其他文件，请在最终回复中为每个文件仅写一个",
+            ),
+            (
+                "en",
+                "To deliver an image or other file in this channel, include exactly one",
+            ),
+        ],
+    )
+    def test_file_delivery_capability_is_localized_and_keeps_user_text_raw(
+        self,
+        tmp_path,
+        monkeypatch,
+        language,
+        localized_rule,
+    ) -> None:
+        agent, seen = self._capture_loop(tmp_path, monkeypatch)
+        agent.config.language = language
+        original_text = "Please send the generated image"
+
+        _exhaust(agent.run(
+            original_text,
+            prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+        ))
+
+        assert seen["user_input"] == original_text
+        assert localized_rule in seen["system_prompt"]
+        assert localized_rule in seen["system_prompt_factory"]()
 
     def test_explicit_system_prompt_remains_static(self, tmp_path, monkeypatch) -> None:
         agent, seen = self._capture_loop(tmp_path, monkeypatch)

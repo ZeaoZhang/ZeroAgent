@@ -12,7 +12,7 @@ import re
 import time
 from dataclasses import dataclass
 from importlib import resources
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, Iterable, List, Optional
 
 from zero_agent.core.config import AgentConfig, load_default_config
 from zero_agent.core.exceptions import ConfigError
@@ -22,6 +22,8 @@ from zero_agent.core.localization import (
     PROMPT_PEER_HINT,
     PROMPT_REPLY_LANGUAGE,
     PROMPT_TODAY_LABEL,
+    PROMPT_CAPABILITY_FILE_DELIVERY,
+    PROMPT_FILE_DELIVERY,
     WEEKDAY_MESSAGE_IDS,
     PromptLocalizer,
 )
@@ -116,6 +118,10 @@ _RUNTIME_CONFIG_FIELDS = (
     "peer_hint",
     "enable_worldline",
 )
+
+_PROMPT_CAPABILITY_MESSAGE_IDS = {
+    PROMPT_CAPABILITY_FILE_DELIVERY: PROMPT_FILE_DELIVERY,
+}
 
 
 def _client_signature(client: Any) -> tuple[Any, Any, Any, Any]:
@@ -543,6 +549,7 @@ class ZeroAgent:
         *,
         initial_mode: TaskMode = TaskMode.OPEN,
         plan_path: Optional[str] = None,
+        prompt_capabilities: Iterable[str] = (),
     ) -> Generator[Any, None, TerminalEvent]:
         """执行单次 agent 任务.
 
@@ -555,6 +562,7 @@ class ZeroAgent:
             initial_user_content: 可选的首条 user message 内容.
             initial_mode: 新任务的初始 TaskMode，默认 OPEN.
             plan_path: PLAN/EXECUTING 任务必须提供的 plan 文件路径.
+            prompt_capabilities: 本次任务运行环境支持的能力提示块.
 
         Yields:
             str → 状态文本，供 UI 实时展示.
@@ -609,10 +617,28 @@ class ZeroAgent:
                 user_input,
             )
 
+        task_prompt_capabilities = tuple(dict.fromkeys(prompt_capabilities))
+
         # None selects the state-aware default; an empty string is a valid
         # explicit replacement and must not fall back to the default prompt.
-        prompt = self._build_system_prompt() if system_prompt is None else system_prompt
-        prompt_factory = self._build_system_prompt if system_prompt is None else None
+        if system_prompt is None:
+            prompt = self._build_system_prompt(
+                prompt_capabilities=task_prompt_capabilities,
+            )
+
+            def build_task_prompt() -> str:
+                return self._build_system_prompt(
+                    prompt_capabilities=task_prompt_capabilities,
+                )
+
+            prompt_factory = build_task_prompt
+        else:
+            prompt = system_prompt
+            if task_prompt_capabilities:
+                prompt += self._build_prompt_capabilities(
+                    task_prompt_capabilities,
+                ).render()
+            prompt_factory = None
 
         # 创建 AgentLoop
         tools_schema = self.registry.generate_openai_schema()
@@ -940,15 +966,25 @@ class ZeroAgent:
             return self.config.resolved_tool_language
         return self.config.resolved_tool_language_for_backend(name)
 
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(
+        self,
+        *,
+        prompt_capabilities: Iterable[str] = (),
+    ) -> str:
         """构建本地化、状态感知的默认系统提示词.
 
         Returns:
             系统提示词字符串.
         """
-        return self._build_prompt_assembly().render()
+        return self._build_prompt_assembly(
+            prompt_capabilities=prompt_capabilities,
+        ).render()
 
-    def _build_prompt_assembly(self) -> PromptAssembly:
+    def _build_prompt_assembly(
+        self,
+        *,
+        prompt_capabilities: Iterable[str] = (),
+    ) -> PromptAssembly:
         """Build the ordered default prompt blocks for the current task state."""
         lang = self.config.resolved_language
         localizer = PromptLocalizer(lang)
@@ -959,7 +995,6 @@ class ZeroAgent:
                 f"\n{localizer.text(PROMPT_REPLY_LANGUAGE)}\n",
             ),
         ]
-
         now = time.localtime()
         date = time.strftime("%Y-%m-%d", now)
         weekday = localizer.text(WEEKDAY_MESSAGE_IDS[now.tm_wday])
@@ -989,6 +1024,37 @@ class ZeroAgent:
                 f"\n{localizer.text(PROMPT_PEER_HINT)}\n",
             ))
 
+        blocks.extend(
+            self._build_prompt_capabilities(
+                prompt_capabilities,
+                localizer=localizer,
+            ).blocks
+        )
+
+        return PromptAssembly(tuple(blocks))
+
+    def _build_prompt_capabilities(
+        self,
+        capabilities: Iterable[str],
+        *,
+        localizer: Optional[PromptLocalizer] = None,
+    ) -> PromptAssembly:
+        """Build localized system blocks for capabilities enabled by the caller."""
+        capability_names = tuple(dict.fromkeys(capabilities))
+        if not capability_names:
+            return PromptAssembly(())
+        if localizer is None:
+            localizer = PromptLocalizer(self.config.resolved_language)
+        blocks = []
+        for capability in capability_names:
+            try:
+                message_id = _PROMPT_CAPABILITY_MESSAGE_IDS[capability]
+            except KeyError as exc:
+                raise ValueError(f"Unsupported prompt capability: {capability}") from exc
+            blocks.append(PromptBlock(
+                capability,
+                f"\n{localizer.text(message_id)}\n",
+            ))
         return PromptAssembly(tuple(blocks))
 
     @staticmethod

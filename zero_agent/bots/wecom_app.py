@@ -29,7 +29,7 @@ from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import (
     AgentBotMixin,
     channel_is_linked,
-    file_delivery_hint,
+    PROMPT_CAPABILITY_FILE_DELIVERY,
     build_done_text,
     clean_reply,
     ensure_single_instance,
@@ -188,7 +188,11 @@ class WeComApp(AgentBotMixin):
 
         try:
             await self.send_text(chat_id, "🤔 思考中...")
-            dq = runner.put_task(f"{file_delivery_hint(runner)}\n\n{text}", source=self.source)
+            dq = runner.put_task(
+                text,
+                source=self.source,
+                prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+            )
             while state["running"]:
                 try:
                     item = await asyncio.to_thread(dq.get, True, 1)

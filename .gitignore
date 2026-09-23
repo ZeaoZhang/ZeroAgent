@@ -53,6 +53,7 @@ zero_agent/temp/
 .omx/
 **/.omc/
 **/.omx/
+.codex/
 
 config.yaml
 

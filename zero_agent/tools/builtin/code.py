@@ -55,6 +55,7 @@ def code_run(
     code_cwd: Optional[str] = None,
     stop_signal: Optional[List[bool]] = None,
     maxlen: int = 10000,
+    env: Optional[dict[str, str]] = None,
 ) -> Generator[str, None, dict]:
     """在子进程中执行 Python 或 shell 代码.
 
@@ -141,6 +142,7 @@ def code_run(
             cwd=cwd,
             startupinfo=startupinfo,
             creationflags=creationflags,
+            env=env,
         )
         start_t = time.time()
         reader_thread = threading.Thread(
@@ -376,6 +378,24 @@ def _make_code_run_handler(config: AgentConfig):
         maxlen = 10000 // max(args.get("_tool_num", 1), 1)
         stop_signal = getattr(handler, "code_stop_signal", None)
 
+        subprocess_env = None
+        registry_path = getattr(config, "_desktop_subagent_registry_path", None)
+        if registry_path:
+            subprocess_env = os.environ.copy()
+            from zero_agent.utils.subagent_registry import (
+                PARENT_AGENT_ID_ENV,
+                REGISTRY_ENV,
+                SESSION_ID_ENV,
+            )
+
+            subprocess_env[REGISTRY_ENV] = str(registry_path)
+            subprocess_env[SESSION_ID_ENV] = str(
+                getattr(config, "_desktop_session_id", "") or ""
+            )
+            subprocess_env[PARENT_AGENT_ID_ENV] = str(
+                getattr(config, "_desktop_agent_id", "") or ""
+            )
+
         return (yield from code_run(
             code=code,
             code_type=code_type,
@@ -383,6 +403,7 @@ def _make_code_run_handler(config: AgentConfig):
             cwd=cwd,
             maxlen=maxlen,
             stop_signal=stop_signal,
+            env=subprocess_env,
         ))
 
     def _handler(

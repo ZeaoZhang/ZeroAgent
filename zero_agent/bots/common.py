@@ -19,7 +19,11 @@ import socket
 import sys
 import time
 
-from zero_agent.core.localization import PROMPT_FILE_DELIVERY, PromptLocalizer
+from zero_agent.core.localization import (
+    PROMPT_CAPABILITY_FILE_DELIVERY,
+    PROMPT_FILE_DELIVERY,
+    PromptLocalizer,
+)
 
 
 # —— 命令列表 ——
@@ -57,8 +61,6 @@ def build_help_text(commands=HELP_COMMANDS) -> str:
 
 HELP_TEXT = build_help_text()
 IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif"})
-_INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
-_MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(<?([^\s)>]+)>?(?:\s+[^)]*)?\)")
 TAG_PATS = [r"<" + t + r">.*?</" + t + r">" for t in ("thinking", "summary", "tool_use", "file_content")]
 BOT_CONFIG_ENV = "ZA_BOT_CONFIG_PATH"
 
@@ -77,15 +79,9 @@ SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL)
 
 
 @lru_cache(maxsize=4)
-def _localized_file_delivery_hint(language: str) -> str:
+def _legacy_file_delivery_prefix(language: str) -> str:
+    """Return old request prefixes so restored history can discard them."""
     return PromptLocalizer(language).text(PROMPT_FILE_DELIVERY)
-
-
-def file_delivery_hint(runner) -> str:
-    """Return the file-delivery instruction in the runner's prompt language."""
-    config = getattr(runner, "config", None)
-    language = getattr(config, "resolved_language", "en")
-    return _localized_file_delivery_hint(str(language or "en"))
 
 
 # —— 文本处理 ——
@@ -98,25 +94,17 @@ def clean_reply(text: str) -> str:
 
 
 def extract_files(text: str) -> list:
-    """从文本中提取 [FILE:path] 引用."""
-    return re.findall(r"\[FILE:([^\]]+)\]", text or "")
-
-
-def extract_output_file_refs(text: str) -> list[str]:
-    """Extract inline-code and Markdown local-image references."""
-    text = text or ""
-    refs = []
-    refs.extend(
-        match.group(1).strip()
-        for match in _INLINE_CODE_RE.finditer(text)
-        if Path(match.group(1).strip()).suffix.lower() in IMAGE_EXTS
-    )
-    refs.extend(
-        match.group(1).strip()
-        for match in _MARKDOWN_IMAGE_RE.finditer(text)
-        if Path(match.group(1).strip()).suffix.lower() in IMAGE_EXTS
-    )
-    return refs
+    """从文本中提取显式标记的相对文件路径: [FILE:path]."""
+    refs = re.findall(r"\[FILE:([^\]\r\n]+)\]", text or "")
+    return [
+        ref.strip()
+        for ref in refs
+        if ref.strip()
+        and not ref.strip().startswith(("/", "\\"))
+        and not re.match(r"^[a-z]:", ref.strip(), re.IGNORECASE)
+        and not re.match(r"^[a-z][a-z\d+.-]*:", ref.strip(), re.IGNORECASE)
+        and ".." not in ref.strip().replace("\\", "/").split("/")
+    ]
 
 
 def runner_workspace_dir(runner) -> str:
@@ -139,15 +127,21 @@ def resolve_output_files(
         workspace_root = Path(os.path.abspath(os.path.expanduser(os.fspath(workspace_dir)))).resolve()
         roots.append(os.fspath(workspace_root))
     else:
-        workspace_root = Path.cwd()
+        workspace_root = Path.cwd().resolve()
         roots.append(os.fspath(workspace_root))
-    roots.append(os.getcwd())
     roots.extend(os.path.abspath(os.path.expanduser(os.fspath(root))) for root in fallback_dirs if root)
+    restrict_to_roots = bool(workspace_dir or fallback_dirs)
+    allowed_roots = []
+    for root in roots:
+        try:
+            resolved_root = Path(root).resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if resolved_root.is_dir():
+            allowed_roots.append(resolved_root)
 
     resolved, seen = [], set()
-    explicit_refs = extract_files(text)
-    refs = [(path, True) for path in explicit_refs]
-    refs.extend((path, False) for path in extract_output_file_refs(text))
+    refs = [(path, True) for path in extract_files(text)]
     for raw_path, explicit in refs:
         raw_path = raw_path.strip().strip("<>").strip()
         if not raw_path or re.match(r"^(?:https?|data|blob):", raw_path, re.IGNORECASE):
@@ -161,7 +155,18 @@ def resolve_output_files(
                 continue
             if not path.is_file():
                 continue
-            if not explicit:
+            if restrict_to_roots:
+                in_allowed_root = False
+                for root in allowed_roots:
+                    try:
+                        path.relative_to(root)
+                        in_allowed_root = True
+                        break
+                    except ValueError:
+                        continue
+                if not in_allowed_root:
+                    continue
+            if not explicit and workspace_dir:
                 try:
                     path.relative_to(workspace_root)
                 except ValueError:
@@ -199,9 +204,8 @@ def build_done_text(raw_text: str, *, workspace_dir=None, fallback_dirs=()) -> s
     body = strip_files(clean_reply(raw_text))
     if files:
         if extract_files(raw_text):
-            body = (body + "\n\n" if body else "") + "\n".join(
-                f"生成文件: {p}" for p in files
-            )
+            names = " · ".join(Path(path).name for path in files)
+            body = (body + "\n\n" if body else "") + f"📎 {names}"
     return body or "..."
 
 
@@ -322,7 +326,7 @@ def _native_first_user_line(prompt_text: str) -> str:
     if not text or "<history>" in text or text.startswith("### [WORKING MEMORY]"):
         return ""
     for language in ("zh", "en"):
-        hint = _localized_file_delivery_hint(language)
+        hint = _legacy_file_delivery_prefix(language)
         if text.startswith(hint):
             text = text[len(hint):].lstrip()
             break
@@ -618,7 +622,9 @@ class AgentBotMixin:
         try:
             await self.send_text(chat_id, "思考中...", **ctx)
             dq = self.runner.put_task(
-                f"{file_delivery_hint(self.runner)}\n\n{text}", source=self.source
+                text,
+                source=self.source,
+                prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
             )
             last_ping = time.time()
             while state["running"]:

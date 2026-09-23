@@ -27,7 +27,7 @@ from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.common import (
     channel_is_linked,
-    file_delivery_hint,
+    PROMPT_CAPABILITY_FILE_DELIVERY,
     HELP_TEXT,
     TELEGRAM_MENU_COMMANDS,
     clean_reply,
@@ -186,19 +186,27 @@ def _files_from_text(text, workspace_dir=None):
 
 
 async def _send_files(root_msg, files):
+    failed = []
     for fpath in files:
         if fpath.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
             try:
                 with open(fpath, "rb") as fp:
                     await root_msg.reply_photo(fp)
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[Telegram] failed to send image {fpath}: {exc}", flush=True)
+                failed.append(os.path.basename(fpath))
         else:
             try:
                 with open(fpath, "rb") as fp:
                     await root_msg.reply_document(fp)
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[Telegram] failed to send file {fpath}: {exc}", flush=True)
+                failed.append(os.path.basename(fpath))
+    if failed:
+        try:
+            await root_msg.reply_text("⚠️ 文件发送失败: " + "、".join(failed))
+        except Exception as exc:
+            print(f"[Telegram] failed to report file delivery errors: {exc}", flush=True)
 
 
 async def _send_files_from_text(root_msg, text):
@@ -316,10 +324,6 @@ def _parse_menu_callback_data(data, prefix):
 
 def _parse_ask_callback_data(data):
     return _parse_menu_callback_data(data, _ASK_CALLBACK_PREFIX)
-
-
-def _build_text_prompt(text):
-    return f"{file_delivery_hint(runner)}\n\n{text}"
 
 
 def _normalize_ask_menu_event(stored):
@@ -803,7 +807,11 @@ async def _handle_review_command(update, ctx, cmd):
         except Q.Empty:
             return await _reply_command_text(update.message, "(review 无输出)")
     _cancel_stream_task(ctx)
-    task_dq = runner.put_task(prompt, source="telegram")
+    task_dq = runner.put_task(
+        prompt,
+        source="telegram",
+        prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+    )
     task = asyncio.create_task(_stream(task_dq, update.message))
     ctx.user_data["stream_task"] = task
 
@@ -814,8 +822,11 @@ async def handle_msg(update, ctx):
     uid = update.effective_user.id
     if ALLOWED and uid not in ALLOWED:
         return await update.message.reply_text("no")
-    prompt = _build_text_prompt(update.message.text)
-    dq = runner.put_task(prompt, source="telegram")
+    dq = runner.put_task(
+        update.message.text,
+        source="telegram",
+        prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+    )
     task = asyncio.create_task(_stream(dq, update.message))
     ctx.user_data["stream_task"] = task
 
@@ -869,7 +880,11 @@ async def handle_ask_callback(update, ctx):
         await _edit_ask_user_result(query, event, selected=selected)
         if query.message is None:
             return
-        dq = runner.put_task(_build_text_prompt(selected), source="telegram")
+        dq = runner.put_task(
+            selected,
+            source="telegram",
+            prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+        )
         task = asyncio.create_task(_stream(dq, query.message))
         ctx.user_data["stream_task"] = task
         return
@@ -889,7 +904,11 @@ async def handle_ask_callback(update, ctx):
     await _edit_ask_user_result(query, event, selected=selected)
     if query.message is None:
         return
-    dq = runner.put_task(_build_text_prompt(selected), source="telegram")
+    dq = runner.put_task(
+        selected,
+        source="telegram",
+        prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+    )
     task = asyncio.create_task(_stream(dq, query.message))
     ctx.user_data["stream_task"] = task
 
@@ -993,7 +1012,11 @@ async def handle_photo(update, ctx):
         if caption
         else f"[TIPS] 收到{kind}temp/{fpath}, 请等待下一步指令"
     )
-    dq = runner.put_task(prompt, source="telegram")
+    dq = runner.put_task(
+        prompt,
+        source="telegram",
+        prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+    )
     task = asyncio.create_task(_stream(dq, update.message))
     ctx.user_data["stream_task"] = task
 

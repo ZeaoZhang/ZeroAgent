@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from zero_agent.utils.subagent_registry import EXIT_AFTER_ROUND_ENV
+
 
 @dataclass
 class SubAgentTask:
@@ -63,7 +65,7 @@ class SubAgentManager:
             max_workers: 最大并行子进程数.
             base_dir: 任务 I/O 目录根路径，默认 ./subagent_tasks.
         """
-        self.max_workers = max_workers
+        self.max_workers = max(1, int(max_workers))
         self._base_dir = base_dir or os.path.join(
             os.getcwd(), "subagent_tasks"
         )
@@ -112,11 +114,24 @@ class SubAgentManager:
                 retcode = task.process.poll()
                 if retcode is not None:
                     if retcode == 0:
-                        task.status = "done"
                         task.result = self._collect_result(task)
+                        delivered = task.result.replace("[ROUND END]", "").strip()
+                        if delivered:
+                            task.status = "done"
+                        else:
+                            task.status = "failed"
+                            task.error = "Process exited successfully without producing output.txt or output.md"
                     else:
                         task.status = "failed"
                         task.error = f"Exit code: {retcode}"
+                        stderr_path = os.path.join(task.io_dir, "stderr.log")
+                        if os.path.isfile(stderr_path):
+                            try:
+                                details = open(stderr_path, encoding="utf-8", errors="replace").read().strip()
+                            except OSError:
+                                details = ""
+                            if details:
+                                task.error += f"\n{details[-4000:]}"
                     results[task.task_id] = {
                         "status": task.status,
                         "result": task.result,
@@ -157,12 +172,18 @@ class SubAgentManager:
             cmd = [sys.executable, "-m", "zero_agent.runners.cli",
                    "--task", task.io_dir, "--nobg", "-q"]
 
-        task.process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        stderr_path = os.path.join(task.io_dir, "stderr.log")
+        child_env = os.environ.copy()
+        child_env[EXIT_AFTER_ROUND_ENV] = "1"
+        with open(stderr_path, "ab") as stderr_file:
+            task.process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_file,
+                close_fds=True,
+                env=child_env,
+            )
         task.status = "running"
 
     @staticmethod

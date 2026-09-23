@@ -12,7 +12,7 @@ from dataclasses import replace
 import queue
 import os
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.types import TaskMode, TerminalEvent, TerminalStatus
@@ -528,6 +528,7 @@ class AgentRunner:
         *,
         task_mode: TaskMode = TaskMode.OPEN,
         plan_path: Optional[str] = None,
+        prompt_capabilities: Iterable[str] = (),
     ) -> queue.Queue:
         """提交任务到 ZeroAgent, 返回流式输出队列.
 
@@ -543,6 +544,7 @@ class AgentRunner:
             images: 图片路径列表 (预留, 当前未实现).
             task_mode: 新任务的初始 TaskMode，默认 OPEN.
             plan_path: PLAN/EXECUTING 任务必须提供的 plan 文件路径.
+            prompt_capabilities: 本次任务运行环境支持的能力提示块.
 
         Returns:
             queue.Queue — 消费者从中读取流式输出.
@@ -554,14 +556,18 @@ class AgentRunner:
                 return display_queue
             if not self._running:
                 self._cancel_event.clear()
-            self._task_queue.put({
+            task = {
                 "query": query,
                 "source": source,
                 "images": images or [],
                 "output": display_queue,
                 "task_mode": task_mode,
                 "plan_path": plan_path,
-            })
+            }
+            capabilities = tuple(dict.fromkeys(prompt_capabilities))
+            if capabilities:
+                task["prompt_capabilities"] = capabilities
+            self._task_queue.put(task)
         self._ensure_worker()
         return display_queue
 
@@ -651,6 +657,7 @@ class AgentRunner:
             display_queue = task["output"]
             task_mode = task.get("task_mode", TaskMode.OPEN)
             plan_path = task.get("plan_path")
+            prompt_capabilities = task.get("prompt_capabilities", ())
 
             if self._shutdown_event.is_set():
                 self._put_runner_shutdown(display_queue, source=source)
@@ -700,7 +707,13 @@ class AgentRunner:
 
             try:
                 try:
-                    gen = self._agent.run(query, initial_mode=task_mode, plan_path=plan_path)
+                    run_kwargs = {
+                        "initial_mode": task_mode,
+                        "plan_path": plan_path,
+                    }
+                    if prompt_capabilities:
+                        run_kwargs["prompt_capabilities"] = prompt_capabilities
+                    gen = self._agent.run(query, **run_kwargs)
                 except Exception as exc:
                     terminal = TerminalEvent(
                         status=TerminalStatus.FAILED,

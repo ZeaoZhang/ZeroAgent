@@ -1173,10 +1173,7 @@ class LiteLLMSession:
         if force:
             cd = 0
         LiteLLMSession._compress_history_tags._cd = cd
-        if cd % interval != 0:
-            return history
-
-        before = sum(len(json.dumps(m, ensure_ascii=False)) for m in history)
+        truncation_marker = "\n...[Truncated]...\n"
         pats = {
             tag: _re.compile(rf"(<{tag}>)([\s\S]*?)(</{tag}>)")
             for tag in ("thinking", "think", "tool_use", "tool_result")
@@ -1184,11 +1181,10 @@ class LiteLLMSession:
         hist_pat = _re.compile(r"<(history|key_info|earlier_context)>[\s\S]*?</\1>")
 
         def _trunc_str(s: Any) -> Any:
-            return (
-                s[:max_len // 2] + "\n...[Truncated]...\n" + s[-max_len // 2:]
-                if isinstance(s, str) and len(s) > max_len
-                else s
-            )
+            if not isinstance(s, str) or len(s) <= max_len:
+                return s
+            keep = max(0, (max_len - len(truncation_marker)) // 2)
+            return s[:keep] + truncation_marker + (s[-keep:] if keep else "")
 
         def _trunc(text: str) -> str:
             text = hist_pat.sub(lambda m: f"<{m.group(1)}>[...]</{m.group(1)}>", text)
@@ -1199,20 +1195,30 @@ class LiteLLMSession:
                 )
             return text
 
-        for i, msg in enumerate(history):
-            if i >= len(history) - keep_recent:
-                break
+        def _trunc_recent_tool_results(text: str) -> str:
+            """Bound tagged tool output even when it is in the recent window."""
+            pat = pats["tool_result"]
+            return pat.sub(
+                lambda m: m.group(1) + _trunc_str(m.group(2)) + m.group(3),
+                text,
+            )
+
+        # Bound tool results before the next request, even when the periodic
+        # compression interval has not elapsed. Browser output may be huge.
+        for msg in history:
             content = msg.get("content")
             if isinstance(content, str):
-                msg["content"] = _trunc(content)
+                if msg.get("role") == "tool":
+                    msg["content"] = _trunc_str(content)
+                else:
+                    msg["content"] = _trunc_recent_tool_results(content)
             elif isinstance(content, list):
                 for block in content:
                     if not isinstance(block, dict):
                         continue
-                    block_type = block.get("type")
-                    if block_type == "text" and isinstance(block.get("text"), str):
-                        block["text"] = _trunc(block["text"])
-                    elif block_type == "tool_result":
+                    if block.get("type") == "text" and isinstance(block.get("text"), str):
+                        block["text"] = _trunc_recent_tool_results(block["text"])
+                    elif block.get("type") == "tool_result":
                         tool_content = block.get("content")
                         if isinstance(tool_content, str):
                             block["content"] = _trunc_str(tool_content)
@@ -1220,6 +1226,33 @@ class LiteLLMSession:
                             for sub in tool_content:
                                 if isinstance(sub, dict) and sub.get("type") == "text":
                                     sub["text"] = _trunc_str(sub.get("text"))
+
+        if not force and cd % interval != 0:
+            return history
+
+        before = sum(len(json.dumps(m, ensure_ascii=False)) for m in history)
+
+        for i, msg in enumerate(history):
+            recent = i >= len(history) - keep_recent
+            content = msg.get("content")
+            if isinstance(content, str):
+                if msg.get("role") == "tool":
+                    continue
+                if recent:
+                    msg["content"] = _trunc_recent_tool_results(content)
+                else:
+                    msg["content"] = _trunc(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type")
+                    if block_type == "text" and isinstance(block.get("text"), str):
+                        block["text"] = (
+                            _trunc_recent_tool_results(block["text"])
+                            if recent
+                            else _trunc(block["text"])
+                        )
                     elif block_type == "tool_use" and isinstance(block.get("input"), dict):
                         for key, value in block["input"].items():
                             block["input"][key] = _trunc_str(value)

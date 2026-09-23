@@ -6,7 +6,9 @@ import json
 import os
 import queue
 import tempfile
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -26,6 +28,7 @@ from zero_agent.bots.common import (
     to_allowed_set,
     extract_waiting_event,
     terminal_notice,
+    resolve_output_files,
 )
 from zero_agent.bots.shared.continue_cmd import (
     _pairs,
@@ -63,13 +66,75 @@ class TestCommonHelpers:
         assert clean_reply("") == "..."
 
     def test_extract_files(self):
-        text = "see [FILE:/tmp/out.md] and [FILE:report.txt]"
+        text = "see [FILE:/tmp/out.md] and [FILE:report.txt] and [FILE:../secret.txt]"
         files = extract_files(text)
-        assert "/tmp/out.md" in files
-        assert "report.txt" in files
+        assert files == ["report.txt"]
 
     def test_extract_files_none(self):
         assert extract_files("no files here") == []
+
+    def test_send_done_delivers_every_resolved_file(self, tmp_path):
+        image = tmp_path / "puppy.png"
+        document = tmp_path / "summary.pdf"
+        image.write_bytes(b"png")
+        document.write_bytes(b"pdf")
+
+        class CaptureBot(AgentBotMixin):
+            label = "test"
+            source = "test"
+
+            def __init__(self):
+                super().__init__(SimpleNamespace(config=SimpleNamespace(workspace_dir=str(tmp_path))), {})
+                self.texts = []
+                self.files = []
+
+            async def send_text(self, chat_id, content, **ctx):
+                self.texts.append(content)
+
+            async def send_file(self, chat_id, file_path, **ctx):
+                self.files.append(Path(file_path).name)
+
+        bot = CaptureBot()
+        answer = "Here are the results: [FILE:puppy.png] [FILE:summary.pdf]"
+        asyncio.run(bot.send_done("chat", answer))
+
+        assert bot.files == ["puppy.png", "summary.pdf"]
+        assert "puppy.png" in bot.texts[0]
+        assert "summary.pdf" in bot.texts[0]
+        assert str(tmp_path) not in bot.texts[0]
+
+    def test_send_done_ignores_unmarked_inline_code_documents(self, tmp_path):
+        document = tmp_path / "summary.pdf"
+        document.write_bytes(b"pdf")
+
+        class CaptureBot(AgentBotMixin):
+            label = "test"
+            source = "test"
+
+            def __init__(self):
+                super().__init__(SimpleNamespace(config=SimpleNamespace(workspace_dir=str(tmp_path))), {})
+                self.files = []
+
+            async def send_text(self, _chat_id, _content, **_ctx):
+                pass
+
+            async def send_file(self, _chat_id, file_path, **_ctx):
+                self.files.append(Path(file_path).name)
+
+        bot = CaptureBot()
+        asyncio.run(bot.send_done("chat", f"Saved to **`{document}`**"))
+
+        assert bot.files == []
+
+    def test_explicit_file_references_cannot_escape_workspace(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        outside = tmp_path / "private.txt"
+        outside.write_text("secret", encoding="utf-8")
+
+        assert resolve_output_files(
+            f"[FILE:{outside}]", workspace_dir=workspace,
+        ) == []
 
     def test_split_text(self):
         result = split_text("hello world", 5)
@@ -84,7 +149,7 @@ class TestCommonHelpers:
             fpath = os.path.join(tmp, "out.txt")
             with open(fpath, "w") as f:
                 f.write("data")
-            result = build_done_text(f"Done. [FILE:{fpath}]")
+            result = build_done_text("Done. [FILE:out.txt]", workspace_dir=tmp)
             assert "out.txt" in result
 
     @pytest.mark.parametrize(

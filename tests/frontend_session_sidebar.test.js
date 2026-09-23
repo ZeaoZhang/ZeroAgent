@@ -140,6 +140,7 @@ const testExports = `
     setActiveHook: (fn) => { setActiveSession = fn; },
     setRenderHook: (fn) => { renderSessionList = fn; },
     setSessionListElement: (element) => { sessionListEl = element; },
+    setDrawerElements: (left, right) => { leftDrawer = left; rightDrawer = right; },
   };
 
 `;
@@ -150,6 +151,7 @@ vm.runInNewContext(source.slice(0, slashCommandsMarker) + testExports, context, 
 const exported = context.__testExports;
 const { state } = exported;
 exported.setRenderHook(() => {});
+exported.setDrawerElements(new FakeElement('div'), new FakeElement('div'));
 
 function resetState() {
   state.sessions.clear();

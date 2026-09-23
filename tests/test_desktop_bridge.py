@@ -9,7 +9,9 @@ import queue
 import shutil
 import subprocess
 import re
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import WSServerHandshakeError, web
@@ -607,6 +609,8 @@ def test_create_app_exposes_desktop_http_contract() -> None:
     assert ("POST", "/session/{sid}/replace") in routes
     assert ("POST", "/session/{sid}/prompt") in routes
     assert ("GET", "/session/{sid}/messages") in routes
+    assert ("GET", "/session/{sid}/image") in routes
+    assert ("GET", "/session/{sid}/file") in routes
     assert ("POST", "/session/{sid}/cancel") in routes
     assert ("POST", "/session/{sid}/plan") in routes
     assert ("POST", "/session/{sid}/plan/execute") in routes
@@ -1093,6 +1097,12 @@ def test_desktop_bridge_api_requires_token() -> None:
                 headers={"Authorization": "Bearer wrong", "X-ZA-Desktop-Token": "secret"},
             ) as resp:
                 assert resp.status == 200
+            async with client.get("/session/sess-test/file?path=report.pdf") as resp:
+                assert resp.status == 401
+            async with client.get(
+                "/session/sess-test/file?path=report.pdf&token=secret"
+            ) as resp:
+                assert resp.status == 404
         finally:
             await client.close()
 
@@ -1163,6 +1173,70 @@ def test_desktop_bridge_options_returns_allowed_cors() -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_session_file_handler_serves_only_files_inside_session_cwd(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    output = workspace / "reports" / "summary.pdf"
+    output.parent.mkdir(parents=True)
+    output.write_bytes(b"pdf")
+    outside = tmp_path / "private.txt"
+    outside.write_text("secret", encoding="utf-8")
+    monkeypatch.setattr(
+        desktop_bridge,
+        "manager",
+        SimpleNamespace(
+            lock=threading.RLock(),
+            sessions={"sess-test": SimpleNamespace(cwd=str(workspace))},
+            workspace_dir=str(workspace),
+        ),
+    )
+
+    response = await desktop_bridge.session_file_handler(SimpleNamespace(
+        match_info={"sid": "sess-test"},
+        query={"path": "reports/summary.pdf"},
+    ))
+
+    assert Path(response._path) == output
+    assert response.headers["Content-Disposition"].endswith("summary.pdf")
+    with pytest.raises(web.HTTPNotFound):
+        await desktop_bridge.session_file_handler(SimpleNamespace(
+            match_info={"sid": "sess-test"},
+            query={"path": str(outside)},
+        ))
+
+
+@pytest.mark.asyncio
+async def test_session_image_handler_serves_preview_from_session_cwd(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    image = workspace / "plan" / "diagram.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"png")
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"private")
+    monkeypatch.setattr(
+        desktop_bridge,
+        "manager",
+        SimpleNamespace(
+            lock=threading.RLock(),
+            sessions={"sess-test": SimpleNamespace(cwd=str(workspace))},
+            workspace_dir=str(workspace),
+        ),
+    )
+
+    response = await desktop_bridge.session_image_handler(SimpleNamespace(
+        match_info={"sid": "sess-test"},
+        query={"path": str(image)},
+    ))
+
+    assert Path(response._path) == image
+    assert response.headers["Content-Type"] == "image/png"
+    with pytest.raises(web.HTTPNotFound):
+        await desktop_bridge.session_image_handler(SimpleNamespace(
+            match_info={"sid": "sess-test"},
+            query={"path": str(outside)},
+        ))
 
 
 def test_desktop_bridge_ws_requires_query_token_and_sends_bridge_ready() -> None:
@@ -1482,7 +1556,7 @@ def _terminal(status: str, reason: str, text: str = "", data=None) -> dict:
 
 def _run_terminal(status: str, reason: str, text: str = "", data=None):
     class TerminalRunner:
-        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None, prompt_capabilities=None):
             out = queue.Queue()
             out.put(_terminal(status, reason, text, data))
             return out
@@ -1579,8 +1653,9 @@ def test_run_agent_turn_keeps_cumulative_partial_once() -> None:
         def __init__(self):
             self.prompts = []
 
-        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None, prompt_capabilities=None):
             self.prompts.append((prompt, images))
+            self.prompt_capabilities = prompt_capabilities
             out = queue.Queue()
             out.put({"type": "chunk", "text": "Hel", "source": "agent", "turn": 1})
             out.put({"type": "chunk", "text": "Hello", "source": "agent", "turn": 1})
@@ -1602,7 +1677,10 @@ def test_run_agent_turn_keeps_cumulative_partial_once() -> None:
 
     manager.run_agent_turn(sess, "hello")
 
-    assert runner.prompts == [("hello", [])]
+    assert len(runner.prompts) == 1
+    assert runner.prompts[0][0] == "hello"
+    assert runner.prompt_capabilities == ("file_delivery",)
+    assert runner.prompts[0][1] == []
     assert sess.status == "idle"
     assert sess.partial is None
     assert sess.messages[-1]["role"] == "assistant"
@@ -1630,7 +1708,7 @@ def test_run_agent_turn_refreshes_token_usage() -> None:
     class TokenRunner:
         _agent = FakeAgent()
 
-        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None, prompt_capabilities=None):
             out = queue.Queue()
             out.put({"type": "chunk", "text": "Hello", "source": "agent", "turn": 1})
             out.put(_terminal("completed", "completion_certificate", "Hello"))
@@ -1659,7 +1737,7 @@ def test_run_agent_turn_preserves_incremental_runner_chunks() -> None:
     class IncrementalRunner:
         inc_out = True
 
-        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None, prompt_capabilities=None):
             out = queue.Queue()
             out.put({"type": "chunk", "text": "Hel", "source": "agent", "turn": 1})
             out.put({"type": "chunk", "text": "lo", "source": "agent", "turn": 1})
@@ -2086,7 +2164,7 @@ def _plan_contract_runner(terminal: dict, mode=None):
         def __init__(self, agent):
             self._agent = agent
 
-        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None, prompt_capabilities=None):
             out = queue.Queue()
             out.put(terminal)
             return out
@@ -2189,7 +2267,7 @@ def test_start_plan_creates_workspace_and_submits_plan(monkeypatch) -> None:
     captured = {}
 
     class FakeRunner:
-        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None, prompt_capabilities=None):
             captured["prompt"] = prompt
             captured["task_mode"] = task_mode
             captured["plan_path"] = plan_path
@@ -2248,7 +2326,7 @@ def test_start_plan_rejects_active_plan(monkeypatch) -> None:
 
 def test_start_plan_rolls_back_on_submission_failure(monkeypatch) -> None:
     class RaisingRunner:
-        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None, prompt_capabilities=None):
             raise RuntimeError("boom")
 
     manager = desktop_bridge.AgentManager()
@@ -2285,7 +2363,7 @@ def test_execute_plan_requires_plan_file(monkeypatch) -> None:
 
 def test_execute_plan_rolls_back_to_ready_on_failure(monkeypatch) -> None:
     class RaisingRunner:
-        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None, prompt_capabilities=None):
             raise RuntimeError("boom")
 
     manager = desktop_bridge.AgentManager()
@@ -2307,10 +2385,11 @@ def test_execute_plan_submits_executing_task(monkeypatch) -> None:
     captured = {}
 
     class FakeRunner:
-        def put_task(self, prompt, images=None, task_mode=None, plan_path=None):
+        def put_task(self, prompt, images=None, task_mode=None, plan_path=None, prompt_capabilities=None):
             captured["prompt"] = prompt
             captured["task_mode"] = task_mode
             captured["plan_path"] = plan_path
+            captured["prompt_capabilities"] = prompt_capabilities
             out = queue.Queue()
             out.put(_plan_terminal(certificate=None))
             return out
@@ -2330,6 +2409,7 @@ def test_execute_plan_submits_executing_task(monkeypatch) -> None:
     assert result["planPath"] == str(plan_file)
     assert captured["task_mode"] == desktop_bridge.TaskMode.EXECUTING
     assert captured["plan_path"] == str(plan_file)
+    assert captured["prompt_capabilities"] == ("file_delivery",)
     assert captured["prompt"] == "do it"
     assert sess.plan_status == "executing"
 

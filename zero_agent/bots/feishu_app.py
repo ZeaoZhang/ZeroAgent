@@ -32,7 +32,7 @@ from zero_agent.bots.common import (
     AgentBotMixin,
     channel_is_linked,
     ensure_single_instance,
-    file_delivery_hint,
+    PROMPT_CAPABILITY_FILE_DELIVERY,
     bot_config_source,
     split_text,
     load_keys,
@@ -682,9 +682,10 @@ class FeishuApp(AgentBotMixin):
             za._turn_end_hooks[hook_key] = _make_task_hook(card, task_id)
             za._fs_active_task_id = task_id
             dq = runner.put_task(
-                f"{file_delivery_hint(runner)}\n\n{text}",
+                text,
                 source=self.source,
                 images=images or None,
+                prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
             )
             start = time.time()
             while state["running"]:

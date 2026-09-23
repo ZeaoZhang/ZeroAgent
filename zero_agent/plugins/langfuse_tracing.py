@@ -130,8 +130,14 @@ class LangfuseTracer:
         self._active_agent: ContextVar[Any] = ContextVar(
             f"langfuse_agent_{id(self)}", default=None
         )
+        self._active_turn: ContextVar[Any] = ContextVar(
+            f"langfuse_turn_{id(self)}", default=None
+        )
         self._agent_token: ContextVar[Any] = ContextVar(
             f"langfuse_agent_token_{id(self)}", default=None
+        )
+        self._turn_token: ContextVar[Any] = ContextVar(
+            f"langfuse_turn_token_{id(self)}", default=None
         )
         self._active_tools: ContextVar[dict[str, list[Any]]] = ContextVar(
             f"langfuse_tools_{id(self)}", default={}
@@ -208,6 +214,8 @@ class LangfuseTracer:
             return
         token = self._active_agent.set(observation)
         self._agent_token.set(token)
+        self._active_turn.set(None)
+        self._turn_token.set(None)
 
     def finish_agent(self, context: dict) -> None:
         """Finish the root Agent observation and flush completed data."""
@@ -222,17 +230,38 @@ class LangfuseTracer:
                     self._end(tool_observation)
         self._active_tools.set({})
 
+        terminal = context.get("terminal")
+        if self._active_turn.get() is not None:
+            self.finish_turn_metadata(
+                {
+                    "turn": getattr(terminal, "turn", context.get("turns", 0)),
+                    "terminal": terminal,
+                    "aborted": True,
+                }
+            )
+
         observation = self._active_agent.get()
         if observation is not None:
-            terminal = context.get("terminal")
             status = getattr(terminal, "status", "")
             reason = getattr(terminal, "reason", "")
+            certificate = getattr(terminal, "certificate", None)
             self._update(
                 observation,
                 output={
                     "turns": context.get("turns", 0),
+                    "terminal_turn": getattr(terminal, "turn", 0),
                     "status": str(getattr(status, "value", status)),
                     "reason": str(getattr(reason, "value", reason)),
+                    "model": context.get("model", "unknown"),
+                    "certificate": (
+                        {
+                            "evidence_count": getattr(certificate, "evidence_count", None),
+                            "verify_status": getattr(certificate, "verify_status", None),
+                            "plan_remaining": getattr(certificate, "plan_remaining", None),
+                        }
+                        if certificate is not None
+                        else None
+                    ),
                 },
             )
             self._end(observation)
@@ -249,14 +278,107 @@ class LangfuseTracer:
                 self._replace_client(pending)
 
     def start_turn_metadata(self, context: dict) -> None:
-        """Reserve the turn hook for future metadata without creating extra spans."""
+        """Start a per-turn span so generations and tools have useful grouping."""
+        parent = self._active_agent.get()
+        if not self.enabled or parent is None:
+            return
+
+        messages = context.get("messages") or []
+        tools = context.get("tools") or []
+        try:
+            input_chars = len(json.dumps(messages, ensure_ascii=False, default=str))
+        except Exception:
+            input_chars = 0
+        tool_names = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            function = tool.get("function")
+            name = (
+                function.get("name")
+                if isinstance(function, dict)
+                else tool.get("name")
+            )
+            if name:
+                tool_names.append(str(name))
+
+        turn = context.get("turn", 0)
+        observation = self._start_observation(
+            trace_context=self._trace_context(parent),
+            name=f"turn-{turn}",
+            as_type="span",
+            input={
+                "message_count": len(messages),
+                "input_chars": input_chars,
+                "tool_count": len(tool_names),
+            },
+            metadata={
+                "turn": turn,
+                "model": context.get("model", "unknown"),
+                "tool_names": tool_names,
+            },
+        )
+        if observation is not None:
+            token = self._active_turn.set(observation)
+            self._turn_token.set(token)
 
     def finish_turn_metadata(self, context: dict) -> None:
-        """Reserve the turn hook for future metadata without creating extra spans."""
+        """Finish one turn with bounded summaries of its calls and outcome."""
+        observation = self._active_turn.get()
+        if observation is None:
+            return
+
+        tool_names = []
+        for call in context.get("tool_calls") or []:
+            if isinstance(call, dict):
+                function = call.get("function")
+                name = (
+                    function.get("name")
+                    if isinstance(function, dict)
+                    else call.get("name") or call.get("tool_name")
+                )
+            else:
+                function = getattr(call, "function", None)
+                name = getattr(function, "name", None)
+            if name:
+                tool_names.append(str(name))
+
+        terminal = context.get("terminal")
+        terminal_status = getattr(terminal, "status", "")
+        terminal_reason = getattr(terminal, "reason", "")
+        metadata = {
+            "turn": context.get("turn", 0),
+            "model": context.get("model", "unknown"),
+            "tool_names": tool_names,
+            "tool_result_count": len(context.get("tool_results") or []),
+            "next_prompt_chars": len(str(context.get("next_prompt") or "")),
+            "terminal_status": str(getattr(terminal_status, "value", terminal_status)),
+            "terminal_reason": str(getattr(terminal_reason, "value", terminal_reason)),
+        }
+        self._update(
+            observation,
+            output=metadata,
+            metadata=metadata,
+            **(
+                {
+                    "level": "ERROR",
+                    "status_message": str(
+                        terminal_reason or "turn ended before completion"
+                    ),
+                }
+                if context.get("aborted")
+                else {}
+            ),
+        )
+        self._end(observation)
+        token = self._turn_token.get()
+        if token is not None:
+            self._active_turn.reset(token)
+            self._turn_token.set(None)
 
     def start_tool(self, context: dict) -> Any:
         """Start a child Tool observation under the active Agent."""
-        parent = self._active_agent.get()
+        parent = self._active_turn.get() or self._active_agent.get()
         if not self.enabled or parent is None:
             return None
         tool_name = str(context.get("tool_name") or "unknown")
@@ -314,7 +436,7 @@ class LangfuseTracer:
         model_parameters: dict[str, Any],
     ) -> Any:
         """Start one generation observation for one concrete LLM request."""
-        parent = self._active_agent.get()
+        parent = self._active_turn.get() or self._active_agent.get()
         kwargs: dict[str, Any] = {
             "name": name,
             "as_type": "generation",

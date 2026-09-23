@@ -353,6 +353,23 @@ export LANGFUSE_SECRET_KEY=sk-xxx
 export LANGFUSE_HOST=https://us.cloud.langfuse.com
 ```
 
+### Langfuse MCP for Codex
+
+The project-scoped Codex configuration in `.codex/config.toml` connects to the
+official US Langfuse data MCP. Its local header helper reads the existing
+project-scoped credentials from the ignored `config.yaml` (or falls back to
+`LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` environment variables) and
+generates the Basic Auth header at runtime. Credentials are not stored in the
+tracked MCP configuration.
+
+Only read tools for observations, metrics, scores, prompts, datasets, and
+experiments are enabled. Trust this repository in Codex and restart the Codex
+session for the project MCP configuration to load. This configuration makes
+Langfuse tools available to Codex while working in this repository; it does not
+add MCP client support to ZeroAgent's own ACP/runtime.
+
+See the [official Langfuse MCP setup](https://langfuse.com/docs/api-and-data-platform/features/mcp-server).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

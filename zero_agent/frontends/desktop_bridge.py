@@ -51,6 +51,7 @@ from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import AgentConfig, default_config_path, load_default_config
 from zero_agent.core.types import TaskMode
+from zero_agent.core.localization import PROMPT_CAPABILITY_FILE_DELIVERY
 from zero_agent.frontends.plan_command import create_plan_workspace
 from zero_agent.bots import channel_control
 from zero_agent.bots.channel_config import (
@@ -59,6 +60,10 @@ from zero_agent.bots.channel_config import (
     update_channel_config,
 )
 from zero_agent.frontends.session_store import SessionStore
+from zero_agent.utils.subagent_registry import (
+    process_is_running,
+    read_subagent_events,
+)
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -257,6 +262,7 @@ class Session:
     status: str = "idle"  # idle|running|waiting|error|cancelled
     agent: Any = None
     thread: Optional[threading.Thread] = None
+    pending_turns: List[dict] = field(default_factory=list)
     last_error: str = ""
     terminal_status: str = ""
     terminal_reason: str = ""
@@ -357,10 +363,17 @@ def _normalize_sub_agents(value: Any) -> List[Dict[str, Any]]:
         if not isinstance(raw, dict):
             continue
         agent = copy.deepcopy(raw)
-        if agent.get("status") == "running":
-            agent["status"] = "cancelled"
-            agent["updated_at"] = time.time()
-            agent["reason"] = "bridge_restarted"
+        if agent.get("status") in {"running", "waiting"}:
+            if agent.get("type") == "subagent" and process_is_running(agent.get("pid")):
+                pass
+            else:
+                agent["status"] = "failed" if agent.get("type") == "subagent" else "cancelled"
+                agent["updated_at"] = time.time()
+                agent["reason"] = (
+                    "process_exited_without_final_event"
+                    if agent.get("type") == "subagent"
+                    else "bridge_restarted"
+                )
         agents.append(agent)
     return agents
 
@@ -484,6 +497,8 @@ class AgentManager:
         # Existing sessions retain their own override.
         self.current_model_override: Optional[str] = None
         self.session_idempotency_results: OrderedDict[tuple[str, str], dict] = OrderedDict()
+        self._subagent_registry_offsets: Dict[str, int] = {}
+        self._subagent_monitor_thread: Optional[threading.Thread] = None
         self.groups: OrderedDict[str, SessionGroup] = OrderedDict()
         self.session_store = SessionStore(
             os.path.join(self.sessions_dir, "sessions.sqlite3")
@@ -496,6 +511,12 @@ class AgentManager:
                 self.active_session_id
             ].model_override
         self._last_persisted_state = self._capture_session_state()
+        if any(
+            agent.get("type") == "subagent" and agent.get("status") in {"running", "waiting"}
+            for sess in self.sessions.values()
+            for agent in sess.sub_agents
+        ):
+            self._ensure_subagent_monitor()
 
     def _persist_groups(self, *, raise_on_error: bool = False) -> None:
         """Persist group entities to SQLite."""
@@ -662,6 +683,100 @@ class AgentManager:
         finally:
             with contextlib.suppress(Exception):
                 os.chdir(old_cwd)
+
+    def _subagent_registry_path(self, sess: Session) -> str:
+        safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", sess.id)[:100] or "session"
+        registry_dir = Path(self.sessions_dir) / ".subagents"
+        return str(registry_dir / f"{safe_id}.jsonl")
+
+    def _configure_subagent_tracking(self, agent: Any, sess: Session) -> bool:
+        runner_agent = getattr(agent, "_agent", agent)
+        config = getattr(runner_agent, "config", None)
+        if config is None:
+            return False
+        registry_path = self._subagent_registry_path(sess)
+        Path(registry_path).parent.mkdir(parents=True, exist_ok=True)
+        config._desktop_subagent_registry_path = registry_path
+        config._desktop_session_id = sess.id
+        config._desktop_agent_id = f"session:{sess.id}"
+        return True
+
+    def _ensure_subagent_monitor(self) -> None:
+        with self.lock:
+            if self._subagent_monitor_thread and self._subagent_monitor_thread.is_alive():
+                return
+            for sess in self.sessions.values():
+                if sess.id in self._subagent_registry_offsets:
+                    continue
+                try:
+                    size = os.path.getsize(self._subagent_registry_path(sess))
+                except OSError:
+                    size = 0
+                self._subagent_registry_offsets[sess.id] = size
+            self._subagent_monitor_thread = threading.Thread(
+                target=self._monitor_subagent_registries,
+                name="DesktopSubagentMonitor",
+                daemon=True,
+            )
+            self._subagent_monitor_thread.start()
+
+    def _monitor_subagent_registries(self) -> None:
+        while True:
+            with self.lock:
+                sessions = list(self.sessions.values())
+            for sess in sessions:
+                registry_path = self._subagent_registry_path(sess)
+                offset = self._subagent_registry_offsets.get(sess.id, 0)
+                events, next_offset = read_subagent_events(registry_path, offset)
+                self._subagent_registry_offsets[sess.id] = next_offset
+                changed = False
+                with self.lock:
+                    if self.sessions.get(sess.id) is not sess:
+                        continue
+                    for event in events:
+                        if event.get("type") != "subagent" or not event.get("id"):
+                            continue
+                        event_id = str(event["id"])
+                        try:
+                            event_time = float(event.get("updated_at") or event.get("created_at") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        existing = next(
+                            (record for record in sess.sub_agents if record.get("id") == event_id),
+                            None,
+                        )
+                        if existing is not None:
+                            try:
+                                existing_time = float(existing.get("updated_at") or 0)
+                            except (TypeError, ValueError):
+                                existing_time = 0
+                            if existing_time > event_time:
+                                continue
+                            existing.update(copy.deepcopy(event))
+                        else:
+                            record = copy.deepcopy(event)
+                            if sess.sub_agents and sess.sub_agents[0].get("type") == "session-agent":
+                                sess.sub_agents.insert(1, record)
+                            else:
+                                sess.sub_agents.insert(0, record)
+                        changed = True
+
+                    for record in sess.sub_agents:
+                        if (
+                            record.get("type") == "subagent"
+                            and record.get("status") in {"running", "waiting"}
+                            and not process_is_running(record.get("pid"))
+                        ):
+                            record["status"] = "failed"
+                            record["updated_at"] = time.time()
+                            record["reason"] = "process_exited_without_final_event"
+                            changed = True
+                    if changed:
+                        sess.updated_at = time.time()
+                        self._persist_sessions()
+                if changed:
+                    emit_session_state(sess, sess.status)
+            time.sleep(0.5)
     def list_model_profiles(self):
         self.ensure_project_import_path()
         try:
@@ -1173,17 +1288,34 @@ class AgentManager:
         sid: str,
         prompt: Any,
         images: Optional[list] = None,
+        display_text: Optional[str] = None,
         *,
         task_mode: TaskMode = TaskMode.OPEN,
         plan_path: Optional[str] = None,
     ) -> dict:
         prompt, image_ids = normalize_prompt(prompt, images)
+        visible_text = str(display_text if display_text is not None else prompt).strip()
         with self.lock:
             sess = self.sessions.get(sid)
             if not sess:
                 raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
             if sess.status == "running":
-                raise web.HTTPConflict(text=json.dumps({"error": "session is already running"}, ensure_ascii=False), content_type="application/json")
+                queued = {
+                    "queue_id": uuid.uuid4().hex,
+                    "prompt": prompt,
+                    "display_content": visible_text,
+                    "image_ids": image_ids,
+                }
+                sess.pending_turns.append(queued)
+                sess.updated_at = time.time()
+                return {
+                    "ok": True,
+                    "sessionId": sid,
+                    "accepted": True,
+                    "queued": True,
+                    "queueId": queued["queue_id"],
+                    "queuePosition": len(sess.pending_turns),
+                }
             extra = {}
             if image_ids:
                 extra["image_ids"] = image_ids
@@ -1203,7 +1335,7 @@ class AgentManager:
             sess.thread = t
             t.start()
             seq = sess.msg_seq
-        return {"ok": True, "sessionId": sid, "accepted": True, "userMessageId": user_msg["id"], "seq": seq}
+        return {"ok": True, "sessionId": sid, "accepted": True, "queued": False, "userMessageId": user_msg["id"], "seq": seq}
 
     def start_plan(self, sid: str, task: str) -> dict:
         """Create a plan workspace and submit the first PLAN task atomically."""
@@ -1362,7 +1494,19 @@ class AgentManager:
             "reason": "",
         }
         sess.agent_turn_token = token
-        sess.sub_agents[:] = [record]
+        child_agents = [
+            item for item in sess.sub_agents
+            if item.get("type") == "subagent"
+        ]
+        running_children = [
+            item for item in child_agents
+            if item.get("status") in {"running", "waiting"}
+        ]
+        completed_children = [
+            item for item in child_agents
+            if item.get("status") not in {"running", "waiting"}
+        ]
+        sess.sub_agents[:] = [record, *running_children, *completed_children[:50]]
         return token, record
 
     def _update_agent_locked(self, sess: Session, token: str, status: str, reason: str = "") -> Optional[dict]:
@@ -1389,10 +1533,13 @@ class AgentManager:
         with self.lock:
             if self.sessions.get(sess.id) is not sess:
                 return None
+            token: Optional[str] = None
             try:
                 if sess.agent is None:
                     sess.agent = self.make_agent(sess)
                 agent = sess.agent
+                if self._configure_subagent_tracking(agent, sess):
+                    self._ensure_subagent_monitor()
                 # A runner may have been created by an earlier turn. Apply a
                 # newly selected model before reusing that runner.
                 desired_backend = sess.model_override or self.config.get(
@@ -1412,21 +1559,23 @@ class AgentManager:
                     return None
                 if not hasattr(agent, "put_task"):
                     raise RuntimeError("AgentRunner object has no put_task method")
+                token, record = self._register_agent_locked(sess)
+                runtime_config = getattr(za, "config", None)
+                if runtime_config is not None:
+                    runtime_config._desktop_agent_id = record["id"]
                 display_q = agent.put_task(
                     prompt,
                     images=images or [],
                     task_mode=task_mode,
                     plan_path=plan_path,
+                    prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
                 )
             except Exception as exc:
-                if sess.sub_agents:
-                    sess.sub_agents[0]["status"] = "failed"
-                    sess.sub_agents[0]["updated_at"] = time.time()
-                    sess.sub_agents[0]["reason"] = str(exc)
+                if token:
+                    self._update_agent_locked(sess, token, "failed", str(exc))
                 sess.agent_turn_token = ""
                 self._persist_sessions()
                 raise
-            token, _ = self._register_agent_locked(sess)
             self._persist_sessions()
             return agent, display_q, token
 
@@ -1435,6 +1584,39 @@ class AgentManager:
             self._drain_turn(sess, agent, display_q, token)
         except Exception as exc:
             self._fail_turn(sess, exc, token)
+
+    def _prepare_next_turn_locked(self, sess: Session) -> Optional[threading.Thread]:
+        """Promote one queued prompt after the current turn has fully ended."""
+        if not sess.pending_turns or self.sessions.get(sess.id) is not sess:
+            return None
+
+        queued = sess.pending_turns.pop(0)
+        extra = {
+            "display_content": queued.get("display_content", queued.get("prompt", "")),
+            "queue_id": queued.get("queue_id", ""),
+        }
+        if queued.get("image_ids"):
+            extra["image_ids"] = list(queued["image_ids"])
+        self.add_message(sess, "user", str(queued.get("prompt") or ""), **extra)
+        sess.status = "running"
+        sess.last_error = ""
+        sess.terminal_status = ""
+        sess.terminal_reason = ""
+        sess.partial = {
+            "id": sess.msg_seq + 1,
+            "role": "assistant",
+            "content": "",
+            "ts": time.time(),
+            "partial": True,
+        }
+        thread = threading.Thread(
+            target=self.run_agent_turn,
+            args=(sess, str(queued.get("prompt") or ""), None),
+            daemon=True,
+            name=f"Queued-Turn-{sess.id}",
+        )
+        sess.thread = thread
+        return thread
 
     def _drain_turn(self, sess: Session, agent: Any, display_q, token: str) -> None:
         pieces: list[str] = []
@@ -1469,6 +1651,7 @@ class AgentManager:
         terminal_status = str(terminal.get("status") or "failed")
         reason = str(terminal.get("reason") or "")
         text = str(terminal.get("text") or "")
+        next_thread: Optional[threading.Thread] = None
         with self.lock:
             if not self._turn_is_current_locked(sess, token):
                 return
@@ -1530,11 +1713,16 @@ class AgentManager:
             }.get(terminal_status, "failed")
             self._update_agent_locked(sess, token, agent_status, reason)
             sess.updated_at = time.time()
+            next_thread = self._prepare_next_turn_locked(sess)
             self._persist_sessions()
-        emit_session_state(sess, sess.status)
+            next_state = sess.status
+        emit_session_state(sess, next_state)
+        if next_thread:
+            next_thread.start()
 
     def _fail_turn(self, sess: Session, exc: Exception, token: Optional[str] = None) -> None:
         tb = traceback.format_exc()
+        next_thread: Optional[threading.Thread] = None
         with self.lock:
             if token is not None and not self._turn_is_current_locked(sess, token):
                 return
@@ -1546,9 +1734,13 @@ class AgentManager:
             if token is not None:
                 self._update_agent_locked(sess, token, "failed", str(exc))
             self.add_message(sess, "error", str(exc))
+            next_thread = self._prepare_next_turn_locked(sess)
             self._persist_sessions()
+            next_state = sess.status
         print(tb, file=sys.stderr)
-        emit_session_state(sess, "error")
+        emit_session_state(sess, next_state)
+        if next_thread:
+            next_thread.start()
 
     def run_agent_turn(
         self,
@@ -1601,6 +1793,13 @@ class AgentManager:
             token = sess.agent_turn_token
             if token:
                 self._update_agent_locked(sess, token, "cancelled", "user_cancelled")
+            self._cancel_child_agents_locked(sess)
+            cancelled_queue_ids = [
+                str(item.get("queue_id") or "")
+                for item in sess.pending_turns
+                if item.get("queue_id")
+            ]
+            sess.pending_turns.clear()
             sess.agent_turn_token = ""
             sess.status = "cancelled"
             sess.partial = None
@@ -1609,7 +1808,7 @@ class AgentManager:
             sess.updated_at = time.time()
             self._persist_sessions()
         emit_session_state(sess, "cancelled")
-        return {"ok": True, "sessionId": sid}
+        return {"ok": True, "sessionId": sid, "cancelledQueueIds": cancelled_queue_ids}
 
     def get_agents(self, sid: str) -> list[dict]:
         with self.lock:
@@ -1623,24 +1822,77 @@ class AgentManager:
             sess = self.sessions.get(sid)
             if not sess:
                 raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
-            if not sess.sub_agents or sess.sub_agents[0].get("id") != agent_id:
+            record = next(
+                (item for item in sess.sub_agents if item.get("id") == agent_id),
+                None,
+            )
+            if record is None:
                 raise web.HTTPNotFound(text=json.dumps({"error": "agent not found"}, ensure_ascii=False), content_type="application/json")
-            if sess.agent and hasattr(sess.agent, "abort"):
-                with contextlib.suppress(Exception):
-                    sess.agent.abort()
-            token = sess.agent_turn_token
-            if token:
-                self._update_agent_locked(sess, token, "cancelled", "user_cancelled")
-            sess.agent_turn_token = ""
-            sess.status = "cancelled"
-            sess.partial = None
-            sess.terminal_status = "cancelled"
-            sess.terminal_reason = "user_cancelled"
-            sess.updated_at = time.time()
-            self._persist_sessions()
-            agents = _clone_agent_records(sess.sub_agents)
-        emit_session_state(sess, "cancelled")
+            record_type = record.get("type") or "session-agent"
+            if record_type == "subagent":
+                if record.get("status") in {"running", "waiting"}:
+                    try:
+                        pid = int(record.get("pid") or 0)
+                    except (TypeError, ValueError):
+                        pid = 0
+                    try:
+                        if pid > 0:
+                            if record.get("detached") and os.name != "nt":
+                                os.killpg(pid, signal.SIGTERM)
+                            else:
+                                os.kill(pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    except OSError:
+                        record["reason"] = "cancel_signal_failed"
+                    record["status"] = "cancelled"
+                    record["updated_at"] = time.time()
+                    record["reason"] = record.get("reason") or "user_cancelled"
+                    sess.updated_at = time.time()
+                    self._persist_sessions()
+                agents = _clone_agent_records(sess.sub_agents)
+                state = sess.status
+            elif record_type == "session-agent" and record is sess.sub_agents[0]:
+                if sess.agent and hasattr(sess.agent, "abort"):
+                    with contextlib.suppress(Exception):
+                        sess.agent.abort()
+                token = sess.agent_turn_token
+                if token:
+                    self._update_agent_locked(sess, token, "cancelled", "user_cancelled")
+                self._cancel_child_agents_locked(sess)
+                sess.agent_turn_token = ""
+                sess.status = "cancelled"
+                sess.partial = None
+                sess.terminal_status = "cancelled"
+                sess.terminal_reason = "user_cancelled"
+                sess.updated_at = time.time()
+                self._persist_sessions()
+                agents = _clone_agent_records(sess.sub_agents)
+                state = "cancelled"
+            else:
+                raise web.HTTPNotFound(text=json.dumps({"error": "agent not found"}, ensure_ascii=False), content_type="application/json")
+        emit_session_state(sess, state)
         return {"ok": True, "sessionId": sid, "agentId": agent_id, "agents": agents}
+
+    def _cancel_child_agents_locked(self, sess: Session) -> None:
+        for record in sess.sub_agents:
+            if record.get("type") != "subagent" or record.get("status") not in {"running", "waiting"}:
+                continue
+            try:
+                pid = int(record.get("pid") or 0)
+            except (TypeError, ValueError):
+                pid = 0
+            try:
+                if pid > 0:
+                    if record.get("detached") and os.name != "nt":
+                        os.killpg(pid, signal.SIGTERM)
+                    else:
+                        os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, OSError):
+                pass
+            record["status"] = "cancelled"
+            record["updated_at"] = time.time()
+            record["reason"] = "parent_session_cancelled"
 
 
 import base64
@@ -1830,7 +2082,7 @@ def _request_auth_tokens(request: web.Request) -> tuple[str, ...]:
     candidates: list[str] = []
     # <img> requests cannot attach Authorization headers. Allow the bridge
     # token in the query only for the read-only, session-scoped image route.
-    if request.method == "GET" and re.fullmatch(r"/session/[^/]+/image", request.path):
+    if request.method == "GET" and re.fullmatch(r"/session/[^/]+/(?:image|file)", request.path):
         candidates.append(request.query.get("token", "").strip())
     auth = request.headers.get("Authorization", "")
     scheme, _, value = auth.partition(" ")
@@ -2241,8 +2493,9 @@ async def prompt_handler(request):
     data = await read_json(request)
     prompt = data.get("prompt", data.get("content", data.get("message", "")))
     images = data.get("images") or []
+    display_text = data.get("displayText")
     try:
-        result = manager.submit_prompt(sid, prompt, images)
+        result = manager.submit_prompt(sid, prompt, images, display_text=display_text)
     except ValueError as exc:
         raise web.HTTPBadRequest(
             text=json.dumps({"error": str(exc)}, ensure_ascii=False),
@@ -2295,6 +2548,40 @@ async def session_image_handler(request):
 
     response = web.FileResponse(image_path)
     response.headers["Content-Type"] = content_type
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+async def session_file_handler(request):
+    """Serve a generated session file as a download, confined to its cwd."""
+    sid = request.match_info["sid"]
+    raw_path = str(request.query.get("path") or "").strip()
+    if not raw_path:
+        raise web.HTTPNotFound(text="file not found")
+
+    with manager.lock:
+        sess = manager.sessions.get(sid)
+        if sess is None:
+            raise web.HTTPNotFound(text="file not found")
+        cwd = sess.cwd or manager.workspace_dir
+
+    try:
+        root = Path(cwd).expanduser().resolve(strict=True)
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        file_path = candidate.resolve(strict=True)
+        file_path.relative_to(root)
+        if not file_path.is_file():
+            raise ValueError("not a regular file")
+    except (OSError, RuntimeError, ValueError):
+        raise web.HTTPNotFound(text="file not found")
+
+    response = web.FileResponse(file_path)
+    response.headers["Content-Disposition"] = (
+        "attachment; filename*=UTF-8''" + urllib.parse.quote(file_path.name)
+    )
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
@@ -2510,6 +2797,7 @@ def create_app(
     app.router.add_post("/session/{sid}/prompt", prompt_handler)
     app.router.add_get("/session/{sid}/messages", messages_handler)
     app.router.add_get("/session/{sid}/image", session_image_handler)
+    app.router.add_get("/session/{sid}/file", session_file_handler)
     app.router.add_post("/session/{sid}/cancel", cancel_handler)
     app.router.add_post("/session/{sid}/plan", plan_handler)
     app.router.add_post("/session/{sid}/plan/execute", plan_execute_handler)

@@ -37,7 +37,11 @@ from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.channel_config import ChannelConfigError
 from zero_agent.bots.common import load_keys
 from zero_agent.bots.common import channel_is_linked
-from zero_agent.bots.common import file_delivery_hint, resolve_output_files, runner_workspace_dir
+from zero_agent.bots.common import (
+    PROMPT_CAPABILITY_FILE_DELIVERY,
+    resolve_output_files,
+    runner_workspace_dir,
+)
 from zero_agent.bots.common import terminal_notice
 from zero_agent.bots.common import terminal_reply_text
 
@@ -554,11 +558,11 @@ def on_message(bot: WxBotClient, msg):
         return
 
     def _handle():
-        prompt = (
-            text if text.startswith("/")
-            else f"{file_delivery_hint(runner)}\n\n{text}"
+        dq = runner.put_task(
+            text,
+            source="wechat",
+            prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
         )
-        dq = runner.put_task(prompt, source="wechat")
         _typing_stop = threading.Event()
 
         def _keep_typing():
@@ -636,6 +640,7 @@ def on_message(bot: WxBotClient, msg):
                 print(f"[WX] sent media: {fpath}", file=sys.__stdout__)
             except Exception as e:
                 print(f"[WX] send media err: {e}", file=sys.__stdout__)
+                _wx_send(f"⚠️ 文件发送失败: {os.path.basename(fpath)}")
 
     threading.Thread(target=_handle, daemon=True).start()
 

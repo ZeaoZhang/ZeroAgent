@@ -10,13 +10,15 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import base64
+import hashlib
 import os
 import sys
 import threading
 import time
 from collections import deque
 from pathlib import Path
+
+import requests
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
@@ -54,6 +56,8 @@ PROCESSED_IDS = deque(maxlen=1000)
 USER_TASKS: dict = {}
 SEQ_LOCK = threading.Lock()
 MSG_SEQ = 1
+_QQ_MAX_FILE_SIZE = 200 * 1024 * 1024
+_QQ_MD5_10M_SIZE = 10_002_432
 
 
 def _next_msg_seq():
@@ -62,6 +66,36 @@ def _next_msg_seq():
     with SEQ_LOCK:
         MSG_SEQ += 1
         return MSG_SEQ
+
+
+def _hash_qq_upload(path: Path):
+    """Compute the checksums QQ requires before a local file upload."""
+    md5 = hashlib.md5()
+    sha1 = hashlib.sha1()
+    md5_10m = hashlib.md5()
+    size = 0
+    prefix_size = 0
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            size += len(chunk)
+            md5.update(chunk)
+            sha1.update(chunk)
+            if prefix_size < _QQ_MD5_10M_SIZE:
+                prefix = chunk[:_QQ_MD5_10M_SIZE - prefix_size]
+                md5_10m.update(prefix)
+                prefix_size += len(prefix)
+    return {
+        "size": size,
+        "md5": md5.hexdigest(),
+        "sha1": sha1.hexdigest(),
+        "md5_10m": md5_10m.hexdigest(),
+    }
+
+
+def _read_qq_upload_part(path: Path, offset: int, size: int) -> bytes:
+    with path.open("rb") as source:
+        source.seek(offset)
+        return source.read(size)
 
 
 def _build_intents():
@@ -173,52 +207,104 @@ class QQApp(AgentBotMixin):
                 })
 
     async def send_file(self, chat_id, file_path, *, msg_id=None, is_group=False, **_):
-        """Upload a local image and deliver it as a QQ rich-media message."""
+        """Upload an image or file and deliver it as a QQ rich-media message."""
         if not self.client:
-            return
-        if Path(file_path).suffix.lower() not in IMAGE_EXTS:
-            await self.send_text(
-                chat_id, f"⚠️ QQ 当前仅支持自动发送图片: {os.path.basename(file_path)}",
-                msg_id=msg_id, is_group=is_group,
-            )
             return
 
         try:
-            image_data = await asyncio.to_thread(Path(file_path).read_bytes)
-            encoded = base64.b64encode(image_data).decode("ascii")
+            path = Path(file_path)
+            file_type = 1 if Path(file_path).suffix.lower() in IMAGE_EXTS else 4
             api = self.client.api
-            if is_group:
-                route = Route(
-                    "POST", "/v2/groups/{group_openid}/files", group_openid=chat_id,
-                )
-                upload_payload = {
-                    "group_openid": chat_id, "file_type": 1, "file_data": encoded,
-                }
-                send_media = api.post_group_message
-                target = {"group_openid": chat_id}
-            else:
-                route = Route(
-                    "POST", "/v2/users/{openid}/files", openid=chat_id,
-                )
-                upload_payload = {"openid": chat_id, "file_type": 1, "file_data": encoded}
-                send_media = api.post_c2c_message
-                target = {"openid": chat_id}
+            target_key = "group_openid" if is_group else "openid"
+            route_scope = "groups" if is_group else "users"
+            send_media = api.post_group_message if is_group else api.post_c2c_message
+            hashes = await asyncio.to_thread(_hash_qq_upload, path)
+            if hashes["size"] <= 0:
+                raise ValueError("Cannot upload an empty file")
+            if hashes["size"] > _QQ_MAX_FILE_SIZE:
+                raise ValueError("QQ Bot file uploads are limited to 200 MiB")
 
-            uploader = getattr(api, "post_group_base64file" if is_group else "post_c2c_base64file", None)
-            if uploader:
-                upload = await uploader(**{
-                    **target, "file_type": 1, "file_data": encoded,
+            prepare_route = Route(
+                "POST", f"/v2/{route_scope}/{{{target_key}}}/upload_prepare",
+                **{target_key: chat_id},
+            )
+            prepare_payload = {
+                "file_type": file_type,
+                "file_name": path.name,
+                "file_size": str(hashes["size"]),
+                "md5": hashes["md5"],
+                "sha1": hashes["sha1"],
+                "md5_10m": hashes["md5_10m"],
+            }
+            prepared = await api._http.request(prepare_route, json=prepare_payload)
+            if not isinstance(prepared, dict) or not prepared.get("upload_id"):
+                raise RuntimeError("QQ upload preparation returned no upload_id")
+            try:
+                block_size = int(prepared["block_size"])
+                parts = prepared["parts"]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError("QQ upload preparation returned an invalid part plan") from exc
+            if block_size <= 0 or not isinstance(parts, list) or not parts:
+                raise RuntimeError("QQ upload preparation returned an empty part plan")
+
+            for part_number, part in enumerate(parts, start=1):
+                if not isinstance(part, dict):
+                    raise RuntimeError("QQ upload preparation returned an invalid part")
+                upload_url = part.get("presigned_url") or part.get("upload_url")
+                if not upload_url:
+                    raise RuntimeError("QQ upload part is missing its presigned URL")
+                part_index = part.get("index", part.get("part_index", part_number))
+                try:
+                    part_index = int(part_index)
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError("QQ upload part has an invalid index") from exc
+
+                offset = (part_number - 1) * block_size
+                part_data = await asyncio.to_thread(
+                    _read_qq_upload_part, path, offset, block_size,
+                )
+                if not part_data:
+                    raise RuntimeError("QQ upload part plan exceeds the local file size")
+                response = await asyncio.to_thread(
+                    requests.put, upload_url, data=part_data, timeout=300,
+                )
+                response.raise_for_status()
+
+                finish_route = Route(
+                    "POST", f"/v2/{route_scope}/{{{target_key}}}/upload_part_finish",
+                    **{target_key: chat_id},
+                )
+                await api._http.request(finish_route, json={
+                    "upload_id": prepared["upload_id"],
+                    "part_index": part_index,
+                    "block_size": str(len(part_data)),
+                    "md5": hashlib.md5(part_data).hexdigest(),
                 })
-            else:
-                upload = await api._http.request(route, json=upload_payload)
+
+            complete_route = Route(
+                "POST", f"/v2/{route_scope}/{{{target_key}}}/files",
+                **{target_key: chat_id},
+            )
+            upload = await api._http.request(complete_route, json={
+                "file_type": file_type,
+                "file_name": path.name,
+                "upload_id": prepared["upload_id"],
+                "srv_send_msg": False,
+            })
+            if not isinstance(upload, dict) or not upload.get("file_info"):
+                raise RuntimeError("QQ upload completion returned no file_info")
+
             await send_media(**{
-                **target, "msg_type": 7, "media": upload, "msg_id": msg_id,
+                target_key: chat_id,
+                "msg_type": 7,
+                "media": {"file_info": upload["file_info"]},
+                "msg_id": msg_id,
                 "msg_seq": _next_msg_seq(),
             })
         except Exception as exc:
-            print(f"[QQ] failed to send image {file_path}: {exc}")
+            print(f"[QQ] failed to send file {file_path}: {exc}")
             await self.send_text(
-                chat_id, f"⚠️ 图片发送失败: {os.path.basename(file_path)}",
+                chat_id, f"⚠️ 文件发送失败: {os.path.basename(file_path)}",
                 msg_id=msg_id, is_group=is_group,
             )
 

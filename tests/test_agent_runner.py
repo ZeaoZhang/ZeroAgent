@@ -11,6 +11,7 @@ import pytest
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import AgentConfig, LLMBackendConfig
+from zero_agent.core.localization import PROMPT_CAPABILITY_FILE_DELIVERY
 from zero_agent.core.types import TaskMode, TerminalEvent, TerminalStatus
 from zero_agent.runners.agent_runner import AgentRunner, _consume_agent_run
 
@@ -748,6 +749,29 @@ class TestAgentRunnerTaskDispatch:
         assert captured["prompt"] == "hello"
         assert captured["initial_mode"] is TaskMode.EXECUTING
         assert captured["plan_path"] == "plan.md"
+
+    def test_put_task_forwards_prompt_capability_without_changing_query(
+        self, mock_agent: ZeroAgent, monkeypatch
+    ) -> None:
+        captured = {}
+
+        def fake_run(prompt, **kwargs):
+            captured["prompt"] = prompt
+            captured["prompt_capabilities"] = kwargs.get("prompt_capabilities")
+            yield "ok"
+            return TerminalEvent(status=TerminalStatus.COMPLETED, reason="completion_certificate")
+
+        monkeypatch.setattr(mock_agent, "run", fake_run)
+        query = "send this image to the current conversation"
+        dq = AgentRunner(mock_agent).put_task(
+            query,
+            prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+        )
+
+        assert dq.get(timeout=3)["type"] == "chunk"
+        assert dq.get(timeout=3)["type"] == "terminal"
+        assert captured["prompt"] == query
+        assert captured["prompt_capabilities"] == (PROMPT_CAPABILITY_FILE_DELIVERY,)
 
     def test_put_task_defaults_to_open_contract(
         self, mock_agent: ZeroAgent, monkeypatch

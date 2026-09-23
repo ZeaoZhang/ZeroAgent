@@ -817,7 +817,7 @@ def smart_truncate(soup, budget, _depth=0):
         else: cut(c, new_keep)
     return soup
 
-def execute_js_rich(script, driver, no_monitor=False):
+def execute_js_rich(script, driver, no_monitor=False, timeout=15):
     last_html = None
     if not no_monitor:
         try: last_html = get_html(driver, cutlist=False, extra_js=temp_monitor_js, maxchars=9999999)
@@ -826,7 +826,7 @@ def execute_js_rich(script, driver, no_monitor=False):
     before_sids = set(driver.get_session_dict().keys()); response = {}
     try:
         print(f"Executing: {script[:250]} ...")
-        response = driver.execute_js(script)
+        response = driver.execute_js(script, timeout=timeout)
         result = response['data'] if 'data' in response else response.get('result')
         if response.get('closed', 0) == 1: reloaded = True
         time.sleep(1) 

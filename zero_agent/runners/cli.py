@@ -13,6 +13,7 @@ import re
 import shutil
 import sys
 import time as _time
+import uuid
 from typing import Optional
 
 from zero_agent.core.agent import ZeroAgent
@@ -20,6 +21,13 @@ from zero_agent.core.config import AgentConfig, default_config_path, load_defaul
 from zero_agent.core.exceptions import LLMError
 from zero_agent.core.types import TaskMode, TerminalEvent, TerminalStatus
 from zero_agent.runners.agent_runner import _consume_agent_run
+from zero_agent.utils.subagent_registry import (
+    EXIT_AFTER_ROUND_ENV,
+    PARENT_AGENT_ID_ENV,
+    REGISTRY_ENV,
+    SESSION_ID_ENV,
+    append_subagent_event,
+)
 
 
 _ERROR_TERMINAL_STATUSES = {
@@ -139,7 +147,28 @@ def main(argv: Optional[list[str]] = None) -> None:
         if args.llm_no is not None:
             cmd += ["--llm-no", str(args.llm_no)]
         cmd.append("--nobg")
-        proc = _sp.Popen(cmd, start_new_session=True)
+        task_dir = os.path.abspath(os.path.expanduser(args.task)) if args.task else ""
+        stderr_target = _sp.DEVNULL
+        stderr_file = None
+        if task_dir:
+            try:
+                os.makedirs(task_dir, exist_ok=True)
+                stderr_file = open(os.path.join(task_dir, "stderr.log"), "ab")
+                stderr_target = stderr_file
+            except OSError:
+                stderr_target = _sp.DEVNULL
+        try:
+            proc = _sp.Popen(
+                cmd,
+                stdin=_sp.DEVNULL,
+                stdout=_sp.DEVNULL,
+                stderr=stderr_target,
+                start_new_session=True,
+                close_fds=True,
+            )
+        finally:
+            if stderr_file is not None:
+                stderr_file.close()
         print(f"PID: {proc.pid}")
         sys.exit(0)
 
@@ -673,7 +702,84 @@ def _new_session(agent: ZeroAgent) -> None:
     print("  新会话已开始（后端配置保留）")
 
 
+def _start_subagent_tracking(agent: ZeroAgent, io_dir: str) -> Optional[dict]:
+    """Publish this CLI task to its parent desktop session, when present."""
+    registry_path = os.environ.get(REGISTRY_ENV, "").strip()
+    session_id = os.environ.get(SESSION_ID_ENV, "").strip()
+    if not registry_path or not session_id:
+        return None
+
+    absolute_dir = os.path.abspath(os.path.expanduser(io_dir))
+    now = _time.time()
+    record = {
+        "id": f"subagent-{uuid.uuid4().hex[:12]}",
+        "name": os.path.basename(absolute_dir.rstrip(os.sep)) or "Subagent",
+        "type": "subagent",
+        "status": "running",
+        "created_at": now,
+        "updated_at": now,
+        "reason": "",
+        "parent_id": os.environ.get(PARENT_AGENT_ID_ENV, "").strip(),
+        "pid": os.getpid(),
+        "detached": bool(os.name != "nt" and os.getpid() == os.getpgrp()),
+        "task_dir": absolute_dir,
+        "output_path": os.path.join(absolute_dir, "output.txt"),
+    }
+    if not append_subagent_event(registry_path, record):
+        return None
+
+    config = getattr(agent, "config", None)
+    if config is not None:
+        config._desktop_subagent_registry_path = registry_path
+        config._desktop_session_id = session_id
+        config._desktop_agent_id = record["id"]
+    return record
+
+
+def _finish_subagent_tracking(record: Optional[dict], status: str, reason: str = "") -> None:
+    if record is None:
+        return
+    record.update({"status": status, "updated_at": _time.time(), "reason": reason})
+    append_subagent_event(os.environ.get(REGISTRY_ENV, ""), dict(record))
+
+
+def _set_subagent_tracking_status(
+    record: Optional[dict],
+    status: str,
+    reason: str = "",
+) -> None:
+    if record is None:
+        return
+    record.update({"status": status, "updated_at": _time.time(), "reason": reason})
+    append_subagent_event(os.environ.get(REGISTRY_ENV, ""), dict(record))
+
+
 def _run_task_mode(agent: ZeroAgent, io_dir: str, history_file: Optional[str] = None) -> None:
+    """Run one task and report start/finish to a parent desktop session."""
+    record = _start_subagent_tracking(agent, io_dir)
+    try:
+        _run_task_mode_impl(agent, io_dir, history_file, record)
+    except SystemExit as exc:
+        code = exc.code
+        if code in (None, 0):
+            reason = str(record.get("reason") or "") if record else ""
+            _finish_subagent_tracking(record, "completed", reason)
+        else:
+            _finish_subagent_tracking(record, "failed", str(code))
+        raise
+    except BaseException as exc:
+        _finish_subagent_tracking(record, "failed", f"{type(exc).__name__}: {exc}")
+        raise
+    else:
+        _finish_subagent_tracking(record, "completed")
+
+
+def _run_task_mode_impl(
+    agent: ZeroAgent,
+    io_dir: str,
+    history_file: Optional[str] = None,
+    subagent_record: Optional[dict] = None,
+) -> None:
     """文件 I/O 批量模式：GA 兼容的持续子 agent 协作.
 
     输入发现顺序: input.txt 优先, 回退 input.md (兼容旧调用方).
@@ -767,7 +873,11 @@ def _run_task_mode(agent: ZeroAgent, io_dir: str, history_file: Optional[str] = 
         # 消费 stale _stop (已经成功停下来了, 避免打断下次 reply)
         consume_file(io_dir, "_stop")
 
+        if os.environ.get(EXIT_AFTER_ROUND_ENV) == "1":
+            return
+
         # 等待 reply.txt, 最多 600 秒 (300 x 2s)
+        _set_subagent_tracking_status(subagent_record, "waiting")
         reply = None
         for _ in range(300):
             _time.sleep(2)
@@ -776,12 +886,17 @@ def _run_task_mode(agent: ZeroAgent, io_dir: str, history_file: Optional[str] = 
                 break
         else:
             # 超时退出
+            if subagent_record is not None:
+                subagent_record["reason"] = "reply_timeout"
             sys.exit(0)
 
         if not reply:
+            if subagent_record is not None:
+                subagent_record["reason"] = "reply_timeout"
             sys.exit(0)
 
         # 用 reply 内容作为下一轮任务
+        _set_subagent_tracking_status(subagent_record, "running")
         raw = reply
         nround = 1 if not isinstance(nround, int) else nround + 1
 

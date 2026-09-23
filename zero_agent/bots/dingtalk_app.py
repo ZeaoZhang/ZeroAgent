@@ -237,12 +237,10 @@ class DingTalkApp(AgentBotMixin):
             )
 
     async def send_file(self, chat_id, file_path, **_):
-        """Upload a local image and send it with DingTalk's image template."""
-        if os.path.splitext(file_path)[1].lower() not in IMAGE_EXTS:
-            await self.send_text(
-                chat_id, f"⚠️ 钉钉当前仅支持自动发送图片: {os.path.basename(file_path)}",
-            )
-            return
+        """Upload and send an image or file through DingTalk's robot API."""
+        ext = os.path.splitext(file_path)[1].lower()
+        is_image = ext in IMAGE_EXTS
+        upload_type = "image" if is_image else "file"
         token = await self._get_access_token()
         if not token:
             return
@@ -251,7 +249,7 @@ class DingTalkApp(AgentBotMixin):
             with open(file_path, "rb") as media:
                 response = requests.post(
                     "https://oapi.dingtalk.com/media/upload",
-                    params={"access_token": token, "type": "image"},
+                    params={"access_token": token, "type": upload_type},
                     files={"media": (os.path.basename(file_path), media)},
                     timeout=60,
                 )
@@ -266,14 +264,24 @@ class DingTalkApp(AgentBotMixin):
 
         try:
             media_id = await asyncio.to_thread(_upload)
+            if is_image:
+                msg_key = "sampleImageMsg"
+                msg_param = {"photoURL": media_id}
+            else:
+                msg_key = "sampleFile"
+                msg_param = {
+                    "mediaId": media_id,
+                    "fileName": os.path.basename(file_path),
+                    "fileType": ext.lstrip(".") or "file",
+                }
             sent = await self._send_batch_message(
-                chat_id, "sampleImageMsg", {"photoURL": media_id},
+                chat_id, msg_key, msg_param,
             )
             if not sent:
-                raise RuntimeError("image message request failed")
+                raise RuntimeError("file message request failed")
         except Exception as exc:
-            print(f"[DingTalk] failed to send image {file_path}: {exc}")
-            await self.send_text(chat_id, f"⚠️ 图片发送失败: {os.path.basename(file_path)}")
+            print(f"[DingTalk] failed to send file {file_path}: {exc}")
+            await self.send_text(chat_id, f"⚠️ 文件发送失败: {os.path.basename(file_path)}")
 
     async def on_message(self, content, sender_id, sender_name,
                          conversation_type=None, conversation_id=None):

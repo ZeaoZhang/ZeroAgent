@@ -445,6 +445,10 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
   margin-bottom: 8px;
 }
 
+.agent-card-meta div {
+  overflow-wrap: anywhere;
+}
+
 .agent-card-actions {
   display: flex;
   gap: 8px;
@@ -628,6 +632,29 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
   padding: 6px 10px;
   font-family: var(--font-mono);
   white-space: pre-wrap;
+}
+
+.msg-input-required {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  white-space: normal;
+}
+.input-required-question > :first-child { margin-top: 0; }
+.input-required-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.input-required-option {
+  max-width: 100%;
+  text-align: left;
+  white-space: normal;
 }
 
 .msg-error {
@@ -904,6 +931,20 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
   border: 1px solid var(--border);
   border-radius: 8px;
   object-fit: contain;
+}
+.assistant-output-files {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+.assistant-output-file-link {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  overflow-wrap: anywhere;
+  color: var(--link, #2563eb);
 }
 .image-preview-item .remove-img,
 .file-preview-item .remove-img {

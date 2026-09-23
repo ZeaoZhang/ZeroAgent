@@ -203,7 +203,9 @@ function localImagePathFromSource(source) {
 
 function createLocalImagePreview(filePath) {
   const sessionImageUrl = window.zeroAgent?.sessionImageUrl;
-  const imageUrl = sessionImageUrl?.(state.activeId, filePath);
+  const session = state.sessions.get(state.activeId);
+  const bridgeSessionId = session?.bridgeSessionId || session?.id || state.activeId;
+  const imageUrl = sessionImageUrl?.(bridgeSessionId, filePath);
   if (!imageUrl) return null;
   const image = document.createElement('img');
   image.className = 'assistant-local-image-preview';
@@ -212,6 +214,97 @@ function createLocalImagePreview(filePath) {
   image.src = imageUrl;
   image.addEventListener('error', () => image.remove(), { once: true });
   return image;
+}
+
+function normalizeOutputFileRef(filePath, cwd = '') {
+  const value = String(filePath || '').trim().replaceAll('\\', '/');
+  if (!value) return '';
+  const root = String(cwd || '').trim().replaceAll('\\', '/').replace(/\/$/, '');
+  const isWindowsAbsolute = /^[a-z]:\//i.test(value);
+  const isAbsolute = value.startsWith('/') || isWindowsAbsolute;
+  const combined = isAbsolute || !root ? value : `${root}/${value}`;
+  const prefix = combined.startsWith('/')
+    ? '/'
+    : (combined.match(/^[a-z]:/i)?.[0] || '');
+  const parts = combined.slice(prefix.length).split('/');
+  const normalized = [];
+  for (const part of parts) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (normalized.length) normalized.pop();
+      else if (!prefix) normalized.push(part);
+      continue;
+    }
+    normalized.push(part);
+  }
+  return `${prefix}${prefix && prefix !== '/' ? '/' : ''}${normalized.join('/')}` || (prefix || value);
+}
+
+function isRelativeOutputFileRef(filePath) {
+  const value = String(filePath || '').trim().replaceAll('\\', '/');
+  return Boolean(value)
+    && !value.startsWith('/')
+    && !/^[a-z]:/i.test(value)
+    && !/^[a-z][a-z\d+.-]*:/i.test(value)
+    && !value.split('/').includes('..');
+}
+
+function extractOutputFileRefs(text, cwd = '') {
+  const source = String(text || '');
+  // LLM Running transcripts contain internal tool traces and repeated path mentions.
+  // Only the latest plain assistant segment is the user-facing answer.
+  const segments = splitStructuredSegments(source);
+  const finalAnswer = [...segments].reverse().find((segment) => segment.kind === 'agent_message_chunk');
+  const referenceSource = finalAnswer ? finalAnswer.text : source;
+  const refs = [...referenceSource.matchAll(/\[FILE:([^\]\r\n]+)\]/g)]
+    .map((match) => match[1].trim())
+    .filter(isRelativeOutputFileRef);
+  return [...new Set(refs.map((ref) => normalizeOutputFileRef(ref, cwd)).filter(Boolean))];
+}
+
+function stripLocalOutputImageEmbeds(text) {
+  return String(text || '')
+    .replace(/!\[([^\]]*)\]\(<?([^\s)>]+)>?(?:\s+[^)]*)?\)/g, (markup, _alt, source) => {
+      const value = String(source || '').trim();
+      if (!/\.(?:png|jpe?g|gif|webp|bmp|avif)$/i.test(value)
+          || /^(?:https?:|data:|blob:|\/\/)/i.test(value)) {
+        return markup;
+      }
+      return '';
+    })
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n');
+}
+
+function appendOutputFileLinks(container, filePaths) {
+  const fileUrl = window.zeroAgent?.sessionFileUrl;
+  const session = state.sessions.get(state.activeId);
+  const bridgeSessionId = session?.bridgeSessionId || session?.id || state.activeId;
+  if (typeof fileUrl !== 'function' || !bridgeSessionId || !filePaths.length) return false;
+
+  const list = document.createElement('div');
+  list.className = 'assistant-output-files';
+  for (const filePath of [...new Set(filePaths)]) {
+    const url = fileUrl(bridgeSessionId, filePath);
+    if (!url) continue;
+    const item = document.createElement('div');
+    item.className = 'assistant-output-file';
+    if (/\.(?:png|jpe?g|gif|webp|bmp|avif)$/i.test(filePath)) {
+      const preview = createLocalImagePreview(filePath);
+      if (preview) item.appendChild(preview);
+    }
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filePath.split(/[\\/]/).pop() || 'Generated file';
+    link.textContent = `📎 ${link.download}`;
+    link.className = 'assistant-output-file-link';
+    link.rel = 'noopener noreferrer';
+    item.appendChild(link);
+    list.appendChild(item);
+  }
+  if (!list.children.length) return false;
+  container.appendChild(list);
+  return true;
 }
 
 function renderMarkdown(text) {
@@ -241,16 +334,10 @@ function sanitizeMarkdown(html) {
     }
     if (el.tagName === 'IMG') {
       const localPath = localImagePathFromSource(el.getAttribute('src'));
-      const preview = localPath ? createLocalImagePreview(localPath) : null;
-      if (preview) {
-        el.setAttribute('src', preview.src);
+      if (localPath) {
+        removals.push(el);
         continue;
       }
-    }
-    if (el.tagName === 'CODE' && !el.parentElement?.closest('pre')) {
-      const localPath = localImagePathFromSource(el.textContent);
-      const preview = localPath ? createLocalImagePreview(localPath) : null;
-      if (preview) el.after(preview);
     }
     for (const attr of Array.from(el.attributes)) {
       const name = attr.name.toLowerCase();
@@ -554,6 +641,9 @@ function getSessionRuntime(sess) {
       pendingAssistantMessages: [],
       pendingFormalAssistantMessages: [],
       seenBridgeMessageIds: new Set(),
+      queuedPromptIds: new Set(),
+      cancelledQueueIds: new Set(),
+      activatedQueueIds: new Set(),
       turnSequence: 0,
       activeTurnToken: 0,
       activePromptUserId: 0,
@@ -569,6 +659,11 @@ function beginAssistantTurn(runtime) {
   runtime.activePromptUserId = 0;
   return runtime.activeTurnToken;
 
+}
+
+function busyStatusLabel(runtime, fallback = 'Thinking…') {
+  const queued = runtime?.queuedPromptIds?.size || 0;
+  return queued ? `${fallback} · ${queued} queued` : fallback;
 }
 
 function ensureActiveTurn(runtime) {
@@ -894,12 +989,21 @@ function stripVisibleToolProtocol(text) {
 }
 
 function renderStructuredMarkdownInto(container, text, options = {}) {
-  const segments = splitStructuredSegments(text);
+  const session = state.sessions.get(state.activeId);
+  const fileRefs = extractOutputFileRefs(text, session?.cwd || '');
+  const canLinkFiles = typeof window.zeroAgent?.sessionFileUrl === 'function';
+  const visibleText = canLinkFiles
+    ? stripLocalOutputImageEmbeds(
+      String(text || '').replace(/\[FILE:[^\]\r\n]+\]/g, ''),
+    )
+    : text;
+  const segments = splitStructuredSegments(visibleText);
   container.innerHTML = '';
   if (segments.length === 1 && !shouldFoldSegment(segments[0].kind, segments[0].text)) {
-    const remaining = extractAndRenderSummary(container, text);
+    const remaining = extractAndRenderSummary(container, visibleText);
     const visible = stripVisibleToolProtocol(remaining);
     if (visible) container.insertAdjacentHTML('beforeend', renderMarkdown(visible));
+    if (canLinkFiles) appendOutputFileLinks(container, fileRefs);
     return;
   }
   for (const item of groupIntoTurns(segments, options)) {
@@ -914,6 +1018,7 @@ function renderStructuredMarkdownInto(container, text, options = {}) {
     }
     renderTurnTreeInto(container, item);
   }
+  if (canLinkFiles) appendOutputFileLinks(container, fileRefs);
 }
 
 // ─── Copy button injection for code blocks and pre blocks ─────────────────
@@ -1744,8 +1849,36 @@ function renderMessage(msg, append = true) {
     }
   } else if (msg.role === 'system') {
     const wrap = document.createElement('div');
-    wrap.className = 'msg msg-system';
-    wrap.textContent = msg.content;
+    if (msg.kind === 'input_required') {
+      wrap.className = 'msg msg-system msg-input-required';
+      const question = document.createElement('div');
+      question.className = 'input-required-question md';
+      question.innerHTML = renderMarkdown(msg.content || '');
+      wrap.appendChild(question);
+
+      const candidates = Array.isArray(msg.candidates)
+        ? [...new Set(msg.candidates.map(candidate => String(candidate || '').trim()).filter(Boolean))]
+        : [];
+      if (candidates.length) {
+        const options = document.createElement('div');
+        options.className = 'input-required-options';
+        for (const candidate of candidates) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'btn btn-sm input-required-option';
+          button.textContent = candidate;
+          button.addEventListener('click', () => {
+            for (const option of options.querySelectorAll('button')) option.disabled = true;
+            void sendPrompt(candidate);
+          });
+          options.appendChild(button);
+        }
+        wrap.appendChild(options);
+      }
+    } else {
+      wrap.className = 'msg msg-system';
+      wrap.textContent = msg.content;
+    }
     messagesEl.appendChild(wrap);
   } else if (msg.role === 'error') {
     const wrap = document.createElement('div');
@@ -2262,7 +2395,10 @@ function normalizeBridgeMessage(msg) {
   return {
     id: Number(msg.id || 0),
     role: msg.role || 'system',
-    content: msg.content || '',
+    content: msg.display_content ?? msg.content ?? '',
+    queueId: msg.queue_id || '',
+    kind: msg.kind || '',
+    candidates: Array.isArray(msg.candidates) ? msg.candidates.map(String) : [],
     image_ids: msg.image_ids || [],
     file_ids: msg.file_ids || [],
     file_names: msg.file_names || [],
@@ -2278,6 +2414,11 @@ function upsertPolledMessage(sess, raw, { partial = false } = {}) {
   if (!runtime.seenBridgeMessageIds) runtime.seenBridgeMessageIds = new Set();
   if (!runtime.pendingAssistantMessages) runtime.pendingAssistantMessages = [];
   if (!runtime.pendingFormalAssistantMessages) runtime.pendingFormalAssistantMessages = [];
+  if (msg.queueId) {
+    runtime.activatedQueueIds.add(msg.queueId);
+    runtime.queuedPromptIds.delete(msg.queueId);
+    if (runtime.busy) setBusy(true, 'Thinking…', sess);
+  }
 
   if (partial && msg.role === 'assistant') {
     const draft = getAssistantDraft(sess);
@@ -2370,6 +2511,25 @@ function upsertPolledMessage(sess, raw, { partial = false } = {}) {
     return;
   }
 
+  const currentDraft = runtime.assistantDraft;
+  if (currentDraft && !currentDraft.finalized) {
+    if (msg.role === 'system') {
+      clearAssistantDraft(sess);
+    } else if (msg.role === 'error') {
+      clearAssistantDraft(sess);
+    }
+  }
+  if (msg.role === 'user' && msg.queueId) {
+    if (runtime.assistantDraft && !runtime.assistantDraft.finalized) {
+      const lastMessage = sess.messages[sess.messages.length - 1];
+      if (lastMessage?.role === 'error') clearAssistantDraft(sess);
+      else finalizeAssistantReply(sess);
+    }
+    beginAssistantTurn(runtime);
+    runtime.activePromptUserId = msg.id;
+    startTaskTimer(sess);
+  }
+
   runtime.seenBridgeMessageIds.add(msg.id);
   runtime.lastPolledMessageId = Math.max(Number(runtime.lastPolledMessageId || 0), msg.id);
   sess.messages.push(msg);
@@ -2442,9 +2602,7 @@ async function sendPrompt(text, attachments = [], options = {}) {
   }
   const sess = state.sessions.get(state.activeId);
   const runtime = getSessionRuntime(sess);
-  if (runtime.busy) return;
-  beginAssistantTurn(runtime);
-  const promptTurnToken = runtime.activeTurnToken;
+  const wasBusy = runtime.busy;
 
   const images = attachments.filter(isImageAttachment);
   const files = attachments.filter((attachment) => !isImageAttachment(attachment));
@@ -2459,6 +2617,50 @@ async function sendPrompt(text, attachments = [], options = {}) {
   const fileNames = files.map(file => file.name || 'Attached file');
 
   const displayText = options.displayText || text;
+  const request = {
+    sessionId: '',
+    prompt: text,
+    displayText,
+    images: images.map(img => ({id: img.id, dataUrl: img.dataUrl, type: img.type || ''})),
+    files: files.map(file => ({
+      id: file.id,
+      name: file.name || 'Attached file',
+      dataUrl: file.dataUrl,
+      type: file.type || 'application/octet-stream',
+    })),
+    llmNo: sess.config.llmNo
+  };
+  let earlyResult = null;
+  if (wasBusy) {
+    try {
+      request.sessionId = await ensureBridgeSession(sess);
+      earlyResult = await window.zeroAgent.rpc('session/prompt', request);
+      const payload = earlyResult?.result || earlyResult || {};
+      if (payload.queued) {
+        const queueId = String(payload.queueId || payload.queue_id || '');
+        if (queueId) {
+          if (runtime.cancelledQueueIds.has(queueId)) runtime.cancelledQueueIds.delete(queueId);
+          else if (!runtime.activatedQueueIds.has(queueId)) runtime.queuedPromptIds.add(queueId);
+        }
+        setBusy(true, 'Thinking…', sess);
+        return;
+      }
+    } catch (e) {
+      const displayError = formatRequestError(e, '模型请求');
+      addDiagnostic('error', 'Queued prompt failed', e);
+      if (state.activeId === sess.id && !inputEl.value.trim() && pendingAttachments.length === 0) {
+        inputEl.value = text;
+        pendingAttachments.push(...attachments);
+        renderAttachmentPreviews();
+        updateSendButton();
+      }
+      showError(displayError, '检查会话状态', () => retrySessionPolling(sess));
+      return;
+    }
+  }
+
+  beginAssistantTurn(runtime);
+  const promptTurnToken = runtime.activeTurnToken;
   const localUserMsg = { role: 'user', content: displayText, image_ids: imageIds, file_ids: fileIds, file_names: fileNames };
   sess.messages.push(localUserMsg);
   renderMessage(localUserMsg);
@@ -2472,19 +2674,10 @@ async function sendPrompt(text, attachments = [], options = {}) {
 
   setBusy(true, 'Thinking…', sess);
   try {
-    const res = await window.zeroAgent.rpc('session/prompt', {
-      sessionId: await ensureBridgeSession(sess),
-      prompt: text,
-      images: images.map(img => ({id: img.id, dataUrl: img.dataUrl, type: img.type || ''})),
-      files: files.map(file => ({
-        id: file.id,
-        name: file.name || 'Attached file',
-        dataUrl: file.dataUrl,
-        type: file.type || 'application/octet-stream',
-      })),
-      llmNo: sess.config.llmNo
-    });
-    const acceptedUserId = Number(res.userMessageId || res.result?.userMessageId || 0);
+    if (!request.sessionId) request.sessionId = await ensureBridgeSession(sess);
+    const res = earlyResult || await window.zeroAgent.rpc('session/prompt', request);
+    const payload = res?.result || res || {};
+    const acceptedUserId = Number(payload.userMessageId || 0);
     if (acceptedUserId) {
       for (const entry of runtime.pendingAssistantMessages) {
         const entryTurnToken = Number(entry.turnToken || 0);
@@ -2526,6 +2719,13 @@ async function cancelPrompt() {
   try {
     const res = await window.zeroAgent.rpc('session/cancel', { sessionId: sess?.bridgeSessionId || state.activeId });
     if (res.error) throw new Error(res.error.message || res.error);
+    const payload = res?.result || res || {};
+    for (const queueId of payload.cancelledQueueIds || []) {
+      const id = String(queueId);
+      runtime.cancelledQueueIds.add(id);
+      runtime.queuedPromptIds.delete(id);
+    }
+    setBusy(false, null, sess);
     return true;
   } catch (e) {
     showSystem('Stop failed: ' + (e.message || e));
@@ -3128,7 +3328,7 @@ function setBusy(busy, label, sess = state.sessions.get(state.activeId)) {
     updateTabDot(sess.id, dotKind);
   }
   if (!isActiveSession(sess)) return;
-  if (busy) setStatus('busy', label || 'Working…');
+  if (busy) setStatus('busy', busyStatusLabel(runtime, label || 'Working…'));
   else setStatus(state.bridgeReady ? 'ok' : 'warn', state.bridgeReady ? 'Ready' : 'Starting…');
   renderSendButtonState();
 }
@@ -3137,9 +3337,13 @@ function renderSendButtonState() {
   const hasText = inputEl.value.trim().length > 0;
   const hasAttachments = pendingAttachments.length > 0;
   const busy = !!getActiveSessionRuntime()?.busy;
-  sendBtn.classList.toggle('stop', busy);
-  sendBtn.title = busy ? 'Stop (Esc)' : 'Send (Enter)';
-  sendBtn.innerHTML = busy ? STOP_ICON : SEND_ICON;
+  const hasDraft = hasText || hasAttachments;
+  const stopping = busy && !hasDraft;
+  sendBtn.classList.toggle('stop', stopping);
+  sendBtn.title = stopping
+    ? 'Stop (Esc)'
+    : (busy ? 'Queue for next turn (Enter)' : 'Send (Enter)');
+  sendBtn.innerHTML = stopping ? STOP_ICON : SEND_ICON;
   sendBtn.disabled = !hasText && !hasAttachments && !busy;
 }
 
@@ -3701,6 +3905,7 @@ async function hydrateBridgeSessions(listRes) {
       sid,
       bSess.modelOverride ?? null,
     );
+    sess.cwd = bSess.cwd || null;
     replaceSessionAgents(sess, bSess.subAgents);
     if (bSess.createdAt) sess.createdAt = Number(bSess.createdAt);
     if (bSess.updatedAt) sess.updatedAt = Number(bSess.updatedAt);
@@ -3884,10 +4089,6 @@ function addFileAttachments(files) {
 function submitInput() {
   const text = inputEl.value.trim();
   if (!text && pendingAttachments.length === 0) return;
-  if (getActiveSessionRuntime()?.busy) {
-    showSystem('Agent is still responding. Press Esc or Stop before sending another message.');
-    return;
-  }
   const attachments = [...pendingAttachments];
   inputEl.value = '';
   inputEl.style.height = 'auto';
@@ -4168,19 +4369,23 @@ function renderAgentPanel() {
       }
     });
 
-    const statusClass = agent.status || 'running';
+    const statusText = agent.status || 'running';
+    const statusClass = statusText === 'failed'
+      ? 'error'
+      : (statusText === 'waiting' ? 'running' : statusText);
     const elapsed = agent.created_at ? Math.round((Date.now() / 1000 - agent.created_at) / 60) : 0;
 
     card.innerHTML = `
       <div class="agent-card-header">
         <span class="agent-card-title">${escapeHtml(agent.name || agent.type || 'Agent')}</span>
-        <span class="agent-card-status ${statusClass}">${statusClass}</span>
+        <span class="agent-card-status ${statusClass}">${escapeHtml(statusText)}</span>
       </div>
       <div class="agent-card-meta">
         <div>Type: ${escapeHtml(agent.type || 'unknown')}</div>
         <div>Runtime: ${elapsed}m</div>
+        ${agent.task_dir ? '<div>Task: ' + escapeHtml(agent.task_dir) + '</div>' : ''}
       </div>
-      ${agent.status === 'running' ? '<div class="agent-card-actions"><button class="btn btn-sm" data-agent-id="' + agent.id + '">Cancel</button></div>' : ''}
+      ${(agent.status === 'running' || agent.status === 'waiting') && (agent.type === 'session-agent' || agent.pid) ? '<div class="agent-card-actions"><button class="btn btn-sm" data-agent-id="' + agent.id + '">Cancel</button></div>' : ''}
     `;
 
     const cancelBtn = card.querySelector('[data-agent-id]');
@@ -4196,8 +4401,16 @@ function renderAgentPanel() {
 }
 
 function showAgentContext(agent) {
-  // Show agent's output/context in a modal or inline panel
-  showSystem(`Agent: ${agent.name || agent.id}\nType: ${agent.type}\nStatus: ${agent.status}\n\n点击查看Agent上下文功能已实现 - 后续可扩展显示完整输出和日志`);
+  const details = [
+    `Agent: ${agent.name || agent.id}`,
+    `Type: ${agent.type || 'unknown'}`,
+    `Status: ${agent.status || 'unknown'}`,
+    agent.pid ? `PID: ${agent.pid}` : '',
+    agent.task_dir ? `Task directory: ${agent.task_dir}` : '',
+    agent.output_path ? `Output: ${agent.output_path}` : '',
+    agent.reason ? `Reason: ${agent.reason}` : '',
+  ].filter(Boolean);
+  showSystem(details.join('\n'));
 }
 
 async function cancelAgent(sessionId, agentId) {
@@ -4360,7 +4573,8 @@ const imagePreviews = document.getElementById('image-previews');
   });
 
   sendBtn.addEventListener('click', () => {
-    if (getActiveSessionRuntime()?.busy) {
+    const hasDraft = inputEl.value.trim().length > 0 || pendingAttachments.length > 0;
+    if (getActiveSessionRuntime()?.busy && !hasDraft) {
       cancelPrompt().then((ok) => {
         if (ok) showSystem('Stop requested.');
       });

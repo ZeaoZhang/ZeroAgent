@@ -15,9 +15,9 @@ def _t(zh: str, en: str, lang: str) -> str:
 
 def register_vision_tools(registry: ToolRegistry, config: AgentConfig) -> None:
     """Register vision only when at least one backend supports images."""
-    backend_names = sorted(
+    backend_names = [
         name for name, backend in config.llm_backends.items() if backend.vision
-    )
+    ]
     if not backend_names:
         return
 
@@ -26,9 +26,8 @@ def register_vision_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         ToolDefinition(
             name="vision",
             description=_t(
-                "使用视觉模型理解图片。未指定 backend 时优先使用当前会话模型；当前模型不支持视觉时再回退到已配置的视觉 backend。",
-                "Understand an image with a configured vision backend. DeepSeek Flash is text-only; "
-                "when backend is omitted, prefer the active session backend and fall back to a configured vision backend only when needed.",
+                "使用当前选中的模型理解图片；当前模型不支持视觉时，按配置顺序选择第一个视觉模型。",
+                "Understand an image with the currently selected model; if it does not support vision, use the first vision-capable model in configuration order.",
                 lang,
             ),
             parameters={
@@ -41,15 +40,6 @@ def register_vision_tools(registry: ToolRegistry, config: AgentConfig) -> None:
                     "prompt": {
                         "type": "string",
                         "description": _t("图片理解问题", "Question about the image", lang),
-                    },
-                    "backend": {
-                        "type": "string",
-                        "enum": backend_names,
-                        "description": _t(
-                            "可选视觉 backend；只能选择支持视觉的配置项",
-                            "Optional vision backend; choose a configured vision backend",
-                            lang,
-                        ),
                     },
                 },
                 "required": ["image_path"],
@@ -93,24 +83,24 @@ def _make_vision_handler(config: AgentConfig):
         handler: Any,
     ) -> Generator[str, None, StepOutcome]:
         image_path = str(args.get("image_path") or "")
+        sessions = getattr(getattr(handler, "parent", None), "_sessions", {})
         requested_backend = args.get("backend")
         if requested_backend:
             backend_name = str(requested_backend)
         else:
-            sessions = getattr(getattr(handler, "parent", None), "_sessions", {})
             backend_name = _active_backend_name(handler, sessions)
-            default_config = config.llm_backends.get(backend_name)
-            if default_config is not None and default_config.vision:
-                pass
-            else:
-                backend_name = next(
-                    (
-                        name
-                        for name in sorted(config.llm_backends)
-                        if config.llm_backends[name].vision
-                    ),
-                    config.default_backend,
-                )
+        selected_config = config.llm_backends.get(backend_name)
+        if not requested_backend and (
+            selected_config is None or not selected_config.vision
+        ):
+            backend_name = next(
+                (
+                    name
+                    for name, backend in config.llm_backends.items()
+                    if backend.vision
+                ),
+                config.default_backend,
+            )
         backend_config = config.llm_backends.get(backend_name)
         if backend_config is None:
             return StepOutcome(

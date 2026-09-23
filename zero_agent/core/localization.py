@@ -15,6 +15,7 @@ PROMPT_TASK_CONTROL_PLAN = "prompt.task_control.plan"
 PROMPT_TODAY_LABEL = "prompt.today_label"
 PROMPT_PEER_HINT = "prompt.peer_hint"
 PROMPT_FILE_DELIVERY = "prompt.file_delivery"
+PROMPT_CAPABILITY_FILE_DELIVERY = "file_delivery"
 
 _TASK_CONTROL_MESSAGE_IDS = {
     TaskMode.OPEN: PROMPT_TASK_CONTROL_OPEN,

@@ -252,6 +252,11 @@
       const query = new URLSearchParams({ path: String(filePath), token: bridgeToken });
       return `${bridgeBase}/session/${encodeURIComponent(sessionId)}/image?${query}`;
     },
+    sessionFileUrl: (sessionId, filePath) => {
+      if (!bridgeToken || !sessionId || !filePath) return '';
+      const query = new URLSearchParams({ path: String(filePath), token: bridgeToken });
+      return `${bridgeBase}/session/${encodeURIComponent(sessionId)}/file?${query}`;
+    },
     startBridge: async () => { connectWs(); return http('/status'); },
     stopBridge: async () => ({ ok: true }),
     checkStatus: () => rpc('app/status', {}),
