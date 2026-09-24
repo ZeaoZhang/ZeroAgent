@@ -41,6 +41,7 @@ from zero_agent.bots.common import (
     split_text,
     extract_waiting_event,
     terminal_reply_text,
+    terminal_output_text,
     terminal_notice,
 )
 from zero_agent.bots.shared.continue_cmd import handle_frontend_command, reset_conversation
@@ -498,10 +499,10 @@ class _TelegramStreamSession:
         self.raw_text += chunk
         await self._refresh(done=False, send_files=False)
 
-    async def finalize(self, full_text=None, send_files=True):
+    async def finalize(self, full_text=None, send_files=True, file_text=None):
         if full_text is not None:
             self.raw_text = full_text
-        await self._refresh(done=True, send_files=send_files)
+        await self._refresh(done=True, send_files=send_files, file_text=file_text)
 
     async def finish_with_notice(self, notice):
         if self.raw_text.strip():
@@ -516,14 +517,15 @@ class _TelegramStreamSession:
         await self._reply_text(notice)
         self.active_display = ""
 
-    async def _refresh(self, done, send_files):
+    async def _refresh(self, done, send_files, file_text=None):
         cleaned = clean_reply(self.raw_text) if self.raw_text.strip() else ""
-        self.files = _files_from_text(cleaned, self.workspace_dir)
+        self.files = _files_from_text(
+            clean_reply(file_text) if isinstance(file_text, str) else cleaned,
+            self.workspace_dir,
+        )
         body = _render_file_markers(cleaned)
         if done and not body and self.files:
             body = "已生成附件"
-        elif done and not body:
-            body = "..."
         segments = _visible_segments(body)
         finalized_target = len(segments) if done else max(len(segments) - 1, 0)
         while self.sent_segments < finalized_target:
@@ -723,7 +725,10 @@ async def _stream(dq, msg):
             terminal = item
             status = terminal.get("status")
             if status == "completed":
-                await stream.finalize(terminal_reply_text(terminal))
+                await stream.finalize(
+                    terminal_reply_text(terminal),
+                    file_text=terminal_output_text(terminal),
+                )
             elif status == "waiting":
                 event = _extract_ask_user_event(terminal)
                 if event:

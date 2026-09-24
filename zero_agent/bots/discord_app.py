@@ -47,6 +47,7 @@ from zero_agent.bots.common import (
     split_text,
     strip_files,
     terminal_reply_text,
+    terminal_output_text,
     terminal_notice,
 )
 from zero_agent.bots.shared.continue_cmd import handle_frontend_command, reset_conversation
@@ -331,7 +332,7 @@ class DiscordApp(AgentBotMixin):
             except Exception as e:
                 print(f"[Discord] send error: {e}")
 
-    async def send_done(self, chat_id, raw_text, **ctx):
+    async def send_done(self, chat_id, raw_text, *, display_text=None, **ctx):
         """发送 Agent 完成消息, 含文件附件.
 
         从 raw_text 中提取 [FILE:path] 引用, 通过 Discord 文件上传发送.
@@ -345,7 +346,7 @@ class DiscordApp(AgentBotMixin):
             workspace_dir=runner_workspace_dir(self._get_runner(chat_id)),
             fallback_dirs=(MEDIA_DIR, _TEMP_DIR),
         )
-        body = _display_done_text(raw_text)
+        body = display_text if display_text is not None else _display_done_text(raw_text)
         if body and body != "...":
             await self.send_text(chat_id, body, **ctx)
         if files:
@@ -357,9 +358,6 @@ class DiscordApp(AgentBotMixin):
                     except Exception as e:
                         print(f"[Discord] failed to send file {fpath}: {e}")
                         await self.send_text(chat_id, f"⚠️ 文件发送失败: {os.path.basename(fpath)}", **ctx)
-        # 文件发送失败或无内容时发送回退提示
-        if not body and not files:
-            await self.send_text(chat_id, "...", **ctx)
 
     async def handle_command(self, chat_id, cmd, **ctx):
         """处理斜杠命令, 使用 per-chat runner 执行.
@@ -460,7 +458,12 @@ class DiscordApp(AgentBotMixin):
                     continue
                 terminal = item
                 if item.get("status") == "completed":
-                    await self.send_done(chat_id, terminal_reply_text(item), **ctx)
+                    await self.send_done(
+                        chat_id,
+                        terminal_output_text(item),
+                        display_text=terminal_reply_text(item),
+                        **ctx,
+                    )
                 else:
                     await self.send_text(chat_id, terminal_notice(item), **ctx)
                 break

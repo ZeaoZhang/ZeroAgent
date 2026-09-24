@@ -74,6 +74,24 @@ class TextToolSession:
         setattr(self.backend, "history", value)
 
     @property
+    def _completed_task_pairs_cache(self) -> list[tuple[str, str]]:
+        return getattr(self.backend, "_completed_task_pairs_cache", [])
+
+    @_completed_task_pairs_cache.setter
+    def _completed_task_pairs_cache(self, value: list[tuple[str, str]]) -> None:
+        setattr(self.backend, "_completed_task_pairs_cache", value)
+
+    def prepare_for_new_task(self) -> None:
+        prepare = getattr(self.backend, "prepare_for_new_task", None)
+        if callable(prepare):
+            prepare()
+
+    def finish_task(self, question: str, answer: str) -> None:
+        finish = getattr(self.backend, "finish_task", None)
+        if callable(finish):
+            finish(question, answer)
+
+    @property
     def system(self) -> str:
         return getattr(self.backend, "system", "")
 

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import threading
 import time
@@ -83,6 +84,24 @@ class AutoFailoverSession:
     def history(self, value: List[Dict[str, Any]]) -> None:
         """设置当前活跃 session 的对话历史."""
         self._active.history = value
+
+    @property
+    def _completed_task_pairs_cache(self) -> list[tuple[str, str]]:
+        return getattr(self._active, "_completed_task_pairs_cache", [])
+
+    @_completed_task_pairs_cache.setter
+    def _completed_task_pairs_cache(self, value: list[tuple[str, str]]) -> None:
+        setattr(self._active, "_completed_task_pairs_cache", value)
+
+    def prepare_for_new_task(self) -> None:
+        prepare = getattr(self._active, "prepare_for_new_task", None)
+        if callable(prepare):
+            prepare()
+
+    def finish_task(self, question: str, answer: str) -> None:
+        finish = getattr(self._active, "finish_task", None)
+        if callable(finish):
+            finish(question, answer)
 
     @property
     def system(self) -> str:
@@ -385,6 +404,10 @@ class AutoFailoverSession:
         history = source.history if upto is None else source.history[:upto]
         target.history = list(history)
         target.system = source.system
+        if hasattr(source, "_completed_task_pairs_cache"):
+            target._completed_task_pairs_cache = copy.deepcopy(
+                source._completed_task_pairs_cache,
+            )
 
     @property
     def usage_stats(self) -> dict:

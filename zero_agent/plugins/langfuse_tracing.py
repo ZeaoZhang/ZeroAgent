@@ -142,6 +142,12 @@ class LangfuseTracer:
         self._active_tools: ContextVar[dict[str, list[Any]]] = ContextVar(
             f"langfuse_tools_{id(self)}", default={}
         )
+        self._session_scope: ContextVar[Any] = ContextVar(
+            f"langfuse_session_scope_{id(self)}", default=None
+        )
+        self._session_scope_token: ContextVar[Any] = ContextVar(
+            f"langfuse_session_scope_token_{id(self)}", default=None
+        )
         self._pending_config: Optional[dict[str, str]] = None
         self._pending_config_set = False
         self._hook_handlers: Optional[Dict[str, Any]] = None
@@ -204,13 +210,31 @@ class LangfuseTracer:
         """Start the root Agent observation for the current execution context."""
         if not self.enabled:
             return
+        session_id = context.get("session_id")
+        if session_id:
+            try:
+                from langfuse import propagate_attributes
+
+                scope = propagate_attributes(session_id=str(session_id))
+                scope.__enter__()
+                token = self._session_scope.set(scope)
+                self._session_scope_token.set(token)
+            except Exception:
+                _logger.warning("Langfuse session propagation unavailable", exc_info=True)
+        metadata = {"model": context.get("model", "unknown")}
+        if session_id:
+            metadata["session_id"] = str(session_id)
+        observation_kwargs = {
+            "name": "zero-agent-task",
+            "as_type": "agent",
+            "input": str(context.get("task") or context.get("user_input") or "")[:500],
+            "metadata": metadata,
+        }
         observation = self._start_observation(
-            name="zero-agent-task",
-            as_type="agent",
-            input=str(context.get("task") or context.get("user_input") or "")[:500],
-            metadata={"model": context.get("model", "unknown")},
+            **observation_kwargs,
         )
         if observation is None:
+            self._close_session_scope()
             return
         token = self._active_agent.set(observation)
         self._agent_token.set(token)
@@ -245,26 +269,28 @@ class LangfuseTracer:
             status = getattr(terminal, "status", "")
             reason = getattr(terminal, "reason", "")
             certificate = getattr(terminal, "certificate", None)
+            output = {
+                "turns": context.get("turns", 0),
+                "status": str(getattr(status, "value", status)),
+                "reason": str(getattr(reason, "value", reason)),
+            }
+            if context.get("model"):
+                output["model"] = context["model"]
+            terminal_turn = getattr(terminal, "turn", 0)
+            if terminal_turn:
+                output["terminal_turn"] = terminal_turn
+            if certificate is not None:
+                output["certificate"] = {
+                    "evidence_count": getattr(certificate, "evidence_count", None),
+                    "verify_status": getattr(certificate, "verify_status", None),
+                    "plan_remaining": getattr(certificate, "plan_remaining", None),
+                }
             self._update(
                 observation,
-                output={
-                    "turns": context.get("turns", 0),
-                    "terminal_turn": getattr(terminal, "turn", 0),
-                    "status": str(getattr(status, "value", status)),
-                    "reason": str(getattr(reason, "value", reason)),
-                    "model": context.get("model", "unknown"),
-                    "certificate": (
-                        {
-                            "evidence_count": getattr(certificate, "evidence_count", None),
-                            "verify_status": getattr(certificate, "verify_status", None),
-                            "plan_remaining": getattr(certificate, "plan_remaining", None),
-                        }
-                        if certificate is not None
-                        else None
-                    ),
-                },
+                output=output,
             )
             self._end(observation)
+        self._close_session_scope()
         token = self._agent_token.get()
         if token is not None:
             self._active_agent.reset(token)
@@ -276,6 +302,23 @@ class LangfuseTracer:
             self._pending_config_set = False
             if pending != self._config:
                 self._replace_client(pending)
+
+    def _close_session_scope(self) -> None:
+        """Release the SDK propagation scope opened for one agent run."""
+        scope = self._session_scope.get()
+        if scope is None:
+            return
+        try:
+            scope.__exit__(None, None, None)
+        except Exception:
+            _logger.warning("Langfuse session propagation cleanup failed", exc_info=True)
+        token = self._session_scope_token.get()
+        if token is not None:
+            try:
+                self._session_scope.reset(token)
+            except Exception:
+                pass
+        self._session_scope_token.set(None)
 
     def start_turn_metadata(self, context: dict) -> None:
         """Start a per-turn span so generations and tools have useful grouping."""

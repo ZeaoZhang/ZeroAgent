@@ -100,6 +100,23 @@ def test_frontend_message_reconciliation_regression() -> None:
         check=False,
     )
     assert result.returncode == 0, f"Node regression failed:\n{result.stdout}\n{result.stderr}"
+
+
+def test_frontend_markdown_math_regression() -> None:
+    root = Path(__file__).resolve().parents[1]
+    node = shutil.which("node")
+    assert node, "Node.js is required for the frontend Markdown regression"
+    script = root / "tests" / "frontend_markdown.test.js"
+    result = subprocess.run(
+        [node, str(script)],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"Node Markdown regression failed:\n{result.stdout}\n{result.stderr}"
+
+
 def test_frontend_session_sidebar_regression() -> None:
     root = Path(__file__).resolve().parents[1]
     node = shutil.which("node")
@@ -1283,6 +1300,8 @@ async def test_frontend_root_busts_webview_cache_for_each_app_load() -> None:
         assert 'styles.css?v=webview-test-123' in body
         assert 'app.js?v=webview-test-123' in body
         assert 'za-web.js?v=webview-test-123' in body
+        assert 'vendor/katex/katex.min.css?v=webview-test-123' in body
+        assert 'vendor/katex/katex.min.js?v=webview-test-123' in body
     finally:
         await client.close()
 
@@ -1861,13 +1880,15 @@ def test_cancel_marks_session_cancelled_and_aborts_runner() -> None:
     sess.agent = runner
     sess.status = "running"
     sess.partial = {"id": 1, "role": "assistant", "content": "", "partial": True}
+    sess.pending_turns = [{"queue_id": "queued-1"}]
 
     result = manager.cancel(sess.id)
 
-    assert result == {"ok": True, "sessionId": sess.id}
+    assert result == {"ok": True, "sessionId": sess.id, "cancelledQueueIds": ["queued-1"]}
     assert runner.aborted is True
     assert sess.status == "cancelled"
     assert sess.partial is None
+    assert sess.pending_turns == []
     assert sess.terminal_status == "cancelled"
     assert sess.terminal_reason == "user_cancelled"
 def test_session_group_assignment_persists_and_reloads(monkeypatch, tmp_path) -> None:

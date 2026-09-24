@@ -43,7 +43,7 @@ from zero_agent.bots.common import (
     runner_workspace_dir,
 )
 from zero_agent.bots.common import terminal_notice
-from zero_agent.bots.common import terminal_reply_text
+from zero_agent.bots.common import terminal_output_text, terminal_reply_text
 
 _KEYS = {}
 
@@ -601,7 +601,7 @@ def on_message(bot: WxBotClient, msg):
                     continue
                 if item.get("type") == "terminal":
                     terminal = item
-                    result = terminal_reply_text(item)
+                    result = terminal_output_text(item)
                     break
         except queue.Empty:
             terminal = {
@@ -614,7 +614,7 @@ def on_message(bot: WxBotClient, msg):
 
         status = terminal.get("status") if terminal else "failed"
         if status == "completed":
-            final_text = _clean(result)
+            final_text = _clean(terminal_reply_text(terminal or {}))
         else:
             final_text = terminal_notice(terminal or {})
         if final_text:

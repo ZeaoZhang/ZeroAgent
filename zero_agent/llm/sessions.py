@@ -282,11 +282,23 @@ class LiteLLMSession:
         """
         self.config = config
         self._tracer = tracer
-        self.history: List[Dict[str, Any]] = []
+        self._history: List[Dict[str, Any]] = []
+        self._completed_task_pairs_cache: List[tuple[str, str]] = []
         self.lock = threading.Lock()
         self.system = ""
         self.name = config.name or config.model
         self._context_window = config.context_window
+        configured_budget = getattr(config, "context_budget_tokens", None)
+        if configured_budget is not None:
+            self._context_budget_tokens = max(1000, int(configured_budget))
+        else:
+            # Keep enough recent context for tool-heavy tasks while preventing a
+            # large-window backend from replaying an unbounded transcript.
+            self._context_budget_tokens = min(
+                40000,
+                max(10000, self._context_window // 5),
+            )
+        self._context_budget_configured = configured_budget is not None
         self._log_dir = log_dir
         self._sessions_dir = sessions_dir
         self._session_log_path = session_log_path
@@ -312,6 +324,17 @@ class LiteLLMSession:
         # DeepSeek 模型有更大的上下文窗口
         if "deepseek" in config.model.lower():
             self._context_window = max(self._context_window, 70000)
+
+    @property
+    def history(self) -> List[Dict[str, Any]]:
+        return self._history
+
+    @history.setter
+    def history(self, value: List[Dict[str, Any]]) -> None:
+        # Explicit history replacement (/new, restore, backend migration) must
+        # invalidate completed-pair state derived from the previous history.
+        self._history = value
+        self._completed_task_pairs_cache = []
 
     def _start_generation(
         self,
@@ -676,7 +699,11 @@ class LiteLLMSession:
                 mock.usage,
                 streamed_text=collected_content,
             )
-            self._record_assistant(mock)
+            # A timed-out or interrupted stream is visible to the UI, but it is
+            # not a valid assistant turn. Keeping it in history causes the next
+            # retry to replay partial tool JSON and steadily amplifies context.
+            if classify_interruption(mock) is None:
+                self._record_assistant(mock)
             return mock
         except BaseException as exc:
             finish_generation(
@@ -708,7 +735,8 @@ class LiteLLMSession:
             )
             yield mock.content
             self._record_usage(mock.usage)
-            self._record_assistant(mock)
+            if interruption is None:
+                self._record_assistant(mock)
             return mock
         except Exception as exc:
             self._finish_generation(
@@ -941,6 +969,80 @@ class LiteLLMSession:
 
         return messages
 
+    @staticmethod
+    def _completed_task_pairs(history: List[Dict[str, Any]]) -> List[tuple[str, str]]:
+        """Recover completed exchanges, including histories saved before compaction."""
+        if history and len(history) % 2 == 0 and all(
+            history[i].get("role") == "user"
+            and history[i + 1].get("role") == "assistant"
+            and not history[i + 1].get("tool_calls")
+            and "### [WORKING MEMORY]" not in str(history[i].get("content") or "")
+            for i in range(0, len(history), 2)
+        ):
+            return [
+                (str(history[i].get("content") or ""), str(history[i + 1].get("content") or ""))
+                for i in range(max(0, len(history) - 6), len(history), 2)
+            ]
+        pairs: List[tuple[str, str]] = []
+        question = ""
+        for index, message in enumerate(history):
+            role = message.get("role")
+            content = message.get("content")
+            if role == "user" and not question and isinstance(content, str):
+                if "### [WORKING MEMORY]" not in content and not content.lstrip().startswith("[SYSTEM]"):
+                    question = content
+            elif role == "assistant" and question:
+                answer = ""
+                for call in message.get("tool_calls") or []:
+                    function = call.get("function") or {}
+                    if function.get("name") != "complete_task":
+                        continue
+                    call_id = call.get("id")
+                    if call_id and any(
+                        later.get("role") == "tool"
+                        and later.get("tool_call_id") == call_id
+                        for later in history[index + 1:]
+                    ):
+                        # A tool result means the completion was rejected and
+                        # the same task continued.
+                        continue
+                    try:
+                        answer = str(json.loads(function.get("arguments") or "{}").get("answer") or "")
+                    except (TypeError, ValueError):
+                        pass
+                if answer:
+                    pairs.append((question, answer))
+                    question = ""
+        return pairs[-3:]
+
+    @staticmethod
+    def _compact_task_pairs(pairs: List[tuple[str, str]]) -> List[Dict[str, Any]]:
+        history: List[Dict[str, Any]] = []
+        for question, answer in pairs[-3:]:
+            history.append({"role": "user", "content": question[:2000]})
+            # Keep both the opening and conclusion of long answers.
+            if len(answer) > 12000:
+                answer = answer[:6000] + "\n[earlier answer omitted]\n" + answer[-6000:]
+            history.append({"role": "assistant", "content": answer})
+        return history
+
+    def prepare_for_new_task(self) -> None:
+        """Remove old tool transcripts before a new user request is appended."""
+        with self.lock:
+            pairs = self._completed_task_pairs_cache or self._completed_task_pairs(self.history)
+            self.history = self._compact_task_pairs(pairs)
+            self._completed_task_pairs_cache = pairs[-3:]
+
+    def finish_task(self, question: str, answer: str) -> None:
+        """Keep a short conversation history after certified completion."""
+        with self.lock:
+            pairs = list(self._completed_task_pairs_cache)
+            if not pairs or pairs[-1] != (question, answer):
+                pairs.append((question, answer))
+            pairs = pairs[-3:]
+            self.history = self._compact_task_pairs(pairs)
+            self._completed_task_pairs_cache = pairs
+
     def _normalize_incoming_messages(
         self,
         messages: List[Dict[str, Any]],
@@ -1002,10 +1104,15 @@ class LiteLLMSession:
     def _trim_history(self) -> None:
         """裁剪历史消息，防止超出上下文窗口.
 
-        先按固定间隔压缩旧标签；超过 context_window * 3 字符预算时强制
-        压缩旧标签；仍超过 target 时从最早消息开始删到 user 边界。
+        先按固定间隔压缩旧标签；超过本地软预算的字符估算时强制压缩
+        旧标签；仍超过 target 时从最早消息开始删到 user 边界。
         """
-        cap = self._context_window * 3
+        if self._context_window < 1000 and not self._context_budget_configured:
+            # Preserve the small-window behavior used by callers and tests that
+            # deliberately lower _context_window at runtime.
+            cap = self._context_window * 3
+        else:
+            cap = self._context_budget_tokens * 4
         target = int(cap * getattr(self, "_trim_keep_rate", 0.6))
 
         def cost() -> int:

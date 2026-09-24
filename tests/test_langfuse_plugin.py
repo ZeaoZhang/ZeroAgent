@@ -114,6 +114,20 @@ class TestLangfusePlugin:
         tracer.start_agent({"task": "inspect"})
         assert FakeLangfuse.instances[0].observations[0].as_type == "agent"
 
+    def test_agent_observation_keeps_desktop_session_id(self, monkeypatch) -> None:
+        FakeLangfuse.instances.clear()
+        monkeypatch.setattr(plugin, "_get_langfuse", lambda: FakeLangfuse)
+        tracer = plugin.LangfuseTracer.from_config(_config())
+
+        tracer.start_agent({"task": "inspect", "session_id": "sess-123"})
+
+        observation = FakeLangfuse.instances[0].observations[0]
+        assert observation.kwargs["metadata"]["session_id"] == "sess-123"
+        tracer.finish_agent({
+            "turns": 0,
+            "terminal": SimpleNamespace(status="completed", reason=""),
+        })
+
     def test_generation_observation_is_nested_and_maps_usage(self, monkeypatch) -> None:
         FakeLangfuse.instances.clear()
         monkeypatch.setattr(plugin, "_get_langfuse", lambda: FakeLangfuse)

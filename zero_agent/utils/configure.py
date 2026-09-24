@@ -224,6 +224,7 @@ def _build_config_yaml(
         f"    api_base: {api_base}",
         f"    model: {model}",
         "    context_window: 30000",
+        "    context_budget_tokens: null",
         "    temperature: 1.0",
         "    stream: true",
     ]

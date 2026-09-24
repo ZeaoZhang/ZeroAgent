@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <title>ZeroAgent</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="vendor/katex/katex.min.css">
 </head>
 <body>
   <div id="app">
@@ -244,11 +245,19 @@
     </div>
 
     <!-- Session menu (move to group) -->
-    <div id="session-menu" class="session-menu hidden" role="menu" aria-label="移动到分组">
+    <div id="session-menu" class="session-menu hidden" role="dialog" aria-label="移动到分组">
       <div class="session-menu-title">移动到分组</div>
-      <div id="session-menu-groups" class="session-menu-groups"></div>
-      <button type="button" class="session-menu-item" data-menu-action="new-group" role="menuitem">＋ 新建分组…</button>
-      <button type="button" class="session-menu-item" data-menu-action="ungroup" role="menuitem">移出分组</button>
+      <div id="session-menu-groups" class="session-menu-groups" role="group" aria-label="可用分组"></div>
+      <div class="session-menu-actions">
+        <button type="button" class="session-menu-item" data-menu-action="new-group">
+          <span class="session-menu-action-icon" aria-hidden="true">＋</span>
+          <span>新建分组</span>
+        </button>
+        <button type="button" class="session-menu-item" data-menu-action="ungroup">
+          <span class="session-menu-action-icon session-menu-ungroup-icon" aria-hidden="true">↗</span>
+          <span>移出分组</span>
+        </button>
+      </div>
     </div>
 
     <!-- Error banner -->
@@ -260,6 +269,7 @@
   </div>
 
   <script src="vendor/marked.min.js"></script>
+  <script src="vendor/katex/katex.min.js"></script>
   <script src="za-web.js?v=za-sidebar-2"></script>
   <script src="app.js?v=za-sidebar-2"></script>
 </body>

@@ -26,6 +26,7 @@ def _make_mock_client(responses: List[MockResponse]):
             self.system = ""
             self.last_tools = ""
             self.system_snapshots = []
+            self.message_snapshots = []
             self._responses = list(responses)
             self._call_count = 0
 
@@ -35,6 +36,7 @@ def _make_mock_client(responses: List[MockResponse]):
             tools: Optional[List[Dict[str, Any]]] = None,
         ) -> Generator[str, None, MockResponse]:
             self.system_snapshots.append(self.system)
+            self.message_snapshots.append(messages)
             if self._call_count >= len(self._responses):
                 # 默认返回无工具调用的文本响应
                 yield "done"
@@ -90,6 +92,70 @@ def _set_execution_contract(handler: BaseHandler) -> None:
 
 class TestAgentLoop:
     """AgentLoop tests."""
+
+    def test_repeated_identical_tool_result_stops_without_progress(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        responses = [MockResponse(tool_calls=[MockToolCall(
+            function=MockFunction(name="echo", arguments='{"message":"same"}'),
+            id=f"call_{index}",
+        )]) for index in range(5)]
+        client = _make_mock_client(responses)
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=10,
+            verbose=False,
+        )
+
+        terminal = _exhaust(loop.run("system prompt", "task"))
+
+        assert terminal.status is TerminalStatus.BUDGET_EXHAUSTED
+        assert terminal.reason == "no_progress"
+        assert terminal.turn == 4
+        assert client._call_count == 4
+        assert "Two turns produced no new evidence" in client.message_snapshots[3][0]["content"]
+
+    def test_interrupted_response_does_not_dispatch_partial_tool_call(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        dispatched: list[str] = []
+
+        def do_echo(self, args, response):
+            dispatched.append("echo")
+            yield "should not run\n"
+            return StepOutcome({"result": "unexpected"}, next_prompt="retry")
+
+        mock_handler.do_echo = do_echo.__get__(mock_handler)
+
+        client = _make_mock_client([
+            MockResponse(
+                content="partial",
+                stop_reason="stream_interrupted",
+                tool_calls=[MockToolCall(
+                    function=MockFunction(
+                        name="echo",
+                        arguments='{"message":"partial"}',
+                    ),
+                    id="call_partial",
+                )],
+            ),
+        ])
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=1,
+            verbose=False,
+        )
+
+        terminal = _exhaust(loop.run("sp", "task"))
+
+        assert terminal.status is TerminalStatus.BUDGET_EXHAUSTED
+        assert dispatched == []
 
     def test_single_turn_completion(self, mock_handler: BaseHandler) -> None:
         """A single deliverable text response returns completed."""
@@ -719,7 +785,9 @@ class TestAgentLoop:
                 content="",
                 tool_calls=[
                     MockToolCall(
-                        function=MockFunction(name="echo", arguments='{"message": "x"}'),
+                        function=MockFunction(
+                            name="echo", arguments=json.dumps({"message": str(i)}),
+                        ),
                         id=f"call_{i}",
                     ),
                 ],

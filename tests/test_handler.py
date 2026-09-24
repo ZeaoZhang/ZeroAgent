@@ -667,9 +667,34 @@ class TestBaseHandlerDispatch:
         ))
 
         assert isinstance(result.data, str)
-        assert result.data.startswith(
-            "由于设置了show_linenos，以下返回信息为：(行号|)内容 。\n"
+        assert result.data.startswith("[FILE] 2 lines\n1|alpha\n2|beta")
+
+    def test_file_read_reuses_unchanged_range_until_file_changes(
+        self,
+        mock_config,
+        tmp_path,
+    ) -> None:
+        target = tmp_path / "source.txt"
+        target.write_text("first content\n", encoding="utf-8")
+        mock_config.workspace_dir = str(tmp_path)
+        handler = BaseHandler(
+            registry=ToolRegistry.with_builtins(mock_config),
+            cwd=str(tmp_path),
         )
+        args = {"path": str(target), "start": 1, "count": 5}
+
+        handler.current_turn = 1
+        first = _exhaust(handler.dispatch("file_read", args, MockResponse(content="")))
+        handler.current_turn = 9
+        duplicate = _exhaust(handler.dispatch("file_read", args, MockResponse(content="")))
+        target.write_text("changed content is longer\n", encoding="utf-8")
+        handler.current_turn = 10
+        changed = _exhaust(handler.dispatch("file_read", args, MockResponse(content="")))
+
+        assert "first content" in first.data
+        assert duplicate.data["status"] == "duplicate"
+        assert handler.evidence_ledger.records[-2].status == "duplicate"
+        assert "changed content" in changed.data
 
     def test_real_registry_file_read_sop_path_tip_uses_memory_heuristic(
         self,

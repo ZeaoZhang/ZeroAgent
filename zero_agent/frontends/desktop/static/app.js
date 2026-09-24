@@ -307,6 +307,76 @@ function appendOutputFileLinks(container, filePaths) {
   return true;
 }
 
+function protectMarkdownMath(text) {
+  const source = String(text || '');
+  const formulas = [];
+  let prefix = 'ZAMATHPLACEHOLDER';
+  while (source.includes(prefix)) prefix += 'X';
+  let protectedText = '';
+  let index = 0;
+  let fence = null;
+  let inlineTicks = 0;
+
+  while (index < source.length) {
+    if (index === 0 || source[index - 1] === '\n') {
+      const lineEnd = source.indexOf('\n', index);
+      const line = source.slice(index, lineEnd < 0 ? source.length : lineEnd);
+      const marker = line.match(/^[ \t]{0,3}(`{3,}|~{3,})/);
+      if (marker && (!fence || (marker[1][0] === fence[0] && marker[1].length >= fence.length))) {
+        fence = fence ? null : marker[1];
+        protectedText += line;
+        if (lineEnd >= 0) protectedText += '\n';
+        index = lineEnd < 0 ? source.length : lineEnd + 1;
+        continue;
+      }
+    }
+    if (fence) {
+      protectedText += source[index++];
+      continue;
+    }
+    if (source[index] === '`') {
+      const ticks = source.slice(index).match(/^`+/)[0];
+      if (!inlineTicks) inlineTicks = ticks.length;
+      else if (inlineTicks === ticks.length) inlineTicks = 0;
+      protectedText += ticks;
+      index += ticks.length;
+      continue;
+    }
+    if (inlineTicks) {
+      protectedText += source[index++];
+      continue;
+    }
+    if (source[index] === '\\' && (source[index + 1] === '\\' || source[index + 1] === '$')) {
+      protectedText += source.slice(index, index + 2);
+      index += 2;
+      continue;
+    }
+
+    const opener = source.startsWith('\\[', index) ? ['\\[', '\\]', true]
+      : source.startsWith('\\(', index) ? ['\\(', '\\)', false]
+      : source.startsWith('$$', index) ? ['$$', '$$', true]
+      : source[index] === '$' && !/\s/.test(source[index + 1] || '') ? ['$', '$', false]
+      : null;
+    if (opener) {
+      const [left, right, display] = opener;
+      let close = source.indexOf(right, index + left.length);
+      if (!display && close >= 0 && source.slice(index + left.length, close).includes('\n')) close = -1;
+      if (close > index + left.length) {
+        const expression = source.slice(index + left.length, close);
+        if (!/\s$/.test(expression) || left !== '$') {
+          const token = `${prefix}${formulas.length}END`;
+          formulas.push({ token, expression, display, source: source.slice(index, close + right.length) });
+          protectedText += token;
+          index = close + right.length;
+          continue;
+        }
+      }
+    }
+    protectedText += source[index++];
+  }
+  return { text: protectedText, formulas };
+}
+
 function renderMarkdown(text) {
   if (typeof marked === 'undefined') {
     const div = document.createElement('div');
@@ -314,7 +384,22 @@ function renderMarkdown(text) {
     return div.innerHTML;
   }
   try {
-    return sanitizeMarkdown(marked.parse(text));
+    const math = typeof katex === 'undefined' ? { text, formulas: [] } : protectMarkdownMath(text);
+    let html = marked.parse(math.text);
+    for (const formula of math.formulas) {
+      let rendered;
+      try {
+        rendered = katex.renderToString(formula.expression, {
+          displayMode: formula.display,
+          throwOnError: false,
+          trust: false,
+        });
+      } catch (_) {
+        rendered = escapeHtml(formula.source);
+      }
+      html = html.replace(formula.token, rendered);
+    }
+    return sanitizeMarkdown(html);
   } catch (e) {
     return escapeHtml(text);
   }
@@ -1265,32 +1350,40 @@ function buildSessionSection(section, sessions) {
   wrapper.className = 'session-group' + (section.collapsed ? ' collapsed' : '');
 
   const contentId = 'section-content-' + section.id;
-  const headerEl = document.createElement('button');
-  headerEl.type = 'button';
+  const headerEl = document.createElement('div');
   headerEl.className = 'session-group-header';
-  headerEl.setAttribute('aria-expanded', section.collapsed ? 'false' : 'true');
-  headerEl.setAttribute('aria-controls', contentId);
+  const toggleBtn = document.createElement('button');
+  toggleBtn.type = 'button';
+  toggleBtn.className = 'session-group-toggle';
+  toggleBtn.setAttribute('aria-expanded', section.collapsed ? 'false' : 'true');
+  toggleBtn.setAttribute('aria-controls', contentId);
   const expandIcon = document.createElement('span');
   expandIcon.className = 'expand-icon';
   expandIcon.setAttribute('aria-hidden', 'true');
   expandIcon.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
+  const groupIcon = document.createElement('span');
+  groupIcon.className = 'group-icon';
+  groupIcon.setAttribute('aria-hidden', 'true');
+  groupIcon.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H10l2 2h7.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>';
   const nameEl = document.createElement('span');
   nameEl.className = 'group-name';
   nameEl.textContent = section.label;
-  headerEl.append(expandIcon, nameEl);
+  toggleBtn.append(expandIcon, groupIcon, nameEl);
 
   if (section.count !== undefined) {
     const countEl = document.createElement('span');
     countEl.className = 'session-time-count';
     countEl.textContent = String(section.count);
-    headerEl.appendChild(countEl);
+    toggleBtn.appendChild(countEl);
   }
+  toggleBtn.addEventListener('click', () => { if (section.onToggle) section.onToggle(); });
+  headerEl.appendChild(toggleBtn);
 
   if (section.onDelete) {
     const delBtn = document.createElement('button');
     delBtn.type = 'button';
     delBtn.className = 'group-delete';
-    delBtn.textContent = '×';
+    delBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M5 7l1 13h12l1-13M9 7V4h6v3"/></svg>';
     delBtn.title = `删除分组「${section.label}」`;
     delBtn.setAttribute('aria-label', `删除分组 ${section.label}`);
     delBtn.addEventListener('click', async (e) => {
@@ -1299,9 +1392,6 @@ function buildSessionSection(section, sessions) {
     });
     headerEl.appendChild(delBtn);
   }
-
-  const toggleFn = section.onToggle;
-  headerEl.addEventListener('click', () => { if (toggleFn) toggleFn(); });
 
   if (section.userGroup) {
     headerEl.addEventListener('dragover', (e) => { e.preventDefault(); headerEl.classList.add('drag-over'); });
@@ -1406,7 +1496,7 @@ function createSessionItem(sess) {
   moveBtn.className = 'session-move';
   moveBtn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
   moveBtn.title = '移动到分组';
-  moveBtn.setAttribute('aria-label', `Move session "${sess.title}" to a group`);
+  moveBtn.setAttribute('aria-label', `将会话「${sess.title}」移动到分组`);
   moveBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     openSessionMenu(moveBtn, sess);
@@ -1419,7 +1509,7 @@ function createSessionItem(sess) {
   deleteBtn.className = 'session-delete';
   deleteBtn.textContent = '×';
   deleteBtn.title = `Delete session "${sess.title}"`;
-  deleteBtn.setAttribute('aria-label', `Delete session "${sess.title}"`);
+  deleteBtn.setAttribute('aria-label', `删除会话「${sess.title}」`);
   deleteBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
     if (deleteBtn.disabled) return;
@@ -1464,15 +1554,17 @@ function createSessionItem(sess) {
 
 // ─── Session move-to-group menu ─────────────────────────────────────────
 let _sessionMenuSession = null;
+let _sessionMenuAnchor = null;
 let _menuSuppressClick = false;
 
 function openSessionMenu(anchorEl, sess) {
   const rect = anchorEl.getBoundingClientRect();
-  openSessionMenuAt(rect.left, rect.top, sess);
+  openSessionMenuAt(rect.right + 8, rect.top, sess, anchorEl);
 }
 
-function openSessionMenuAt(x, y, sess) {
+function openSessionMenuAt(x, y, sess, anchorEl = null) {
   _sessionMenuSession = sess;
+  _sessionMenuAnchor = anchorEl;
   const menu = $('session-menu');
   const groupsEl = $('session-menu-groups');
   groupsEl.innerHTML = '';
@@ -1482,13 +1574,28 @@ function openSessionMenuAt(x, y, sess) {
   if (groups.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'session-menu-empty';
-    empty.textContent = '暂无分组';
+    empty.textContent = '还没有分组';
     groupsEl.appendChild(empty);
   } else {
     for (const group of groups) {
-      const item = document.createElement('div');
-      item.className = 'session-menu-item' + (sess.groupId === group.id ? ' active' : '');
-      item.textContent = group.name;
+      const isCurrent = sess.groupId === group.id;
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'session-menu-item session-menu-group-option' + (isCurrent ? ' active' : '');
+      item.setAttribute('aria-pressed', String(isCurrent));
+      item.title = group.name;
+      const icon = document.createElement('span');
+      icon.className = 'session-menu-option-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H10l2 2h7.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>';
+      const label = document.createElement('span');
+      label.className = 'session-menu-label';
+      label.textContent = group.name;
+      const check = document.createElement('span');
+      check.className = 'session-menu-check';
+      check.setAttribute('aria-hidden', 'true');
+      check.textContent = '✓';
+      item.append(icon, label, check);
       item.addEventListener('click', async () => {
         closeSessionMenu();
         try {
@@ -1501,22 +1608,30 @@ function openSessionMenuAt(x, y, sess) {
     }
   }
 
+  const ungroupBtn = menu.querySelector('[data-menu-action="ungroup"]');
+  if (ungroupBtn) ungroupBtn.disabled = !sess.groupId;
   menu.classList.remove('hidden');
   const menuRect = menu.getBoundingClientRect();
-  let left = Math.min(x - menuRect.width - 4, window.innerWidth - menuRect.width - 8);
-  left = Math.max(8, left);
-  let top = Math.min(y, window.innerHeight - menuRect.height - 8);
-  top = Math.max(8, top);
+  const margin = 12;
+  const openRight = x + menuRect.width <= window.innerWidth - margin;
+  let left = openRight ? x : x - menuRect.width - 16;
+  left = Math.max(margin, Math.min(left, window.innerWidth - menuRect.width - margin));
+  let top = Math.max(margin, Math.min(y, window.innerHeight - menuRect.height - margin));
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
+  const firstAction = menu.querySelector('.session-menu-group-option, [data-menu-action]:not(:disabled)');
+  firstAction?.focus({ preventScroll: true });
 
   _menuSuppressClick = true;
   setTimeout(() => { _menuSuppressClick = false; }, 0);
 }
 
-function closeSessionMenu() {
+function closeSessionMenu({ restoreFocus = false } = {}) {
   $('session-menu').classList.add('hidden');
   _sessionMenuSession = null;
+  const anchor = _sessionMenuAnchor;
+  _sessionMenuAnchor = null;
+  if (restoreFocus && anchor?.isConnected) anchor.focus({ preventScroll: true });
 }
 
 // ─── Group CRUD ─────────────────────────────────────────────────────────
@@ -4710,7 +4825,7 @@ const imagePreviews = document.getElementById('image-previews');
     if (e.key === 'Escape') {
       if (sessionMenu && !sessionMenu.classList.contains('hidden')) {
         e.preventDefault();
-        closeSessionMenu();
+        closeSessionMenu({ restoreFocus: true });
       }
     }
   });

@@ -50,6 +50,8 @@ llm_backends:
 
     # Generation options.
     context_window: 30000
+    # Local history soft budget; null derives a conservative budget from the window.
+    context_budget_tokens: null
     max_tokens: null
     temperature: 1.0
     stream: true
@@ -57,7 +59,7 @@ llm_backends:
     # Retry, timeout, proxy, and TLS options.
     max_retries: 4
     connect_timeout: 5
-    read_timeout: 30
+    read_timeout: 120
     proxy: null
     verify: true
 
@@ -95,12 +97,13 @@ llm_backends:
   #   api_base: https://api.openai.com/v1
   #   model: gpt-4o
   #   context_window: 128000
+  #   context_budget_tokens: null
   #   max_tokens: null
   #   temperature: 1.0
   #   stream: true
   #   max_retries: 4
   #   connect_timeout: 5
-  #   read_timeout: 30
+  #   read_timeout: 120
   #   proxy: null
   #   verify: true
   #   thinking_type: null

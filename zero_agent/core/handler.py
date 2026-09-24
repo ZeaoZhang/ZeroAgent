@@ -88,6 +88,7 @@ class BaseHandler:
         self._tool_protocol_retry_counts: dict[str, int] = {}
         self.tool_protocol_retry_limit: int = 3
         self.history_info: list = []  # 每轮摘要历史，用于上下文压缩
+        self._file_read_cache: dict = {}
         self.completion_certificate = None
         self.task_contract = TaskContract(
             task_id="handler-default",
@@ -126,6 +127,7 @@ class BaseHandler:
         self._empty_ct = 0
         self._completion_rejection_count = 0
         self._tool_protocol_retry_counts.clear()
+        self._file_read_cache.clear()
         self.completion_certificate = None
         self.completion_gate.reset()
 
@@ -747,6 +749,8 @@ class BaseHandler:
         evidence_kind: Optional[str] = None,
     ) -> str:
         if tool_name == "file_read":
+            if isinstance(data, dict) and data.get("status") == "duplicate":
+                return "duplicate"
             return (
                 "success"
                 if isinstance(data, str) and not data.startswith("Error:")

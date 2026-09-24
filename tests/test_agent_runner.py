@@ -243,6 +243,35 @@ class TestAgentRunnerHistoryHelpers:
 
         assert mock_agent.client.history == [{"role": "user", "content": "hello"}]
 
+    def test_append_history_entries_invalidates_old_task_pairs(
+        self,
+        mock_agent: ZeroAgent,
+    ) -> None:
+        mock_agent.client.finish_task("old question", "old answer")
+        runner = AgentRunner(mock_agent)
+
+        runner.append_history_entries([{"role": "user", "content": "restored question"}])
+
+        assert mock_agent.client._completed_task_pairs_cache == []
+
+    def test_side_question_restores_task_pairs(self, real_agent: ZeroAgent) -> None:
+        session = real_agent.client
+        session.finish_task("old question", "old answer")
+
+        def side_chat(_messages, tools=None):
+            session.history.append({"role": "user", "content": "side question"})
+            yield "side answer"
+
+        session.chat = side_chat
+        runner = AgentRunner(real_agent)
+
+        assert runner.llmclients[0].backend.ask("side question") == "side answer"
+        assert session.history == [
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+        ]
+        assert session._completed_task_pairs_cache == [("old question", "old answer")]
+
     def test_clear_last_tools(self, mock_agent: ZeroAgent) -> None:
         mock_agent.client.last_tools = "tools"
         runner = AgentRunner(mock_agent)

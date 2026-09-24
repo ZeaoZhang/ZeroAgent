@@ -11,6 +11,7 @@ import copy
 from dataclasses import replace
 import queue
 import os
+import re
 import threading
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -72,6 +73,17 @@ _FORWARDED_RUNTIME_ATTRS = {
     "task_dir",
 }
 
+_SUMMARY_RE = re.compile(
+    r"<\s*summary\b[^>]*>([\s\S]*?)<\s*/\s*summary\s*>",
+    re.IGNORECASE,
+)
+
+
+def _channel_summary(text: str) -> str:
+    """Return only the model-authored summaries from a complete run stream."""
+    summaries = [match.strip() for match in _SUMMARY_RE.findall(text or "")]
+    return "\n".join(summary for summary in summaries if summary)
+
 
 class _BackendView:
     """Backend facade for frontend code."""
@@ -114,12 +126,17 @@ class _BackendView:
             return self._session.ask(prompt)
 
         old_history = copy.deepcopy(getattr(self._session, "history", []))
+        old_task_pairs = copy.deepcopy(
+            getattr(self._session, "_completed_task_pairs_cache", None),
+        )
         try:
             gen = self._session.chat([{"role": "user", "content": prompt}], tools=None)
             return "".join(str(chunk) for chunk in gen if isinstance(chunk, str))
         finally:
             if hasattr(self._session, "history"):
                 self._session.history = old_history
+            if old_task_pairs is not None:
+                self._session._completed_task_pairs_cache = old_task_pairs
 
 
 class _LLMClientView:
@@ -285,7 +302,7 @@ class AgentRunner:
         """Append history entries to the active LLM history."""
         client = getattr(self._agent, "client", None)
         if client is not None and hasattr(client, "history"):
-            client.history.extend(copy.deepcopy(list(entries or [])))
+            client.history = list(client.history) + copy.deepcopy(list(entries or []))
 
     def clear_last_tools(self) -> None:
         """Clear the active client's last_tools marker when the backend has one."""
@@ -740,7 +757,9 @@ class AgentRunner:
                     source=source,
                     turn=terminal.turn or curr_turn,
                 )
-                display_queue.put(terminal.to_dict())
+                terminal_item = terminal.to_dict()
+                terminal_item["summary"] = _channel_summary(full_resp)
+                display_queue.put(terminal_item)
             finally:
                 with self._lock:
                     self._running = False

@@ -252,6 +252,12 @@ def _migrate_client_state(old_client: Any, new_client: Any, *, preserve_usage: b
     except Exception:
         pass
     try:
+        new_client._completed_task_pairs_cache = copy.deepcopy(
+            getattr(old_client, "_completed_task_pairs_cache", []),
+        )
+    except Exception:
+        pass
+    try:
         new_client.system = getattr(old_client, "system", "")
     except Exception:
         pass
@@ -579,6 +585,10 @@ class ZeroAgent:
         pending_state = self._pending_task_state
         if pending_state is not None:
             self.clear_pending_task()
+        else:
+            prepare_history = getattr(self.client, "prepare_for_new_task", None)
+            if callable(prepare_history):
+                prepare_history()
 
         if (
             pending_state is None
@@ -662,6 +672,10 @@ class ZeroAgent:
                 system_prompt_factory=prompt_factory,
             )
             self._update_pending_task_state(terminal)
+            if terminal.status is TerminalStatus.COMPLETED:
+                finish_history = getattr(self.client, "finish_task", None)
+                if callable(finish_history):
+                    finish_history(user_input, terminal.text)
             return terminal
         finally:
             self._is_running_task = False

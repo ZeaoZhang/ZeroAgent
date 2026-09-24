@@ -2,7 +2,7 @@
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-09-20
+- Last refreshed: 2026-09-23
 - Primary product surfaces: ZeroAgent desktop session workspace
 - Evidence reviewed: `zero_agent/frontends/desktop/static/index.html`, `styles.css`, `app.js`, and the session sidebar design specs.
 
@@ -12,9 +12,9 @@
 - Avoid: Decorative cards, excessive borders, and competing background blocks.
 
 ## Product goals
-- Goals: Keep sessions scannable and keep the active conversation visually primary.
-- Non-goals: Redesign user-created groups or session actions.
-- Success signals: Session rows read as one flat text list rather than time buckets or cards.
+- Goals: Keep sessions scannable, make user-created groups easy to recognize, and make moving a session predictable.
+- Non-goals: Change session organization behavior or the conversation workspace.
+- Success signals: Group headings and session rows form a quiet, clear sidebar hierarchy; move actions use a compact, readable popover.
 
 ## Personas and jobs
 - Primary personas: Developers managing multiple agent conversations.
@@ -27,34 +27,34 @@
 - Content hierarchy: Active conversation > session title > optional user-created group.
 
 ## Design principles
-- Principle 1: Use typography and spacing before containers or fills to express hierarchy.
+- Principle 1: Use typography and spacing before containers or fills to express hierarchy, following the restrained ChatGPT sidebar reference.
 - Principle 2: Keep inactive navigation visually quiet and preserve state dots for runtime status.
 - Tradeoffs: The active session uses weight and text color instead of a background highlight.
 
 ## Visual language
 - Color: Neutral surfaces; no background-color distinction between session states.
 - Typography: System sans-serif with medium weight for the active session.
-- Spacing/layout rhythm: Compact rows with consistent vertical padding.
-- Shape/radius/elevation: Session rows have no container shape, border, or elevation.
+- Spacing/layout rhythm: Compact rows with consistent vertical padding; group children are slightly indented.
+- Shape/radius/elevation: Session rows use a soft hover surface; the move menu is a rounded floating surface with a light shadow.
 - Motion: Short opacity/color transitions only for controls and runtime indicators.
 - Imagery/iconography: Small status dot; action icons appear on hover/focus.
 
 ## Components
 - Existing components to reuse: `.session-item`, `.session-group-header`.
-- New/changed components: Channel cards expose runtime and read-only connection states; WeChat QR login lives only in the configuration modal.
+- New/changed components: The group heading separates its disclosure control from its delete action; the move-to-group popover uses standard buttons for each destination and action.
 - Variants and states: Active, hover, busy, error, configured, unconfigured, connected, disconnected, keyboard focus.
 - Token/component ownership: Existing CSS variables in `styles.css` remain authoritative.
 
 ## Accessibility
 - Target standard: Preserve current keyboard and screen-reader semantics.
-- Keyboard/focus behavior: Action buttons remain keyboard reachable and visibly focused.
+- Keyboard/focus behavior: Group toggle, delete, move, and popover actions remain separate keyboard controls with visible focus; Escape closes the popover and returns focus to its trigger.
 - Contrast/readability: Active text must remain distinguishable without a background fill.
-- Screen-reader semantics: No DOM or label changes required for this visual update.
+- Screen-reader semantics: Group disclosure and move destinations expose their current state; avoid nested interactive elements.
 - Reduced motion and sensory considerations: Do not add new motion.
 
 ## Responsive behavior
 - Supported breakpoints/devices: Existing desktop and compact desktop layout.
-- Layout adaptations: Keep ellipsis and action-button reveal behavior unchanged.
+- Layout adaptations: Clamp the move popover to the viewport; reveal row actions on hover and keyboard focus.
 - Touch/hover differences: Focus-visible states remain available when hover is absent.
 
 ## Interaction states
@@ -69,7 +69,7 @@
 ## Content voice
 - Tone: Concise and neutral.
 - Terminology: Keep existing session and group labels; use `未连接`, `已连接`, and `已断开` for the WeChat connection status.
-- Microcopy rules: No copy changes for this visual adjustment.
+- Microcopy rules: Use concise Chinese labels for group actions.
 
 ## Implementation constraints
 - Framework/styling system: Static HTML/CSS/JavaScript frontend.

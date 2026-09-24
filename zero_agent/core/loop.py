@@ -7,12 +7,14 @@ AgentLoop: generator-based 的 agent 执行循环，编排 LLM 调用 → 工具
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
 from typing import TYPE_CHECKING, Any, Callable, Dict, Generator, List, Optional
 
 from zero_agent.core.hooks import HookSystem
+from zero_agent.core.interruption import classify_interruption
 from zero_agent.core.interfaces import LLMClient, ToolDispatcher
 from zero_agent.core.types import StepAction, StepOutcome, TerminalEvent, TerminalStatus
 from zero_agent.llm.base import extract_usage_metrics, usage_has_cache_metrics
@@ -103,6 +105,8 @@ class AgentLoop:
         turn = 0
         terminal: Optional[TerminalEvent] = None
         response: Any = None
+        seen_action_results: set[str] = set()
+        stalled_turns = 0
         self.handler.max_turns = self.max_turns
         try:
             self.handler.last_user_request = initial_content
@@ -113,6 +117,7 @@ class AgentLoop:
             reset_session()
         self._record_user_history(initial_content)
 
+        agent_config = getattr(self._agent, "config", None)
         self._trigger_hook("agent_before", {
             "task": user_input,
             "user_input": user_input,
@@ -121,6 +126,7 @@ class AgentLoop:
             "messages": messages,
             "tools": self.tools_schema,
             "max_turns": self.handler.max_turns,
+            "session_id": getattr(agent_config, "_desktop_session_id", None),
         })
 
         try:
@@ -171,7 +177,18 @@ class AgentLoop:
                     if cleaned:
                         yield cleaned + "\n"
 
-                if not response.tool_calls:
+                interruption = classify_interruption(response)
+                if interruption is not None:
+                    # Never dispatch a tool assembled from a partial stream.
+                    # The handler receives no_tool so its completion gate can
+                    # issue the bounded retry prompt instead.
+                    _logger.warning(
+                        "interrupted_response_skipping_tool_calls turn=%d kind=%s",
+                        turn,
+                        interruption.kind,
+                    )
+                    tool_calls = [{"tool_name": "no_tool", "args": {}}]
+                elif not response.tool_calls:
                     tool_calls = [{"tool_name": "no_tool", "args": {}}]
                 else:
                     tool_calls = []
@@ -316,6 +333,7 @@ class AgentLoop:
                 })
 
                 tool_results: List[Dict[str, Any]] = []
+                action_results: List[tuple[str, Dict[str, Any], Any]] = []
                 next_prompts: set[str] = set()
                 turn_terminal: Optional[TerminalEvent] = None
 
@@ -353,6 +371,9 @@ class AgentLoop:
                             turn=turn,
                         )
                         break
+
+                    if tool_name not in {"no_tool", "complete_task", "update_working_checkpoint"}:
+                        action_results.append((tool_name, args, outcome.data))
 
                     if outcome.action == StepAction.WAIT_FOR_USER:
                         turn_terminal = TerminalEvent(
@@ -465,6 +486,49 @@ class AgentLoop:
                     response, tool_calls, tool_results, turn,
                     next_prompt, None,
                 )
+                if action_results:
+                    made_progress = False
+                    for tool_name, args, data in action_results:
+                        if isinstance(data, dict) and data.get("status") == "duplicate":
+                            continue
+                        clean_args = {k: v for k, v in args.items() if not str(k).startswith("_")}
+                        payload = json.dumps(
+                            [tool_name, clean_args, data],
+                            sort_keys=True,
+                            ensure_ascii=False,
+                            default=str,
+                        )
+                        fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+                        if fingerprint not in seen_action_results:
+                            made_progress = True
+                            seen_action_results.add(fingerprint)
+                    stalled_turns = 0 if made_progress else stalled_turns + 1
+                elif tool_calls and all(tc["tool_name"] == "update_working_checkpoint" for tc in tool_calls):
+                    stalled_turns += 1
+
+                if stalled_turns >= 3:
+                    terminal = TerminalEvent(
+                        status=TerminalStatus.BUDGET_EXHAUSTED,
+                        reason="no_progress",
+                        text="Stopped after three consecutive turns without new evidence.",
+                        turn=turn,
+                    )
+                    self._trigger_hook("turn_after", {
+                        "turn": turn,
+                        "response": response,
+                        "tool_calls": tool_calls,
+                        "tool_results": tool_results,
+                        "next_prompt": "",
+                        "terminal": terminal,
+                        "model": self._model_name(),
+                    })
+                    break
+                if stalled_turns == 2:
+                    next_prompt += (
+                        "\n[SYSTEM] Two turns produced no new evidence. "
+                        "Use the collected evidence to finish, or change the action/source. "
+                        "Do not repeat the same call."
+                    )
                 messages = self._build_next_messages(next_prompt, tool_results)
 
                 self._trigger_hook("turn_after", {

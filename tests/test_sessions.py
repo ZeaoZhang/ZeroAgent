@@ -1,5 +1,6 @@
 """Tests for LiteLLMSession message normalization."""
 
+import json
 from types import SimpleNamespace
 
 from zero_agent.core.config import LLMBackendConfig
@@ -641,6 +642,33 @@ def test_stream_chat_preserves_accumulated_fields_when_final_chunk_has_no_messag
     assert mock.stop_reason == "end_turn"
 
 
+def test_interrupted_stream_is_not_added_to_session_history(monkeypatch) -> None:
+    class InterruptingStream:
+        def __iter__(self):
+            yield SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(content="partial answer", reasoning_content="", tool_calls=None),
+                    message=None,
+                    finish_reason=None,
+                )],
+                usage=None,
+            )
+            raise TimeoutError("read timed out")
+
+    monkeypatch.setattr(
+        "zero_agent.llm.sessions.litellm.completion",
+        lambda **kwargs: InterruptingStream(),
+    )
+
+    session = _make_session()
+    session.config.stream = True
+    _, mock = _drain_chat(session.chat([{"role": "user", "content": "hi"}], tools=[]))
+
+    assert mock.stop_reason == "stream_interrupted"
+    assert mock.content.endswith("[!!! 流异常中断")
+    assert not any(message.get("role") == "assistant" for message in session.history)
+
+
 def test_stream_chat_picks_last_non_empty_usage_and_normalizes_tool_stop(monkeypatch) -> None:
     usage = SimpleNamespace(prompt_tokens=7, completion_tokens=8)
     tool_delta = SimpleNamespace(
@@ -785,6 +813,100 @@ def test_non_deepseek_session_uses_standard_history_trim_policy() -> None:
 
     assert session._cut_msg_interval == 25
     assert session._trim_keep_rate == 0.3
+
+
+def test_large_context_backend_gets_bounded_history_budget() -> None:
+    session = LiteLLMSession(LLMBackendConfig(
+        name="large",
+        provider="openai",
+        api_key="sk-test",
+        api_base="https://api.openai.com/v1",
+        model="grok-test",
+        context_window=200000,
+    ))
+
+    assert session._context_budget_tokens == 40000
+    assert session._context_budget_tokens * 4 == 160000
+
+
+def test_new_task_compacts_legacy_completion_and_orphan_tool_call() -> None:
+    session = _make_session()
+    session.system = "current system prompt"
+    session.history = [
+        {"role": "user", "content": "original question"},
+        {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "read-1", "function": {"name": "file_read", "arguments": '{"path":"old.txt"}'},
+        }]},
+        {"role": "tool", "tool_call_id": "read-1", "content": "old file transcript"},
+        {"role": "user", "content": "### [WORKING MEMORY]\nold checkpoint"},
+        {"role": "user", "content": "continue after reading"},
+        {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "complete-rejected",
+            "function": {
+                "name": "complete_task",
+                "arguments": json.dumps({"answer": "rejected draft"}),
+            },
+        }]},
+        {"role": "tool", "tool_call_id": "complete-rejected", "content": "retry"},
+        {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "complete-1",
+            "function": {
+                "name": "complete_task",
+                "arguments": json.dumps({"answer": "final answer"}),
+            },
+        }]},
+    ]
+
+    session.prepare_for_new_task()
+
+    assert session.history == [
+        {"role": "user", "content": "original question"},
+        {"role": "assistant", "content": "final answer"},
+    ]
+    assert session._build_messages() == [
+        {"role": "system", "content": "current system prompt"},
+        *session.history,
+    ]
+
+
+def test_new_task_discards_unfinished_tool_transcript() -> None:
+    session = _make_session()
+    session.history = [
+        {"role": "user", "content": "unfinished question"},
+        {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "read-1", "function": {"name": "file_read", "arguments": "{}"},
+        }]},
+    ]
+
+    session.prepare_for_new_task()
+
+    assert session.history == []
+
+
+def test_finished_tasks_keep_three_compact_question_answer_pairs() -> None:
+    session = _make_session()
+    for index in range(4):
+        session.finish_task(f"question {index}", f"answer {index}")
+
+    assert session.history == [
+        {"role": "user", "content": "question 1"},
+        {"role": "assistant", "content": "answer 1"},
+        {"role": "user", "content": "question 2"},
+        {"role": "assistant", "content": "answer 2"},
+        {"role": "user", "content": "question 3"},
+        {"role": "assistant", "content": "answer 3"},
+    ]
+
+
+def test_explicit_history_clear_does_not_restore_old_question_answer() -> None:
+    session = _make_session()
+    session.finish_task("old question", "old answer")
+
+    session.history = []
+    session.prepare_for_new_task()
+
+    assert session.history == []
+    assert session._completed_task_pairs_cache == []
 
 
 def test_malformed_cache_metrics_remain_unavailable() -> None:

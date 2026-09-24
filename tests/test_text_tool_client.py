@@ -6,6 +6,8 @@ import pytest
 
 from zero_agent.llm.text_tool_client import TextToolSession, _tryparse_json
 from zero_agent.llm.base import MockFunction, MockResponse, MockToolCall
+from zero_agent.core.config import LLMBackendConfig
+from zero_agent.llm.sessions import LiteLLMSession
 
 
 # ---- helpers ----
@@ -51,6 +53,27 @@ class FakeBackend:
 
 def _make_tts(response="", name="fake"):
     return TextToolSession(FakeBackend(response, name), auto_save_tokens=True)
+
+
+def test_text_tool_session_delegates_task_compaction() -> None:
+    backend = LiteLLMSession(LLMBackendConfig(
+        name="text",
+        provider="openai",
+        api_key="sk-test",
+        api_base="https://api.openai.com/v1",
+        model="test-model",
+    ))
+    session = TextToolSession(backend)
+    backend.history = [{"role": "user", "content": "unfinished transcript"}]
+
+    session.prepare_for_new_task()
+    session.finish_task("question", "answer")
+
+    assert session.history == [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "answer"},
+    ]
+    assert session._completed_task_pairs_cache == [("question", "answer")]
 
 
 # ---- parse tests ----

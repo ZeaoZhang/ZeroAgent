@@ -253,15 +253,39 @@ def terminal_notice(item: dict) -> str:
 
 
 def terminal_reply_text(item: dict) -> str:
-    """Return the completed user-facing answer, excluding internal turn output."""
+    """Return only model-authored turn summaries for channel replies."""
+    if not isinstance(item, dict):
+        return ""
+    summary = item.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
     certificate = item.get("certificate") if isinstance(item, dict) else None
     if isinstance(certificate, dict):
         final_text = certificate.get("final_text")
     else:
         final_text = getattr(certificate, "final_text", None)
-    if isinstance(final_text, str) and final_text.strip():
-        return final_text
-    return str(item.get("text") or "") if isinstance(item, dict) else ""
+    source = final_text if isinstance(final_text, str) else str(item.get("text") or "")
+    summaries = re.findall(
+        r"<\s*summary\b[^>]*>([\s\S]*?)<\s*/\s*summary\s*>",
+        source,
+        re.IGNORECASE,
+    )
+    if summaries:
+        return "\n".join(value.strip() for value in summaries if value.strip())
+    return strip_files(clean_reply(source)) if source.strip() else ""
+
+
+def terminal_output_text(item: dict) -> str:
+    """Return the raw completed answer for file-marker and attachment handling."""
+    if not isinstance(item, dict):
+        return ""
+    certificate = item.get("certificate")
+    final_text = (
+        certificate.get("final_text")
+        if isinstance(certificate, dict)
+        else getattr(certificate, "final_text", None)
+    )
+    return final_text if isinstance(final_text, str) else str(item.get("text") or "")
 
 
 # —— 历史恢复 ——
@@ -518,18 +542,18 @@ class AgentBotMixin:
         """发送文本消息 (子类必须实现)."""
         raise NotImplementedError
 
-    async def send_done(self, chat_id, raw_text, **ctx):
+    async def send_done(self, chat_id, raw_text, *, display_text=None, **ctx):
         """发送任务完成消息 (默认调用 send_text)."""
         workspace_dir = runner_workspace_dir(self.runner)
         fallback_dirs = getattr(self, "output_file_fallback_dirs", ())
         files = resolve_output_files(
             raw_text, workspace_dir=workspace_dir, fallback_dirs=fallback_dirs,
         )
-        await self.send_text(
-            chat_id,
-            build_done_text(raw_text, workspace_dir=workspace_dir, fallback_dirs=fallback_dirs),
-            **ctx,
+        body = display_text if display_text is not None else build_done_text(
+            raw_text, workspace_dir=workspace_dir, fallback_dirs=fallback_dirs,
         )
+        if body:
+            await self.send_text(chat_id, body, **ctx)
         send_file = getattr(self, "send_file", None)
         if send_file:
             for file_path in files:
@@ -639,7 +663,12 @@ class AgentBotMixin:
                     continue
                 terminal = item
                 if item.get("status") == "completed":
-                    await self.send_done(chat_id, terminal_reply_text(item), **ctx)
+                    await self.send_done(
+                        chat_id,
+                        terminal_output_text(item),
+                        display_text=terminal_reply_text(item),
+                        **ctx,
+                    )
                 else:
                     await self.send_text(chat_id, terminal_notice(item), **ctx)
                 break

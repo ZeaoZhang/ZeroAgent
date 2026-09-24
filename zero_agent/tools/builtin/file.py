@@ -396,12 +396,33 @@ def _make_file_read_handler(config: AgentConfig):
         count = args.get("count", 200)
         keyword = args.get("keyword")
         show_linenos = args.get("show_linenos", True)
+        cache = getattr(handler, "_file_read_cache", None)
+        cache_key = (path, str(start), str(count), str(keyword), bool(show_linenos))
+        try:
+            stat = os.stat(path)
+            signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        except OSError:
+            signature = None
+        turn = int(getattr(handler, "current_turn", 0))
+        previous = cache.get(cache_key) if isinstance(cache, dict) else None
+        if (
+            signature is not None
+            and previous is not None
+            and previous[0] == signature
+        ):
+            return StepOutcome(
+                {
+                    "status": "duplicate",
+                    "path": path,
+                    "previous_turn": previous[1],
+                    "message": "This exact file range is unchanged. Use the earlier result or read a different range.",
+                },
+                action=StepAction.CONTINUE,
+            )
         result = file_read(
             path, start=start, keyword=keyword,
             count=count, show_linenos=show_linenos,
         )
-        if show_linenos and not result.startswith("Error:"):
-            result = "由于设置了show_linenos，以下返回信息为：(行号|)内容 。\n" + result
         if " ... [TRUNCATED]" in result:
             result += "\n\n（某些行被截断，如需完整内容可改用 code_run 读取）"
         next_prompt_suffix = None
@@ -422,6 +443,14 @@ def _make_file_read_handler(config: AgentConfig):
         result = smart_format(
             result, max_str_len=maxlen, omit_str="\n\n[omitted long content]\n\n"
         )
+        if signature is not None and not result.startswith("Error:") and isinstance(cache, dict):
+            try:
+                after = os.stat(path)
+                after_signature = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            except OSError:
+                after_signature = None
+            if after_signature == signature:
+                cache[cache_key] = (signature, turn)
         if next_prompt_suffix is not None:
             return StepOutcome(
                 result,

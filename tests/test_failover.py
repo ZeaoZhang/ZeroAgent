@@ -86,6 +86,26 @@ class TestAutoFailoverSessionProperties:
         assert len(session.history) == 1
         assert session.history[0]["content"] == "hello"
 
+    def test_task_compaction_survives_failover_history_migration(self) -> None:
+        primary = _make_session("primary")
+        backup = _make_session("backup")
+        session = AutoFailoverSession(primary, backups=[backup])
+        primary.finish_task("old question", "old answer")
+        primary.history.append({"role": "user", "content": "unfinished transcript"})
+
+        session.prepare_for_new_task()
+        assert session.history == [
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+        ]
+        session.finish_task("new question", "new answer")
+        AutoFailoverSession._migrate_history(primary, backup)
+
+        assert backup.history == primary.history
+        assert backup._completed_task_pairs_cache == primary._completed_task_pairs_cache
+        backup.prepare_for_new_task()
+        assert backup.history == primary.history
+
     def test_system_setter_propagates_to_all(self) -> None:
         primary = _make_session("primary")
         backup = _make_session("backup1")

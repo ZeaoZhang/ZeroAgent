@@ -1,5 +1,6 @@
 """Tests for core/agent.py — ZeroAgent orchestrator with model switching."""
 
+import json
 import os
 from importlib import resources
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from zero_agent.core.types import (
 )
 from zero_agent.llm.base import MockFunction, MockResponse, MockToolCall
 from zero_agent.llm.failover import AutoFailoverSession
+from zero_agent.llm.sessions import LiteLLMSession
 from zero_agent.tools.registry import ToolDefinition, ToolRegistry
 
 
@@ -1218,6 +1220,63 @@ class TestZeroAgentHooks:
 
 
 class TestZeroAgentTaskLifecycle:
+    def test_new_task_sends_only_compact_prior_answer(self, tmp_path, monkeypatch) -> None:
+        config = AgentConfig(
+            llm_backends={"default": LLMBackendConfig(
+                name="default",
+                provider="openai",
+                api_key="test-key",
+                api_base="https://api.openai.com/v1",
+                model="test-model",
+                stream=False,
+            )},
+            default_backend="default",
+            workspace_dir=str(tmp_path / "workspace"),
+            memory_dir=str(tmp_path / "memory"),
+        )
+        agent = ZeroAgent(config=config)
+        assert isinstance(agent.client, LiteLLMSession)
+        agent.client.history = [
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "read-1",
+                "function": {"name": "file_read", "arguments": '{"path":"old.txt"}'},
+            }]},
+            {"role": "tool", "tool_call_id": "read-1", "content": "large old tool output"},
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "complete-1",
+                "function": {
+                    "name": "complete_task",
+                    "arguments": json.dumps({"answer": "old answer"}),
+                },
+            }]},
+        ]
+        sent_messages = []
+
+        def fake_sync(messages, _tools):
+            sent_messages.append(messages)
+            if False:
+                yield ""
+            return MockResponse(content="new answer")
+
+        monkeypatch.setattr(agent.client, "_sync_chat", fake_sync)
+
+        terminal = _exhaust(agent.run("new question", system_prompt="current system"))
+
+        assert terminal.status is TerminalStatus.COMPLETED
+        assert sent_messages[0] == [
+            {"role": "system", "content": "current system"},
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "new question"},
+        ]
+        assert agent.client.history == [
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "new question"},
+            {"role": "assistant", "content": "new answer"},
+        ]
+
     def test_new_tasks_start_open_without_text_classification(self) -> None:
         requests = (
             "hello",

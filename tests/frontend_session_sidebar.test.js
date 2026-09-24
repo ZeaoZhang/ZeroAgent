@@ -327,7 +327,10 @@ async function testRenderSessionListFlatAndGroupActions() {
   const headers = allChildren
     .filter(child => child.className === 'session-group')
     .map(section => section.children[0]);
-  assert.deepEqual(headers.map(header => header.children[1].textContent), ['Work']);
+  const toggles = headers.map(header => header.children.find(child => child.className === 'session-group-toggle'));
+  assert.deepEqual(toggles.map(toggle => toggle?.tagName), ['BUTTON']);
+  assert.deepEqual(toggles.map(toggle => toggle.children.find(child => child.className === 'group-name')?.textContent), ['Work']);
+  assert.deepEqual(toggles.map(toggle => toggle.attributes['aria-expanded']), ['true']);
   assert.deepEqual(
     allChildren.slice(1).map(item => item.dataset.sessionId),
     [todayOld.id, todayNewest.id, yesterday.id, week.id, older.id],
@@ -404,9 +407,11 @@ async function testCollapsibleSectionAndDragPayload() {
   const section = exported.buildGroupElement(group, []);
   const header = section.children[0];
   const content = section.children[1];
-  assert.equal(header.tagName, 'BUTTON');
-  assert.equal(header.attributes['aria-expanded'], 'false');
-  assert.equal(header.attributes['aria-controls'], content.attributes.id);
+  assert.equal(header.tagName, 'DIV');
+  const toggle = header.children.find(child => child.className === 'session-group-toggle');
+  assert.equal(toggle.tagName, 'BUTTON');
+  assert.equal(toggle.attributes['aria-expanded'], 'false');
+  assert.equal(toggle.attributes['aria-controls'], content.attributes.id);
 
   const item = exported.createSessionItem({
     id: 'local-drag', bridgeSessionId: 'bridge-drag', title: 'Drag me',

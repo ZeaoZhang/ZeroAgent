@@ -42,6 +42,7 @@ from zero_agent.bots.common import (
     runner_workspace_dir,
     strip_files,
     terminal_reply_text,
+    terminal_output_text,
     terminal_notice,
 )
 
@@ -156,23 +157,22 @@ class WeComApp(AgentBotMixin):
             print(f"[WeCom] send_media error: {e}")
             await self.send_text(chat_id, f"📎 {os.path.basename(file_path)}（发送失败: {e}）")
 
-    async def send_done(self, chat_id, raw_text, **ctx):
+    async def send_done(self, chat_id, raw_text, *, display_text=None, **ctx):
         files = resolve_output_files(
             raw_text,
             workspace_dir=runner_workspace_dir(self.runner),
             fallback_dirs=(MEDIA_DIR, TEMP_DIR),
         )
         if not files:
-            return await self.send_text(
-                chat_id,
-                build_done_text(
-                    raw_text,
-                    workspace_dir=runner_workspace_dir(self.runner),
-                    fallback_dirs=(MEDIA_DIR, TEMP_DIR),
-                ),
-                **ctx,
+            body = display_text if display_text is not None else build_done_text(
+                raw_text,
+                workspace_dir=runner_workspace_dir(self.runner),
+                fallback_dirs=(MEDIA_DIR, TEMP_DIR),
             )
-        clean = clean_reply(strip_files(raw_text))
+            if body:
+                return await self.send_text(chat_id, body, **ctx)
+            return None
+        clean = display_text if display_text is not None else clean_reply(strip_files(raw_text))
         if clean and clean != "...":
             await self.send_text(chat_id, clean, **ctx)
         for fp in files:
@@ -206,8 +206,10 @@ class WeComApp(AgentBotMixin):
                 status = item.get("status")
                 if status == "completed":
                     self._stats["completed"] += 1
-                    raw = terminal_reply_text(item)
-                    await self.send_done(chat_id, raw)
+                    raw = terminal_output_text(item)
+                    await self.send_done(
+                        chat_id, raw, display_text=terminal_reply_text(item),
+                    )
                     _tprint(f"[{_ts()}] ✅ Done ({chat_id}) — {len(raw)} 字")
                 else:
                     await self.send_text(chat_id, terminal_notice(item))

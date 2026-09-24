@@ -37,6 +37,7 @@ from zero_agent.bots.common import (
     split_text,
     load_keys,
     terminal_reply_text,
+    terminal_output_text,
     terminal_notice,
     resolve_output_files,
     runner_workspace_dir,
@@ -673,8 +674,8 @@ class FeishuApp(AgentBotMixin):
         card = _TaskCard(rid, receive_id_type)
         terminal = None
 
-        def _complete(raw):
-            card.done(_display_text(raw))
+        def _complete(raw, summary):
+            card.done(summary)
             _send_generated_files(rid, raw, receive_id_type=receive_id_type)
 
         try:
@@ -697,7 +698,11 @@ class FeishuApp(AgentBotMixin):
                     terminal = item
                     status = item.get("status")
                     if status == "completed":
-                        await asyncio.to_thread(_complete, terminal_reply_text(item))
+                        await asyncio.to_thread(
+                            _complete,
+                            terminal_output_text(item),
+                            terminal_reply_text(item),
+                        )
                     else:
                         await asyncio.to_thread(card.terminal, terminal_notice(item))
                     break

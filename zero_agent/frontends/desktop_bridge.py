@@ -1655,6 +1655,7 @@ class AgentManager:
         with self.lock:
             if not self._turn_is_current_locked(sess, token):
                 return
+            partial_text = str((sess.partial or {}).get("content") or "")
             sess.partial = None
             sess.terminal_status = terminal_status
             sess.terminal_reason = reason
@@ -1700,10 +1701,20 @@ class AgentManager:
             else:
                 data = terminal.get("data")
                 data_error = data.get("error") if isinstance(data, dict) else ""
-                error_detail = str(data_error or reason or text or terminal_status)
+                error_detail = str(data_error or reason or terminal_status)
                 sess.status = "error"
                 sess.last_error = error_detail
-                self.add_message(sess, "error", text or error_detail)
+                assistant_text = partial_text or (text if data_error else "")
+                # Keep any streamed assistant output as a normal message. The
+                # terminal error is a separate current-turn message; storing
+                # the accumulated transcript as role=error would mark every
+                # internal turn in that transcript as failed in the UI.
+                if assistant_text.strip():
+                    self.add_message(sess, "assistant", assistant_text)
+                elif text:
+                    error_detail = str(data_error or text or reason or terminal_status)
+                    sess.last_error = error_detail
+                self.add_message(sess, "error", error_detail)
                 if plan_contract:
                     sess.plan_status = "failed"
             agent_status = {
@@ -1726,6 +1737,7 @@ class AgentManager:
         with self.lock:
             if token is not None and not self._turn_is_current_locked(sess, token):
                 return
+            partial_text = str((sess.partial or {}).get("content") or "")
             sess.partial = None
             sess.status = "error"
             sess.last_error = str(exc)
@@ -1733,6 +1745,8 @@ class AgentManager:
             sess.terminal_reason = type(exc).__name__
             if token is not None:
                 self._update_agent_locked(sess, token, "failed", str(exc))
+            if partial_text.strip():
+                self.add_message(sess, "assistant", partial_text)
             self.add_message(sess, "error", str(exc))
             next_thread = self._prepare_next_turn_locked(sess)
             self._persist_sessions()
@@ -2834,7 +2848,9 @@ def create_app(
     def version_frontend_assets(body: str, cache_key: str) -> str:
         for attribute, asset in (
             ("href", "styles.css"),
+            ("href", "vendor/katex/katex.min.css"),
             ("src", "vendor/marked.min.js"),
+            ("src", "vendor/katex/katex.min.js"),
             ("src", "za-web.js"),
             ("src", "app.js"),
         ):
