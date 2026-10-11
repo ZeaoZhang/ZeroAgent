@@ -1,0 +1,914 @@
+{
+  "schema_version": 2,
+  "dataset_version": "orion-tools-v2",
+  "description": "Synthetic historical tool evidence for project-specific OrionEval facts. No expected answer is exposed to memory updates. Not directly comparable with the original v1 pilot.",
+  "cases": [
+    {
+      "test_id": "layer1_01_project_artifact_limit",
+      "category": "layer1",
+      "evaluation_kind": "retention",
+      "title": "Recall Orion artifact retention",
+      "conversation_histories": [
+        {
+          "conversation_id": "orion-artifact-policy",
+          "timestamp": "2026-09-10T10:00:00+08:00",
+          "memory_action": "retain",
+          "requires_tool_evidence": true,
+          "messages": [
+            {
+              "role": "user",
+              "content": "Read the OrionEval policy and retain its stable artifact retention period for future operations."
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_orion_artifact_policy",
+                  "type": "function",
+                  "function": {
+                    "name": "file_read",
+                    "arguments": "{\"path\": \"orion/policy.toml\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_orion_artifact_policy",
+              "content": "{\"status\": \"success\", \"path\": \"orion/policy.toml\", \"content\": \"project = OrionEval\\nartifact_retention_days = 43\\n\"}"
+            },
+            {
+              "role": "assistant",
+              "content": "The tool result above is the recorded evidence for this session."
+            }
+          ]
+        }
+      ],
+      "user_question": "For OrionEval, how many days should build artifacts be retained?",
+      "evaluation_criteria": "Answer 43 days, based on the verified OrionEval policy. Do not confuse artifact retention with memory index line limits.",
+      "expected_behavior": "Answer 43 days, based on the verified OrionEval policy. Do not confuse artifact retention with memory index line limits.",
+      "required_memory_facts": [
+        {
+          "label": "Orion artifact retention",
+          "any_of": [
+            "43 days",
+            "43天",
+            "43 天",
+            "artifact_retention_days = 43",
+            "artifact_retention_days=43"
+          ]
+        }
+      ],
+      "required_answer_facts": [
+        {
+          "label": "Orion artifact retention",
+          "any_of": [
+            "43 days",
+            "43天",
+            "43 天",
+            "artifact_retention_days = 43",
+            "artifact_retention_days=43"
+          ]
+        }
+      ],
+      "forbidden_memory_facts": []
+    },
+    {
+      "test_id": "layer1_02_python_support_range",
+      "category": "layer1",
+      "evaluation_kind": "retention",
+      "title": "Recall Orion Python support",
+      "conversation_histories": [
+        {
+          "conversation_id": "orion-python-range",
+          "timestamp": "2026-09-11T11:00:00+08:00",
+          "memory_action": "retain",
+          "requires_tool_evidence": true,
+          "messages": [
+            {
+              "role": "user",
+              "content": "Read the OrionEval metadata and remember its verified Python support range."
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_orion_python_range",
+                  "type": "function",
+                  "function": {
+                    "name": "file_read",
+                    "arguments": "{\"path\": \"orion/pyproject.toml\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_orion_python_range",
+              "content": "{\"status\": \"success\", \"path\": \"orion/pyproject.toml\", \"content\": \"[project]\\nname = \\\"orion-eval\\\"\\nrequires-python = \\\">=3.10,<3.14\\\"\\n\"}"
+            },
+            {
+              "role": "assistant",
+              "content": "The tool result above is the recorded evidence for this session."
+            }
+          ]
+        }
+      ],
+      "user_question": "Which Python versions does OrionEval support?",
+      "evaluation_criteria": "Give >=3.10,<3.14 precisely: 3.10 included, 3.14 excluded. Attribute the range to OrionEval.",
+      "expected_behavior": "Give >=3.10,<3.14 precisely: 3.10 included, 3.14 excluded. Attribute the range to OrionEval.",
+      "required_memory_facts": [
+        {
+          "label": "Orion Python range",
+          "any_of": [
+            ">=3.10,<3.14",
+            "Python >=3.10 and <3.14",
+            "Python 3.10 through 3.13"
+          ]
+        }
+      ],
+      "required_answer_facts": [
+        {
+          "label": "Orion Python range",
+          "any_of": [
+            ">=3.10,<3.14",
+            "Python >=3.10 and <3.14",
+            "Python 3.10 through 3.13"
+          ]
+        }
+      ],
+      "forbidden_memory_facts": []
+    },
+    {
+      "test_id": "layer1_03_project_paths",
+      "category": "layer1",
+      "evaluation_kind": "retention",
+      "title": "Recall project input and validated output paths",
+      "conversation_histories": [
+        {
+          "conversation_id": "orion-data-paths",
+          "timestamp": "2026-09-12T09:30:00+08:00",
+          "memory_action": "retain",
+          "requires_tool_evidence": true,
+          "messages": [
+            {
+              "role": "user",
+              "content": "Read these non-secret OrionEval paths and remember which is the input and which is the validated output."
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_orion_data_paths",
+                  "type": "function",
+                  "function": {
+                    "name": "file_read",
+                    "arguments": "{\"path\": \"orion/data_config.toml\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_orion_data_paths",
+              "content": "{\"status\": \"success\", \"path\": \"orion/data_config.toml\", \"content\": \"project = OrionEval\\nraw_input = datasets/orion/raw_events.jsonl\\nvalidated_output = artifacts/orion/validated_events.parquet\\n\"}"
+            },
+            {
+              "role": "assistant",
+              "content": "The tool result above is the recorded evidence for this session."
+            }
+          ]
+        }
+      ],
+      "user_question": "For OrionEval, which file is the raw input and which is the validated output?",
+      "evaluation_criteria": "Map datasets/orion/raw_events.jsonl to raw input and artifacts/orion/validated_events.parquet to validated output. Do not reverse the roles.",
+      "expected_behavior": "Map datasets/orion/raw_events.jsonl to raw input and artifacts/orion/validated_events.parquet to validated output. Do not reverse the roles.",
+      "required_memory_facts": [
+        {
+          "label": "raw input",
+          "any_of": [
+            "datasets/orion/raw_events.jsonl"
+          ]
+        },
+        {
+          "label": "validated output",
+          "any_of": [
+            "artifacts/orion/validated_events.parquet"
+          ]
+        }
+      ],
+      "required_answer_facts": [
+        {
+          "label": "raw input",
+          "any_of": [
+            "datasets/orion/raw_events.jsonl"
+          ]
+        },
+        {
+          "label": "validated output",
+          "any_of": [
+            "artifacts/orion/validated_events.parquet"
+          ]
+        }
+      ],
+      "forbidden_memory_facts": []
+    },
+    {
+      "test_id": "layer2_01_memory_layer_placement",
+      "category": "layer2",
+      "evaluation_kind": "retention",
+      "title": "Retrieve environment facts and release procedure",
+      "conversation_histories": [
+        {
+          "conversation_id": "orion-staging-config",
+          "timestamp": "2026-09-13T14:00:00+08:00",
+          "memory_action": "retain",
+          "requires_tool_evidence": true,
+          "messages": [
+            {
+              "role": "user",
+              "content": "Read and retain this stable non-secret OrionEval staging endpoint as an environment fact."
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_orion_staging_config",
+                  "type": "function",
+                  "function": {
+                    "name": "file_read",
+                    "arguments": "{\"path\": \"orion/deployment.toml\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_orion_staging_config",
+              "content": "{\"status\": \"success\", \"path\": \"orion/deployment.toml\", \"content\": \"project = OrionEval\\nstaging_endpoint = https://staging.orion.example.invalid/v1\\n\"}"
+            },
+            {
+              "role": "assistant",
+              "content": "The tool result above is the recorded evidence for this session."
+            }
+          ]
+        },
+        {
+          "conversation_id": "orion-release-procedure",
+          "timestamp": "2026-09-14T14:00:00+08:00",
+          "memory_action": "retain",
+          "requires_tool_evidence": true,
+          "messages": [
+            {
+              "role": "user",
+              "content": "Retain the verified task-specific release pitfall and working procedure for future OrionEval packaging."
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_orion_release_procedure",
+                  "type": "function",
+                  "function": {
+                    "name": "file_read",
+                    "arguments": "{\"path\": \"orion/verified_release_notes.md\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_orion_release_procedure",
+              "content": "{\"status\": \"success\", \"path\": \"orion/verified_release_notes.md\", \"content\": \"OrionEval release recovery, verified after multiple failed attempts: run scripts/orion_release_catalogs.sh to compile catalogs before packaging. Reverse order produced incorrect package contents. The verified successful order is compile then package.\"}"
+            },
+            {
+              "role": "assistant",
+              "content": "The tool result above is the recorded evidence for this session."
+            }
+          ]
+        }
+      ],
+      "user_question": "Where should I look in memory for the OrionEval staging endpoint and the reusable release procedure? Give both.",
+      "evaluation_criteria": "The endpoint https://staging.orion.example.invalid/v1 should be an L2 fact in global_mem.txt. The release procedure should be in an L3 SOP under sops/: run scripts/orion_release_catalogs.sh before packaging.",
+      "expected_behavior": "The endpoint https://staging.orion.example.invalid/v1 should be an L2 fact in global_mem.txt. The release procedure should be in an L3 SOP under sops/: run scripts/orion_release_catalogs.sh before packaging.",
+      "required_memory_facts": [
+        {
+          "label": "staging endpoint",
+          "any_of": [
+            "https://staging.orion.example.invalid/v1"
+          ]
+        },
+        {
+          "label": "release command",
+          "any_of": [
+            "scripts/orion_release_catalogs.sh"
+          ]
+        }
+      ],
+      "required_answer_facts": [
+        {
+          "label": "staging endpoint",
+          "any_of": [
+            "https://staging.orion.example.invalid/v1"
+          ]
+        },
+        {
+          "label": "release command",
+          "any_of": [
+            "scripts/orion_release_catalogs.sh"
+          ]
+        },
+        {
+          "label": "L2 store",
+          "any_of": [
+            "global_mem.txt"
+          ]
+        },
+        {
+          "label": "L3 location",
+          "any_of": [
+            "sops/"
+          ]
+        }
+      ],
+      "forbidden_memory_facts": []
+    },
+    {
+      "test_id": "layer2_02_archive_vs_response_logs",
+      "category": "layer2",
+      "evaluation_kind": "retention",
+      "title": "Disambiguate Orion archives and response logs",
+      "conversation_histories": [
+        {
+          "conversation_id": "orion-archive-config",
+          "timestamp": "2026-09-15T10:00:00+08:00",
+          "memory_action": "retain",
+          "requires_tool_evidence": true,
+          "messages": [
+            {
+              "role": "user",
+              "content": "Remember the verified OrionEval raw-session archive path."
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_orion_archive_config",
+                  "type": "function",
+                  "function": {
+                    "name": "file_read",
+                    "arguments": "{\"path\": \"orion/archive.toml\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_orion_archive_config",
+              "content": "{\"status\": \"success\", \"path\": \"orion/archive.toml\", \"content\": \"project = OrionEval\\nraw_session_archive = logs/orion/archive_history/\\n\"}"
+            },
+            {
+              "role": "assistant",
+              "content": "The tool result above is the recorded evidence for this session."
+            }
+          ]
+        },
+        {
+          "conversation_id": "orion-response-config",
+          "timestamp": "2026-09-16T10:00:00+08:00",
+          "memory_action": "retain",
+          "requires_tool_evidence": true,
+          "messages": [
+            {
+              "role": "user",
+              "content": "Remember the verified OrionEval model response log path, distinct from the raw-session archive."
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_orion_response_config",
+                  "type": "function",
+                  "function": {
+                    "name": "file_read",
+                    "arguments": "{\"path\": \"orion/logger.toml\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_orion_response_config",
+              "content": "{\"status\": \"success\", \"path\": \"orion/logger.toml\", \"content\": \"project = OrionEval\\nmodel_response_logs = logs/orion/model_responses/\\n\"}"
+            },
+            {
+              "role": "assistant",
+              "content": "The tool result above is the recorded evidence for this session."
+            }
+          ]
+        }
+      ],
+      "user_question": "For OrionEval, where are raw sessions archived and where do model response logs go?",
+      "evaluation_criteria": "Archives use logs/orion/archive_history/; model response logs use logs/orion/model_responses/. Give both and do not confuse them with ZeroAgent internal directories.",
+      "expected_behavior": "Archives use logs/orion/archive_history/; model response logs use logs/orion/model_responses/. Give both and do not confuse them with ZeroAgent internal directories.",
+      "required_memory_facts": [
+        {
+          "label": "Orion archive",
+          "any_of": [
+            "logs/orion/archive_history/"
+          ]
+        },
+        {
+          "label": "Orion response logs",
+          "any_of": [
+            "logs/orion/model_responses/"
+          ]
+        }
+      ],
+      "required_answer_facts": [
+        {
+          "label": "Orion archive",
+          "any_of": [
+            "logs/orion/archive_history/"
+          ]
+        },
+        {
+          "label": "Orion response logs",
+          "any_of": [
+            "logs/orion/model_responses/"
+          ]
+        }
+      ],
+      "forbidden_memory_facts": []
+    },
+    {
+      "test_id": "layer2_03_similar_service_endpoints",
+      "category": "layer2",
+      "evaluation_kind": "retention",
+      "title": "Disambiguate staging and production endpoints",
+      "conversation_histories": [
+        {
+          "conversation_id": "orion-stage-endpoint",
+          "timestamp": "2026-09-17T15:00:00+08:00",
+          "memory_action": "retain",
+          "requires_tool_evidence": true,
+          "messages": [
+            {
+              "role": "user",
+              "content": "Remember this verified non-secret OrionEval staging service endpoint."
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_orion_stage_endpoint",
+                  "type": "function",
+                  "function": {
+                    "name": "file_read",
+                    "arguments": "{\"path\": \"orion/stage.toml\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_orion_stage_endpoint",
+              "content": "{\"status\": \"success\", \"path\": \"orion/stage.toml\", \"content\": \"project = OrionEval\\nenvironment = staging\\nendpoint = https://stage.orion.example.invalid/v2\\n\"}"
+            },
+            {
+              "role": "assistant",
+              "content": "The tool result above is the recorded evidence for this session."
+            }
+          ]
+        },
+        {
+          "conversation_id": "orion-prod-endpoint",
+          "timestamp": "2026-09-18T15:00:00+08:00",
+          "memory_action": "retain",
+          "requires_tool_evidence": true,
+          "messages": [
+            {
+              "role": "user",
+              "content": "Remember this verified non-secret OrionEval production endpoint. It is distinct from staging, not a replacement."
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_orion_prod_endpoint",
+                  "type": "function",
+                  "function": {
+                    "name": "file_read",
+                    "arguments": "{\"path\": \"orion/prod.toml\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_orion_prod_endpoint",
+              "content": "{\"status\": \"success\", \"path\": \"orion/prod.toml\", \"content\": \"project = OrionEval\\nenvironment = production\\nendpoint = https://prod.orion.example.invalid/v2\\n\"}"
+            },
+            {
+              "role": "assistant",
+              "content": "The tool result above is the recorded evidence for this session."
+            }
+          ]
+        }
+      ],
+      "user_question": "Which OrionEval endpoint is production and which is staging?",
+      "evaluation_criteria": "Production is https://prod.orion.example.invalid/v2 and staging is https://stage.orion.example.invalid/v2. Preserve both mappings.",
+      "expected_behavior": "Production is https://prod.orion.example.invalid/v2 and staging is https://stage.orion.example.invalid/v2. Preserve both mappings.",
+      "required_memory_facts": [
+        {
+          "label": "production endpoint",
+          "any_of": [
+            "https://prod.orion.example.invalid/v2"
+          ]
+        },
+        {
+          "label": "stage endpoint",
+          "any_of": [
+            "https://stage.orion.example.invalid/v2"
+          ]
+        }
+      ],
+      "required_answer_facts": [
+        {
+          "label": "production endpoint",
+          "any_of": [
+            "https://prod.orion.example.invalid/v2"
+          ]
+        },
+        {
+          "label": "stage endpoint",
+          "any_of": [
+            "https://stage.orion.example.invalid/v2"
+          ]
+        }
+      ],
+      "forbidden_memory_facts": []
+    },
+    {
+      "test_id": "layer3_01_updated_python_range",
+      "category": "layer3",
+      "evaluation_kind": "retention",
+      "title": "Replace Orion superseded Python range",
+      "conversation_histories": [
+        {
+          "conversation_id": "orion-old-python",
+          "timestamp": "2026-08-01T10:00:00+08:00",
+          "memory_action": "retain",
+          "requires_tool_evidence": true,
+          "messages": [
+            {
+              "role": "user",
+              "content": "Read and remember the current OrionEval Python range as of this session."
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_orion_old_python",
+                  "type": "function",
+                  "function": {
+                    "name": "file_read",
+                    "arguments": "{\"path\": \"orion/pyproject.toml\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_orion_old_python",
+              "content": "{\"status\": \"success\", \"path\": \"orion/pyproject.toml\", \"content\": \"project = OrionEval\\nrequires-python = \\\">=3.9,<3.13\\\"\\n\"}"
+            },
+            {
+              "role": "assistant",
+              "content": "The tool result above is the recorded evidence for this session."
+            }
+          ]
+        },
+        {
+          "conversation_id": "orion-updated-python",
+          "timestamp": "2026-09-19T10:00:00+08:00",
+          "memory_action": "update",
+          "requires_tool_evidence": true,
+          "messages": [
+            {
+              "role": "user",
+              "content": "This newly read metadata supersedes the prior OrionEval Python range. Update the current value and mark the prior range obsolete."
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_orion_updated_python",
+                  "type": "function",
+                  "function": {
+                    "name": "file_read",
+                    "arguments": "{\"path\": \"orion/pyproject.toml\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_orion_updated_python",
+              "content": "{\"status\": \"success\", \"path\": \"orion/pyproject.toml\", \"content\": \"project = OrionEval\\nrequires-python = \\\">=3.10,<3.14\\\"\\n\"}"
+            },
+            {
+              "role": "assistant",
+              "content": "The tool result above is the recorded evidence for this session."
+            }
+          ]
+        }
+      ],
+      "user_question": "What is the currently supported OrionEval Python range? Does the old range still apply?",
+      "evaluation_criteria": "The current value is >=3.10,<3.14; old >=3.9,<3.13 is superseded. Keeping a clearly marked historical value in memory is allowed; presenting it as current is wrong.",
+      "expected_behavior": "The current value is >=3.10,<3.14; old >=3.9,<3.13 is superseded. Keeping a clearly marked historical value in memory is allowed; presenting it as current is wrong.",
+      "required_memory_facts": [
+        {
+          "label": "current Orion Python range",
+          "any_of": [
+            ">=3.10,<3.14",
+            "Python >=3.10 and <3.14"
+          ]
+        }
+      ],
+      "required_answer_facts": [
+        {
+          "label": "current Orion Python range",
+          "any_of": [
+            ">=3.10,<3.14",
+            "Python >=3.10 and <3.14"
+          ]
+        },
+        {
+          "label": "superseded old range",
+          "any_of": [
+            "superseded",
+            "obsolete",
+            "已过时",
+            "已被替代",
+            "不再适用",
+            "失效"
+          ]
+        }
+      ],
+      "forbidden_memory_facts": []
+    },
+    {
+      "test_id": "layer3_02_gettext_build_prerequisite",
+      "category": "layer3",
+      "evaluation_kind": "retention",
+      "title": "Synthesize Orion gettext prerequisite and command",
+      "conversation_histories": [
+        {
+          "conversation_id": "orion-catalog-prerequisite",
+          "timestamp": "2026-09-20T09:00:00+08:00",
+          "memory_action": "retain",
+          "requires_tool_evidence": true,
+          "messages": [
+            {
+              "role": "user",
+              "content": "Retain this verified OrionEval build prerequisite and failure recovery diagnosis."
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_orion_catalog_prerequisite",
+                  "type": "function",
+                  "function": {
+                    "name": "file_read",
+                    "arguments": "{\"path\": \"orion/build_recovery.md\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_orion_catalog_prerequisite",
+              "content": "{\"status\": \"success\", \"path\": \"orion/build_recovery.md\", \"content\": \"OrionEval verified build diagnosis: catalog compilation failed with msgfmt: command not found. The missing executable is provided by GNU gettext. Installing GNU gettext resolved this failure. Changing Python dependencies did not resolve it.\"}"
+            },
+            {
+              "role": "assistant",
+              "content": "The tool result above is the recorded evidence for this session."
+            }
+          ]
+        },
+        {
+          "conversation_id": "orion-catalog-command",
+          "timestamp": "2026-09-21T09:00:00+08:00",
+          "memory_action": "retain",
+          "requires_tool_evidence": true,
+          "messages": [
+            {
+              "role": "user",
+              "content": "Remember the exact verified OrionEval catalog recovery command and associate it with the earlier missing-msgfmt diagnosis."
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_orion_catalog_command",
+                  "type": "function",
+                  "function": {
+                    "name": "file_read",
+                    "arguments": "{\"path\": \"orion/verified_commands.md\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_orion_catalog_command",
+              "content": "{\"status\": \"success\", \"path\": \"orion/verified_commands.md\", \"content\": \"OrionEval catalog recovery, verified successful: after installing GNU gettext to provide msgfmt, rerun ./scripts/build_orion_catalogs.sh. This exact command completes catalog compilation.\"}"
+            },
+            {
+              "role": "assistant",
+              "content": "The tool result above is the recorded evidence for this session."
+            }
+          ]
+        }
+      ],
+      "user_question": "OrionEval fails compiling catalogs with 'msgfmt: command not found'. What should I install and which repository command should I rerun?",
+      "evaluation_criteria": "Install GNU gettext to provide msgfmt, then rerun ./scripts/build_orion_catalogs.sh. Do not invent a different script or suggest Python package changes as the fix.",
+      "expected_behavior": "Install GNU gettext to provide msgfmt, then rerun ./scripts/build_orion_catalogs.sh. Do not invent a different script or suggest Python package changes as the fix.",
+      "required_memory_facts": [
+        {
+          "label": "gettext prerequisite",
+          "any_of": [
+            "GNU gettext",
+            "gettext"
+          ]
+        },
+        {
+          "label": "msgfmt executable",
+          "any_of": [
+            "msgfmt"
+          ]
+        },
+        {
+          "label": "Orion compile command",
+          "any_of": [
+            "scripts/build_orion_catalogs.sh"
+          ]
+        }
+      ],
+      "required_answer_facts": [
+        {
+          "label": "gettext prerequisite",
+          "any_of": [
+            "GNU gettext",
+            "gettext"
+          ]
+        },
+        {
+          "label": "msgfmt executable",
+          "any_of": [
+            "msgfmt"
+          ]
+        },
+        {
+          "label": "Orion compile command",
+          "any_of": [
+            "scripts/build_orion_catalogs.sh"
+          ]
+        }
+      ],
+      "forbidden_memory_facts": []
+    },
+    {
+      "test_id": "layer3_03_keep_stable_command_drop_temporary_port",
+      "category": "layer3",
+      "evaluation_kind": "retention",
+      "title": "Keep Orion verified command, discard temporary port",
+      "conversation_histories": [
+        {
+          "conversation_id": "orion-test-command",
+          "timestamp": "2026-09-22T13:00:00+08:00",
+          "memory_action": "retain",
+          "requires_tool_evidence": true,
+          "messages": [
+            {
+              "role": "user",
+              "content": "Retain this successfully executed command as the reusable OrionEval store test command."
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_orion_test_command",
+                  "type": "function",
+                  "function": {
+                    "name": "code_run",
+                    "arguments": "{\"script\": \"uv run pytest checks/test_orion_store.py -q\", \"type\": \"bash\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_orion_test_command",
+              "content": "{\"status\": \"success\", \"exit_code\": 0, \"stdout\": \"uv run pytest checks/test_orion_store.py -q\\n7 passed\\n\"}"
+            },
+            {
+              "role": "assistant",
+              "content": "The tool result above is the recorded evidence for this session."
+            }
+          ]
+        },
+        {
+          "conversation_id": "orion-temporary-debug-port",
+          "timestamp": "2026-09-23T13:00:00+08:00",
+          "memory_action": "discard",
+          "requires_tool_evidence": false,
+          "messages": [
+            {
+              "role": "user",
+              "content": "This port is temporary and must not be saved to long-term memory."
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_orion_temporary_debug_port",
+                  "type": "function",
+                  "function": {
+                    "name": "file_read",
+                    "arguments": "{\"path\": \"orion/debug-session.log\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_orion_temporary_debug_port",
+              "content": "{\"status\": \"success\", \"path\": \"orion/debug-session.log\", \"content\": \"One-off OrionEval debug run: local port 43819. Expires at the end of this run and must not be retained as a project setting.\"}"
+            },
+            {
+              "role": "assistant",
+              "content": "The tool result above is the recorded evidence for this session."
+            }
+          ]
+        }
+      ],
+      "user_question": "What command reruns the OrionEval store tests? Is there a saved debug port I should reuse?",
+      "evaluation_criteria": "Give uv run pytest checks/test_orion_store.py -q. Say no reusable debug port was retained. Do not present 43819 as a current setting; no need to recall the discarded numeric value.",
+      "expected_behavior": "Give uv run pytest checks/test_orion_store.py -q. Say no reusable debug port was retained. Do not present 43819 as a current setting; no need to recall the discarded numeric value.",
+      "required_memory_facts": [
+        {
+          "label": "Orion test command",
+          "any_of": [
+            "uv run pytest checks/test_orion_store.py -q"
+          ]
+        }
+      ],
+      "required_answer_facts": [
+        {
+          "label": "Orion test command",
+          "any_of": [
+            "uv run pytest checks/test_orion_store.py -q"
+          ]
+        },
+        {
+          "label": "temporary port not retained",
+          "any_of": [
+            "no saved debug port",
+            "no debug port is saved",
+            "not retained",
+            "not saved",
+            "未保留",
+            "没有保存调试端口",
+            "未保存"
+          ]
+        }
+      ],
+      "forbidden_memory_facts": [
+        {
+          "label": "temporary debug port",
+          "any_of": [
+            "43819"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+cwd=/Users/zhangzeao/workspace/ZeroAgent/workspace
+task_id=task-1790220473726199000
+mode=TaskMode.PLAN
+plan_path=./plan_pi_desktop_check/plan.md
+verify=missing
+remaining=None

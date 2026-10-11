@@ -50,6 +50,7 @@ zero-agent-conductor = "zero_agent.frontends.conductor:main"
 zero-agent-acp = "zero_agent.frontends.acp_bridge:main"
 zero-agent-tui = "zero_agent.frontends.tui:main"
 zero-agent-launcher = "zero_agent.frontends.launcher:main"
+zero-agent-memory-eval = "zero_agent.evaluation.memory:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]
@@ -65,6 +66,7 @@ packages = [
     "zero_agent.tools",
     "zero_agent.tools.builtin",
     "zero_agent.memory",
+    "zero_agent.evaluation",
     "zero_agent.runners",
     "zero_agent.utils",
     "zero_agent.utils.skill_search",
@@ -88,6 +90,7 @@ packages = [
     "insight_fixed_structure*.txt",
     "global_mem_insight_template*.txt",
     "memory_seed/sops/*.md",
+    "evaluation/*.json",
     "review_sop/*.md",
     "review_sop/*.txt",
     "templates/*.py",

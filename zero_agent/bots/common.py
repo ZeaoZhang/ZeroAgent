@@ -253,7 +253,7 @@ def terminal_notice(item: dict) -> str:
 
 
 def terminal_reply_text(item: dict) -> str:
-    """Return only model-authored turn summaries for channel replies."""
+    """Return only model-authored summaries; never fall back to execution output."""
     if not isinstance(item, dict):
         return ""
     summary = item.get("summary")
@@ -270,9 +270,7 @@ def terminal_reply_text(item: dict) -> str:
         source,
         re.IGNORECASE,
     )
-    if summaries:
-        return "\n".join(value.strip() for value in summaries if value.strip())
-    return strip_files(clean_reply(source)) if source.strip() else ""
+    return "\n".join(value.strip() for value in summaries if value.strip())
 
 
 def terminal_output_text(item: dict) -> str:

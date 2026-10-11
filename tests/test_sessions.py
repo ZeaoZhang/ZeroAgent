@@ -391,6 +391,29 @@ def test_compress_history_tags_replaces_old_tags() -> None:
     assert "<history>[...]</history>" not in compressed[2]["content"]
 
 
+def test_trim_history_preserves_old_prefix_until_budget_requires_compaction() -> None:
+    session = _make_session()
+    old_context = "<history>" + ("x" * 2000) + "</history>"
+    session.history = [
+        {"role": "user", "content": old_context},
+        {"role": "assistant", "content": "previous answer"},
+        {"role": "tool", "tool_call_id": "call_1", "content": "y" * 2000},
+        {"role": "user", "content": "next question"},
+    ]
+
+    session._trim_history()
+    first_prefix = session.history[0]["content"]
+    bounded_tool = session.history[2]["content"]
+    for turn in range(26):
+        session.history.append({"role": "assistant", "content": f"answer {turn}"})
+        session._trim_history()
+        assert session.history[0]["content"] == old_context
+
+    assert first_prefix == old_context
+    assert len(bounded_tool) <= 800
+    assert session.history[2]["content"] == bounded_tool
+
+
 def test_trim_history_respects_character_budget_and_user_boundary() -> None:
     session = _make_session()
     session._context_window = 200
@@ -811,7 +834,6 @@ def test_chat_writes_session_response_log(monkeypatch, tmp_path) -> None:
 def test_non_deepseek_session_uses_standard_history_trim_policy() -> None:
     session = _make_session()
 
-    assert session._cut_msg_interval == 25
     assert session._trim_keep_rate == 0.3
 
 

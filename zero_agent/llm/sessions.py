@@ -318,7 +318,6 @@ class LiteLLMSession:
         self._total_cached_tokens: int = 0
         self._total_requests: int = 0
         self._cache_metrics_available: bool = False
-        self._cut_msg_interval = 25
         self._trim_keep_rate = 0.3
 
         # DeepSeek 模型有更大的上下文窗口
@@ -1104,8 +1103,9 @@ class LiteLLMSession:
     def _trim_history(self) -> None:
         """裁剪历史消息，防止超出上下文窗口.
 
-        先按固定间隔压缩旧标签；超过本地软预算的字符估算时强制压缩
-        旧标签；仍超过 target 时从最早消息开始删到 user 边界。
+        始终限制工具输出长度；仅在超过软预算时改写旧消息，避免
+        周期性压缩破坏可复用的提示词前缀。仍超出 target 时从最早
+        消息开始删到 user 边界。
         """
         if self._context_window < 1000 and not self._context_budget_configured:
             # Preserve the small-window behavior used by callers and tests that
@@ -1118,10 +1118,7 @@ class LiteLLMSession:
         def cost() -> int:
             return sum(len(json.dumps(m, ensure_ascii=False)) for m in self.history)
 
-        self._compress_history_tags(
-            self.history,
-            interval=getattr(self, "_cut_msg_interval", 5),
-        )
+        self._compress_history_tags(self.history, compress_old_tags=False)
         print(f"[Debug] Current context: {cost()} chars, {len(self.history)} messages.")
         if cost() <= cap:
             return
@@ -1272,14 +1269,11 @@ class LiteLLMSession:
         max_len: int = 800,
         force: bool = False,
         interval: int = 5,
+        compress_old_tags: bool = True,
     ) -> list[dict]:
-        """Compress old history tags."""
+        """Bound tool output and optionally compress old history tags."""
         import re as _re
 
-        cd = getattr(LiteLLMSession._compress_history_tags, "_cd", 0) + 1
-        if force:
-            cd = 0
-        LiteLLMSession._compress_history_tags._cd = cd
         truncation_marker = "\n...[Truncated]...\n"
         pats = {
             tag: _re.compile(rf"(<{tag}>)([\s\S]*?)(</{tag}>)")
@@ -1334,6 +1328,13 @@ class LiteLLMSession:
                                 if isinstance(sub, dict) and sub.get("type") == "text":
                                     sub["text"] = _trunc_str(sub.get("text"))
 
+        if not compress_old_tags:
+            return history
+
+        cd = getattr(LiteLLMSession._compress_history_tags, "_cd", 0) + 1
+        if force:
+            cd = 0
+        LiteLLMSession._compress_history_tags._cd = cd
         if not force and cd % interval != 0:
             return history
 

@@ -301,6 +301,7 @@ docs/          # quickstart、architecture、reflect 文档
 - [Quick Start](docs/quickstart.md)
 - [Architecture](docs/architecture.md)
 - [Reflect](docs/reflect.md)
+- [Memory evaluation](docs/memory-evaluation.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## 开发
