@@ -164,6 +164,68 @@ class AgentLoop:
                     "model": self._model_name(),
                     "system_prompt": self.client.system,
                 })
+                stats = getattr(self.handler, "prompt_size_stats", {})
+                system_value = self.client.system
+                system_bytes = len(system_value.encode("utf-8")) if isinstance(system_value, str) else len(
+                    json.dumps(system_value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                )
+                tools_bytes = len(json.dumps(
+                    self.tools_schema,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8"))
+                message_content_bytes_by_role: dict[str, int] = {}
+                structured_message_content = False
+                for message in messages:
+                    role = str(message.get("role", "unknown"))
+                    content = message.get("content", "")
+                    content_bytes = len(content.encode("utf-8")) if isinstance(content, str) else len(
+                        json.dumps(
+                            content, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                        ).encode("utf-8")
+                    )
+                    message_content_bytes_by_role[role] = message_content_bytes_by_role.get(role, 0) + content_bytes
+                    structured_message_content = structured_message_content or not isinstance(content, str)
+                messages_bytes = len(json.dumps(
+                    messages, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8"))
+                request_component_bytes = system_bytes + tools_bytes + messages_bytes
+                initial_user_content_bytes = len(initial_content.encode("utf-8"))
+                measured_system_sections = stats.get("system_sections_bytes", {})
+                attributed_system = stats.get("system_bytes", 0)
+                if system_bytes != attributed_system:
+                    measured_system_sections = {"unclassified_system": system_bytes}
+                    unclassified_system_bytes = system_bytes
+                else:
+                    unclassified_system_bytes = 0
+                context_section_bytes = {
+                    name: size for name, size in measured_system_sections.items()
+                    if name.startswith("context_")
+                }
+                self.handler.prompt_size_stats = {
+                    **stats,
+                    "system_sections_bytes": measured_system_sections,
+                    "system_sections_estimated_tokens": {
+                        name: (size + 3) // 4 for name, size in measured_system_sections.items()
+                    },
+                    "system_bytes": system_bytes,
+                    "unclassified_system_bytes": unclassified_system_bytes,
+                    "context_section_bytes": context_section_bytes,
+                    "context_bytes": sum(context_section_bytes.values()),
+                    "base_bytes": measured_system_sections.get("base", 0),
+                    "task_control_bytes": measured_system_sections.get("task_control", 0),
+                    "tools_schema_bytes": tools_bytes,
+                    "messages_bytes": messages_bytes,
+                    "message_content_bytes_by_role": message_content_bytes_by_role,
+                    "user_message_content_bytes": message_content_bytes_by_role.get("user", 0),
+                    "initial_user_content_bytes": initial_user_content_bytes,
+                    "api_request_components_bytes": request_component_bytes,
+                    "api_request_components_estimated_tokens": (request_component_bytes + 3) // 4,
+                    "json_serialized_payload_estimate": True,
+                    "structured_message_content": structured_message_content,
+                    "serialization_estimate": structured_message_content,
+                }
                 response_gen = self.client.chat(
                     messages=messages, tools=self.tools_schema,
                 )

@@ -6,6 +6,7 @@ Usage:
 
 import streamlit as st
 from pathlib import Path
+import uuid
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import load_default_config
@@ -82,6 +83,17 @@ def main():
         st.session_state.agent = ZeroAgent(config=config)
         st.session_state.messages = []
         st.session_state.running = False
+        st.session_state.context_host_session_key = f"streamlit:{uuid.uuid4().hex}"
+        from zero_agent.context.runtime import local_runtime_context
+
+        agent = st.session_state.agent
+        host_session_key = st.session_state.context_host_session_key
+        agent.entry_runtime_context_factory = lambda: local_runtime_context(
+            agent.config,
+            entry_type="streamlit",
+            host_session_key=host_session_key,
+            workspace_path=agent.config.workspace_dir,
+        )
 
     agent: ZeroAgent = st.session_state.agent
 

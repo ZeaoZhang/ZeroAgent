@@ -71,3 +71,24 @@ def test_default_paths_do_not_depend_on_cwd(tmp_path, monkeypatch) -> None:
 
     assert Path(compress_session_module.L4_DIR) == repo_root / "memory" / "L4_raw_sessions"
     assert Path(compress_session_module.RAW_DIR) == repo_root / "workspace" / "sessions"
+
+
+def test_batch_archive_uses_shared_configured_session_and_memory_roots(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+    import zero_agent.core.config as config_module
+
+    raw_dir = tmp_path / "custom sessions"
+    memory_dir = tmp_path / "custom memory"
+    raw_dir.mkdir()
+    monkeypatch.delenv("ZA_MODEL_RESPONSES_DIR", raising=False)
+    monkeypatch.delenv("ZA_L4_DIR", raising=False)
+    monkeypatch.setattr(
+        config_module,
+        "load_default_config",
+        lambda: SimpleNamespace(sessions_dir=str(raw_dir), memory_dir=str(memory_dir)),
+    )
+
+    result = batch_process(dry_run=True)
+
+    assert result["processed"] == 0
+    assert (memory_dir / "L4_raw_sessions").is_dir()

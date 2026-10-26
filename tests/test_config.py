@@ -1,5 +1,7 @@
 """Tests for core/config.py — YAML config parsing and runtime effects."""
 
+import pytest
+
 from zero_agent.core.config import (
     AgentConfig,
     LLMBackendConfig,
@@ -8,6 +10,7 @@ from zero_agent.core.config import (
     load_default_config,
     reload_config_if_changed,
 )
+from zero_agent.core.exceptions import ConfigError
 from zero_agent.llm.failover import AutoFailoverSession
 from zero_agent.llm.factory import LLMFactory
 
@@ -109,6 +112,68 @@ llm_backends:
 
     assert config.workspace_dir == str(tmp_path / "workspace")
     assert config.sessions_dir == str(tmp_path / "workspace" / "sessions")
+
+
+def test_context_config_resolves_root_relative_to_config_file(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+context:
+  mode: local_v1
+  root: ./private-context
+  local_user_id: tester
+llm_backends:
+  default:
+    provider: openai
+    api_key: sk-test
+    api_base: https://api.openai.com/v1
+    model: gpt-test
+""",
+        encoding="utf-8",
+    )
+
+    config = AgentConfig.from_yaml(config_path)
+
+    assert config.context.mode == "local_v1"
+    assert config.context.root == str(tmp_path / "private-context")
+    assert config.context.local_user_id == "tester"
+    assert config.context.auto_injection_max_bytes == 8000
+
+
+def test_paths_overlap_detects_equality_and_nested_directories(tmp_path) -> None:
+    from zero_agent.utils.files import paths_overlap
+
+    root = tmp_path / "data"
+    assert paths_overlap(root, root)
+    assert paths_overlap(root, root / "child")
+    assert not paths_overlap(root, tmp_path / "database")
+
+
+def test_context_root_cannot_overlap_legacy_memory_directory(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+memory_dir: {tmp_path / 'memory'}
+context:
+  root: {tmp_path / 'memory' / 'data'}
+""",
+        encoding="utf-8",
+    )
+    config = AgentConfig.from_yaml(config_path)
+
+    with pytest.raises(ConfigError, match="context.root"):
+        config.context.validate(memory_dir=config.memory_dir)
+
+
+def test_legacy_context_mode_is_rejected(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "context:\n  mode: legacy\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="legacy context mode has been removed"):
+        AgentConfig.from_yaml(config_path)
 
 
 def test_factory_applies_yaml_log_dir_to_sessions(tmp_path) -> None:

@@ -156,8 +156,18 @@ def _existing_sessions(l4_dir):
     with open(hist_path, 'r', encoding='utf-8') as f:
         return {l.strip().replace('SESSION: ', '') for l in f if l.startswith('SESSION: ')}
 
-def batch_process(src, l4_dir=None, dry_run=True):
+def batch_process(src=None, l4_dir=None, dry_run=True):
     """Batch compress + extract history + archive. dry_run=True is safe default."""
+    if src is None or l4_dir is None:
+        from zero_agent.core.config import load_default_config
+
+        config = load_default_config()
+        if src is None:
+            src = os.environ.get("ZA_MODEL_RESPONSES_DIR") or config.sessions_dir
+        if l4_dir is None:
+            l4_dir = os.environ.get("ZA_L4_DIR") or os.path.join(
+                config.memory_dir, "L4_raw_sessions"
+            )
     l4_dir = os.path.normpath(l4_dir or L4_DIR)
     os.makedirs(l4_dir, exist_ok=True)
     raw_files = sorted(src) if isinstance(src, (list, tuple)) else \
@@ -250,7 +260,7 @@ RAW_DIR = os.path.abspath(
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser(description='L4 session archiver')
-    ap.add_argument('src', nargs='?', default=RAW_DIR, help='raw files dir')
+    ap.add_argument('src', nargs='?', default=None, help='raw files dir (defaults to configured sessions_dir)')
     ap.add_argument('--run', action='store_true', help='actually execute (default: dry run)')
     args = ap.parse_args()
     batch_process(args.src, dry_run=not args.run)

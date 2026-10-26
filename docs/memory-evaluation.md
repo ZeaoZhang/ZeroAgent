@@ -1,5 +1,7 @@
 # ZeroAgent 记忆评测流程
 
+> `local_v1` 已是唯一产品运行时。下文原文件型 evaluator 是旧策略的历史基线；`--validate-only` 仍可检查合成样例格式，但实际 Agent 运行不再走旧 `MemoryManager` 注入/写入路径，不得把该 evaluator 的运行结果当作 local_v1 质量证据。
+
 这个评测器按历史会话逐次更新一份隔离的 ZeroAgent 文件记忆，然后在没有原始会话的新 Agent 中提问。它保存初始化记忆、每轮记忆快照、答题前快照和逐轮工具输入输出，用于定位事实在哪个阶段缺失。词面诊断提供线索，具体原因仍需结合原始工具结果和回答核对。
 
 内置 `orion-tools-v2` 包含 9 个 OrionEval 合成样例，每层 3 个。需要记忆的项目事实不在初始化 SOP 中；历史包含合成的成功工具调用记录，作为基准规定的事实来源，并非当前工作区真实执行记录。完整对照基准沿用参考项目的 60 个用例，每层 20 个；只有完整覆盖并使用 Rubric 裁判的运行才会记为完整基准状态。
@@ -64,7 +66,19 @@ python -m zero_agent.evaluation.memory \
 
 这样下一轮记忆更新只可能从现有记忆和当轮会话得到信息，最终问题也只可能从文件记忆取回信息。测试用例是合成的；输出 receipts 会保留评测 prompt 和回答，以便复盘，请勿把真实密钥或未脱敏的私人对话放进评测集。
 
-评测遵守 ZeroAgent 现有记忆策略：长期保存必须由成功的操作或工具结果验证；忽略临时状态、猜测、密钥和无复用价值的对话信息。它不是个人画像记忆能力的全量 benchmark。若要评测用户偏好记忆，需要先在产品策略中明确定义哪些用户信息允许保存、如何处理撤回/更新，再扩充用例。
+该文件型评测器只描述历史 `MemoryManager` 流程，不能证明当前 local_v1 的行为。它保留作旧报告复核，不再是产品验收路径。
+
+## local_v1 契约回归
+
+`local_v1` 的偏好、来源、作用域、身份、资源、技能章节完整性与动作门禁由离线契约测试覆盖，不与旧 9 例的分数混算。主要用例位于：
+
+- `tests/test_memory_service.py`：用户明确偏好、明确更正、未解决冲突、来源类型、群聊写入、retract/purge。
+- `tests/test_context_admin.py` 与 `tests/test_context_runtime.py`：项目授权、CAS 重绑、持久 session、验证过的 bot principal 和私聊一次性链接。
+- `tests/test_context_migration.py` 与 `tests/test_managed_file_tools.py`：source preimage、隔离旧数据、敏感内容拒读、旧路径别名和托管写入守卫。
+- `tests/test_context_resources.py`、`tests/test_context_assembly.py`：资料作用域、修订与摘要失效、注入预算和项目隔离。
+- `tests/test_skill_runtime.py`、`tests/test_skill_gate.py`：发行 SOP hash、242 个章节映射、构建前清单验证、按需加载、动作门禁、依赖/权限和真实执行状态；网络响应使用本地 mock。
+
+这些测试是实现契约检查，不替代使用真实模型的记忆质量测量。旧模式已移除，不再做 legacy/local_v1 对照。local_v1 的真实模型召回、token、延迟和成本评测尚未运行，需要先明确评测模型、数据集和预算；此前未执行外部模型调用。
 
 ## 指标和通过规则
 

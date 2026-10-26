@@ -357,6 +357,7 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         },
         handler=_make_web_scan_handler(config),
         evidence_kind="web",
+        skill_action="browser.access",
         category="browser",
     ))
 
@@ -422,6 +423,7 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         },
         evidence_kind="web",
         handler=_make_web_execute_js_handler(config),
+        skill_action="browser.access",
         category="browser",
     ))
 
@@ -465,6 +467,7 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         },
         handler=_make_web_screenshot_handler(config),
         evidence_kind="web",
+        skill_action="browser.access",
         category="browser",
     ))
 

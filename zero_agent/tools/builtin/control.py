@@ -44,4 +44,5 @@ def register_control_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         category="control",
         evidence_kind="system",
         promotes_task_state=False,
+        skill_action="task.complete",
     ))

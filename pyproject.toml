@@ -53,7 +53,7 @@ zero-agent-launcher = "zero_agent.frontends.launcher:main"
 zero-agent-memory-eval = "zero_agent.evaluation.memory:main"
 
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=68.0", "PyYAML>=6.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
@@ -62,6 +62,8 @@ packages = [
     "zero_agent.browser",
     "zero_agent.bots",
     "zero_agent.core",
+    "zero_agent.context",
+    "zero_agent.skills",
     "zero_agent.llm",
     "zero_agent.tools",
     "zero_agent.tools.builtin",
@@ -97,6 +99,8 @@ packages = [
     "tmwd_cdp_bridge/*",
     "locale/*/LC_MESSAGES/*.po",
     "locale/*/LC_MESSAGES/*.mo",
+    "context/*.yaml",
+    "context/*.md",
 ]
 
 [tool.pytest.ini_options]

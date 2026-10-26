@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from importlib import resources
 from typing import Any, Dict, Generator, Iterable, List, Optional
@@ -28,6 +30,21 @@ from zero_agent.core.localization import (
     PromptLocalizer,
 )
 from zero_agent.core.loop import AgentLoop
+from zero_agent.context.errors import ContextError
+from zero_agent.context.assembly import ContextAssembler
+from zero_agent.context.local_store import LocalContextStore
+from zero_agent.context.service import ContextService
+from zero_agent.context.sources import (
+    EvidenceReceiptService,
+    ToolClaimRule,
+    ToolSourcePolicy,
+    ToolSourcePolicyRegistry,
+)
+from zero_agent.context.types import RuntimeContext
+from zero_agent.memory.service import MemoryService
+from zero_agent.skills.manifest import builtin_context_objects, load_builtin_catalog
+from zero_agent.skills.gate import SkillActionGate
+from zero_agent.skills.runtime import SkillRuntime
 
 from zero_agent.core.types import (
     EvidenceLedger,
@@ -37,7 +54,6 @@ from zero_agent.core.types import (
     TerminalEvent,
     TerminalStatus,
 )
-from zero_agent.memory.manager import MemoryManager
 from zero_agent.tools.registry import ToolRegistry
 
 
@@ -111,6 +127,7 @@ _RUNTIME_CONFIG_FIELDS = (
     "max_turns",
     "workspace_dir",
     "memory_dir",
+    "context",
     "sessions_dir",
     "verbose",
     "language",
@@ -122,6 +139,18 @@ _RUNTIME_CONFIG_FIELDS = (
 _PROMPT_CAPABILITY_MESSAGE_IDS = {
     PROMPT_CAPABILITY_FILE_DELIVERY: PROMPT_FILE_DELIVERY,
 }
+
+
+def _same_runtime_identity(first: RuntimeContext, second: RuntimeContext) -> bool:
+    """Whether two entry-provided contexts belong to the same waiting task identity."""
+
+    return (
+        first.account_id == second.account_id
+        and first.user_id == second.user_id
+        and first.session_id == second.session_id
+        and first.project_id == second.project_id
+        and first.channel_scope == second.channel_scope
+    )
 
 
 def _client_signature(client: Any) -> tuple[Any, Any, Any, Any]:
@@ -369,12 +398,6 @@ class ZeroAgent:
             self._owns_registry = False
             self.registry = handler_registry
 
-        # 4. 记忆管理器
-        self.memory = MemoryManager(
-            memory_dir=self.config.memory_dir,
-            workspace_dir=self.config.workspace_dir,
-            language=self.config.resolved_language,
-        )
 
         # 5. 运行时状态
         self.task_dir: Optional[str] = None
@@ -384,6 +407,22 @@ class ZeroAgent:
         self.pending_runtime_config: Optional[AgentConfig] = None
         self._config_path: Optional[str] = getattr(self.config, "_source_path", None)
         self._pending_task_state: Optional[PendingTaskState] = None
+        self.context_assembler = None
+        self.entry_runtime_context: Optional[RuntimeContext] = None
+        self.entry_runtime_context_factory = None
+        self._direct_context_host_session_key = f"agent:{uuid.uuid4().hex}"
+
+    def _default_runtime_context(self) -> RuntimeContext:
+        """Give direct library users a private local identity when no host supplies one."""
+
+        from zero_agent.context.runtime import local_runtime_context
+
+        return local_runtime_context(
+            self.config,
+            entry_type="agent",
+            host_session_key=self._direct_context_host_session_key,
+            workspace_path=self.config.workspace_dir,
+        )
 
     def set_config_path(self, path: Optional[str]) -> None:
         """设置配置文件的路径，用于热重载检测."""
@@ -431,7 +470,6 @@ class ZeroAgent:
         old_client = self.client
         old_handler = self.handler
         old_registry = self.registry
-        old_memory = self.memory
         old_pending_runtime_config = self.pending_runtime_config
         old_config_path = self._config_path
         old_handler_client = getattr(old_handler, "client", None)
@@ -508,7 +546,6 @@ class ZeroAgent:
             self.client = old_client
             self.handler = old_handler
             self.registry = old_registry
-            self.memory = old_memory
             self.pending_runtime_config = old_pending_runtime_config
             self._config_path = old_config_path
             try:
@@ -556,6 +593,7 @@ class ZeroAgent:
         initial_mode: TaskMode = TaskMode.OPEN,
         plan_path: Optional[str] = None,
         prompt_capabilities: Iterable[str] = (),
+        runtime_context: Optional[RuntimeContext] = None,
     ) -> Generator[Any, None, TerminalEvent]:
         """执行单次 agent 任务.
 
@@ -581,9 +619,55 @@ class ZeroAgent:
             RuntimeError: 当前有任务正在运行（不支持并发）.
             ValueError: 无 pending task 时 PLAN/EXECUTING 未提供 plan_path.
         """
-        self._apply_pending_runtime_config()
+        context_factory = getattr(self, "entry_runtime_context_factory", None)
+        if callable(context_factory):
+            # A configured external factory is authoritative.  Never let a
+            # caller-supplied context bypass the host's verified identity.
+            trusted_context = context_factory()
+            if not isinstance(trusted_context, RuntimeContext):
+                raise ContextError(
+                    "PERMISSION_DENIED",
+                    "The entry identity factory must return a RuntimeContext.",
+                )
+            if runtime_context is not None:
+                if not isinstance(runtime_context, RuntimeContext):
+                    raise ContextError(
+                        "PERMISSION_DENIED",
+                        "The entry point supplied an invalid RuntimeContext.",
+                    )
+                if not _same_runtime_identity(trusted_context, runtime_context):
+                    raise ContextError(
+                        "PERMISSION_DENIED",
+                        "The supplied identity does not match the trusted entry identity.",
+                    )
+            runtime_context = trusted_context
+        elif runtime_context is None:
+            if self.entry_runtime_context is not None:
+                runtime_context = self.entry_runtime_context
+                if not isinstance(runtime_context, RuntimeContext):
+                    raise ContextError(
+                        "PERMISSION_DENIED",
+                        "The configured entry identity is invalid.",
+                    )
+            else:
+                runtime_context = self._default_runtime_context()
+        elif not isinstance(runtime_context, RuntimeContext):
+            raise ContextError(
+                "PERMISSION_DENIED",
+                "The entry point supplied an invalid RuntimeContext.",
+            )
         pending_state = self._pending_task_state
         if pending_state is not None:
+            bound_context = pending_state.runtime_context
+            if bound_context is not None and runtime_context is not None and not _same_runtime_identity(
+                bound_context,
+                runtime_context,
+            ):
+                raise ContextError(
+                    "PERMISSION_DENIED",
+                    "A waiting task must resume under its original identity and project binding.",
+                )
+            runtime_context = runtime_context or bound_context
             self.clear_pending_task()
         else:
             prepare_history = getattr(self.client, "prepare_for_new_task", None)
@@ -601,12 +685,11 @@ class ZeroAgent:
 
         # 创建工作目录和记忆目录
         os.makedirs(self.config.workspace_dir, exist_ok=True)
-        self.memory.init_memory()
-
         # 每个任务创建新 handler；等待用户的任务恢复同一契约和证据账本。
         self.handler = self._new_task_handler()
         self.handler.reset_code_stop_signal()
         effective_initial_content = initial_user_content
+        self.handler.prompt_size_stats = {}
         if pending_state is None:
             self.handler.task_contract = TaskContract(
                 task_id=f"task-{time.time_ns()}",
@@ -626,6 +709,8 @@ class ZeroAgent:
                 pending_state,
                 user_input,
             )
+
+        self._initialize_context_runtime(runtime_context, user_input)
 
         task_prompt_capabilities = tuple(dict.fromkeys(prompt_capabilities))
 
@@ -649,6 +734,14 @@ class ZeroAgent:
                     task_prompt_capabilities,
                 ).render()
             prompt_factory = None
+            custom_bytes = len(prompt.encode("utf-8"))
+            self.handler.prompt_size_stats = {
+                "system_sections_bytes": {"custom_system": custom_bytes},
+                "system_bytes": custom_bytes,
+                "context_bytes": 0,
+                "base_bytes": 0,
+                "task_control_bytes": 0,
+            }
 
         # 创建 AgentLoop
         tools_schema = self.registry.generate_openai_schema()
@@ -685,6 +778,134 @@ class ZeroAgent:
         """Discard a task paused for user input."""
 
         self._pending_task_state = None
+
+    def _initialize_context_runtime(
+        self,
+        runtime_context: Optional[RuntimeContext],
+        user_input: str,
+    ) -> None:
+        """Bind source and context services to this task's trusted entry identity."""
+
+        self.handler.runtime_context = runtime_context
+        self.handler.require_skill_action_gate = True
+        self.handler.context_service = None
+        self.handler.memory_service = None
+        self.handler.source_receipt_writer = None
+        self.handler.skill_runtime = None
+        self.skill_runtime = None
+        self.context_assembler = None
+        self.handler.context_assembly_stats = {}
+        if runtime_context is None:
+            raise ContextError(
+                "PERMISSION_DENIED",
+                "local_v1 requires a RuntimeContext supplied by the entry point.",
+            )
+
+        store = LocalContextStore(self.config.context.root)
+        policies = ToolSourcePolicyRegistry((
+            ToolSourcePolicy(
+                "code_run",
+                "v1",
+                frozenset({"exit_code"}),
+                (ToolClaimRule("experience", "execution.exit_code", "exit_code"),),
+            ),
+            ToolSourcePolicy(
+                "file_read",
+                "v1",
+                frozenset({"content_sha256"}),
+                (ToolClaimRule("experience", "file.content_sha256", "content_sha256"),),
+            ),
+            ToolSourcePolicy(
+                "skill_run",
+                "v1",
+                frozenset({"skill_uri", "skill_revision", "entrypoint", "exit_code"}),
+                (
+                    ToolClaimRule("experience", "skill.revision", "skill_revision"),
+                    ToolClaimRule("experience", "skill.execution.exit_code", "exit_code"),
+                ),
+            ),
+        ))
+        receipts = EvidenceReceiptService(store, tool_policies=policies)
+        self.handler.context_service = ContextService(
+            store,
+            runtime_context,
+            sources=receipts,
+            receipt_store=store,
+            builtin_objects=builtin_context_objects(),
+        )
+        self.handler.memory_service = MemoryService(store, receipts, runtime_context)
+        self.skill_runtime = SkillRuntime(
+            self.config.context.root,
+            self.handler.context_service,
+            runtime_context,
+        )
+        self.handler.skill_runtime = self.skill_runtime
+        self.handler.skill_action_gate = SkillActionGate(
+            load_builtin_catalog(),
+            user_input,
+        )
+        self.context_assembler = ContextAssembler(
+            self.handler.context_service,
+            max_bytes=self.config.context.auto_injection_max_bytes,
+            preference_keys=self.handler.memory_service.preference_keys,
+        )
+        ledger_count = len(self.handler.evidence_ledger.records)
+        message_sequence = store.next_evidence_event_sequence(
+            runtime_context.user_id,
+            self.handler.task_contract.task_id,
+        )
+        receipts.record_user_message(
+            runtime_context,
+            task_id=self.handler.task_contract.task_id,
+            event_sequence=message_sequence,
+            message_id=f"{self.handler.task_contract.task_id}:message:{message_sequence}",
+            text=user_input,
+        )
+        self.handler._source_event_sequence_offset = message_sequence - ledger_count
+
+        def write_tool_receipt(
+            *,
+            tool_name: str,
+            contract_version: str,
+            status: str,
+            data: Any,
+            source_id: str,
+            event_sequence: int,
+        ) -> Optional[str]:
+            policy = policies.get(tool_name, contract_version)
+            if policy is None:
+                return None
+            result_fields: dict[str, object] = {}
+            if tool_name == "code_run" and isinstance(data, dict):
+                exit_code = data.get("exit_code")
+                if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+                    result_fields["exit_code"] = exit_code
+            elif tool_name == "file_read":
+                if isinstance(data, str):
+                    result_fields["content_sha256"] = hashlib.sha256(
+                        data.encode("utf-8")
+                    ).hexdigest()
+                elif isinstance(data, dict) and isinstance(data.get("content"), str):
+                    result_fields["content_sha256"] = hashlib.sha256(
+                        data["content"].encode("utf-8")
+                    ).hexdigest()
+            elif tool_name == "skill_run" and isinstance(data, dict):
+                for field in ("skill_uri", "skill_revision", "entrypoint", "exit_code"):
+                    value = data.get(field)
+                    if isinstance(value, (str, int)) and not isinstance(value, bool):
+                        result_fields[field] = value
+            return receipts.record_tool_result(
+                runtime_context,
+                task_id=self.handler.task_contract.task_id,
+                event_sequence=event_sequence,
+                tool_name=tool_name,
+                contract_version=contract_version,
+                status=status,
+                result_fields=result_fields,
+                source_id=source_id,
+            ).receipt_id
+
+        self.handler.source_receipt_writer = write_tool_receipt
 
     @staticmethod
     def _is_partial_acceptance(answer: str) -> bool:
@@ -738,6 +959,7 @@ class ZeroAgent:
             plan_verify_status=self.handler.plan_verify_status,
             waiting_kind=waiting_kind,
             waiting_data=waiting_data,
+            runtime_context=getattr(self.handler, "runtime_context", None),
         )
 
     def _wire_handler(self, handler: BaseHandler) -> BaseHandler:
@@ -797,7 +1019,7 @@ class ZeroAgent:
         )
 
     def _apply_pending_runtime_config(self) -> None:
-        """Apply deferred workspace/memory/registry changes at a task boundary."""
+        """Apply deferred workspace and registry changes at a task boundary."""
 
         if self.pending_runtime_config is None:
             return
@@ -808,15 +1030,9 @@ class ZeroAgent:
             )
         else:
             new_registry = self.registry
-        new_memory = MemoryManager(
-            memory_dir=self.config.memory_dir,
-            workspace_dir=self.config.workspace_dir,
-            language=self.config.resolved_language,
-        )
         if self._owns_registry:
             self.registry = new_registry
             self.handler.registry = self.registry
-        self.memory = new_memory
         self.handler.cwd = self.config.workspace_dir
         self.handler.client = self.client
         self.pending_runtime_config = None
@@ -893,11 +1109,6 @@ class ZeroAgent:
             from zero_agent.plugins.langfuse_tracing import register
 
             register(self.hooks, config=self.config, tracer=tracer)
-        except Exception:
-            pass
-        try:
-            from zero_agent.plugins.project_mode import register
-            register(self.hooks)
         except Exception:
             pass
         try:
@@ -1017,11 +1228,13 @@ class ZeroAgent:
             f"\n{localizer.text(PROMPT_TODAY_LABEL)} {date} {weekday}\n",
             dynamic=True,
         ))
-        blocks.append(PromptBlock(
-            "memory",
-            self.memory.get_global_memory_context(),
-            dynamic=True,
-        ))
+        if self.context_assembler is not None and self.handler.context_service is not None:
+            context_blocks = self.context_assembler.build(
+                working=self.handler.working,
+            )
+            self.handler.context_assembly_stats = self.context_assembler.last_stats
+            for name, content in context_blocks.items():
+                blocks.append(PromptBlock(name, content, dynamic=True))
         blocks.append(PromptBlock(
             "task_control",
             f"\n{localizer.task_control(self.handler.task_contract.mode)}\n",
@@ -1044,9 +1257,25 @@ class ZeroAgent:
                 localizer=localizer,
             ).blocks
         )
-
-        return PromptAssembly(tuple(blocks))
-
+        assembly = PromptAssembly(tuple(blocks))
+        section_bytes: dict[str, int] = {}
+        for block in assembly.blocks:
+            section_bytes[block.name] = (
+                section_bytes.get(block.name, 0) + len(block.content.encode("utf-8"))
+            )
+        self.handler.prompt_size_stats = {
+            "system_sections_bytes": section_bytes,
+            "system_sections_estimated_tokens": {
+                name: (size + 3) // 4 for name, size in section_bytes.items()
+            },
+            "system_bytes": sum(section_bytes.values()),
+            "context_bytes": len("".join(
+                block.content for block in assembly.blocks if block.name.startswith("context_")
+            ).encode("utf-8")),
+            "base_bytes": section_bytes.get("base", 0),
+            "task_control_bytes": section_bytes.get("task_control", 0),
+        }
+        return assembly
     def _build_prompt_capabilities(
         self,
         capabilities: Iterable[str],

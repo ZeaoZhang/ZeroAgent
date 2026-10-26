@@ -20,6 +20,17 @@ peer_hint: false
 # Paths are resolved relative to config.yaml when they are not absolute.
 workspace_dir: ./workspace
 memory_dir: ./memory
+# local_v1 is the only supported context mode.
+context:
+  mode: local_v1
+  root: ./context-data
+  local_user_id: local
+  auto_injection_max_bytes: 8000
+  search_backend: lexical
+  # Each capability is an explicit host grant; skill metadata cannot grant it.
+  # skill_capabilities:
+  #   - skill:skill_search:network
+  #   - skill:skill_search:environment:read
 sessions_dir: ./workspace/sessions
 log_dir: null
 

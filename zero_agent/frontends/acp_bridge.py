@@ -154,8 +154,22 @@ class ZeroAgentAcpBridge:
         except Exception as e:
             eprint(f"[ACP-BRIDGE] WRITE FAILED: {type(e).__name__}: {e}")
 
-    def new_agent(self) -> AgentRunner:
+    def new_agent(self, *, session_id: str | None = None, cwd: str | None = None) -> AgentRunner:
         za = ZeroAgent()
+        if cwd:
+            za.config.workspace_dir = cwd
+            za.handler.cwd = cwd
+        if not session_id or not cwd:
+            raise ValueError("ACP local context requires a stable session ID and workspace path.")
+        from zero_agent.context.runtime import local_runtime_context
+
+        za.entry_runtime_context_factory = lambda: local_runtime_context(
+            za.config,
+            entry_type="acp",
+            host_session_key=session_id,
+            workspace_path=cwd,
+            channel_scope="acp:private",
+        )
         runner = AgentRunner(za)
         runner.next_llm(self.llm_no)
         runner.verbose = True
@@ -195,7 +209,7 @@ class ZeroAgentAcpBridge:
         if not os.path.isabs(cwd):
             cwd = os.path.abspath(cwd)
         session_id = f"za_{uuid.uuid4().hex}"
-        agent = self.new_agent()
+        agent = self.new_agent(session_id=session_id, cwd=cwd)
         session = SessionState(session_id=session_id, cwd=cwd, agent=agent)
         self._sessions[session_id] = session
         self.write_message(

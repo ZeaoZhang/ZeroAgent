@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import collections
 import difflib
+import hashlib
 import itertools
 import os
 from pathlib import Path
 from typing import Any, Dict, Generator, Optional
 
 from zero_agent.core.config import AgentConfig
+from zero_agent.context.errors import ContextError
 from zero_agent.core.types import StepAction, StepOutcome
 from zero_agent.tools.registry import ToolRegistry
 from zero_agent.utils.files import expand_file_refs
@@ -301,6 +303,7 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         },
         handler=_make_file_patch_handler(config),
         evidence_kind="write",
+        skill_action="workspace.write",
         category="file",
     ))
 
@@ -348,6 +351,7 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         },
         handler=_make_file_write_handler(config),
         evidence_kind="write",
+        skill_action="workspace.write",
         category="file",
     ))
 
@@ -375,12 +379,126 @@ def _resolve_path(path: str, config: AgentConfig) -> str:
 
 def _is_under_dir(path: str, directory: str) -> bool:
     """Return True when path is inside directory or is directory itself."""
+    for candidate, root in (
+        (os.path.abspath(path), os.path.abspath(directory)),
+        (os.path.realpath(path), os.path.realpath(directory)),
+    ):
+        try:
+            if os.path.commonpath([candidate, root]) == root:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _managed_path_kind(path: str, config: AgentConfig) -> str | None:
+    if _is_under_dir(path, config.context.root):
+        return "context"
+    if _is_under_dir(path, config.memory_dir):
+        return "legacy"
+    return None
+
+
+def _managed_write_outcome() -> StepOutcome:
+    return StepOutcome(
+        {
+            "status": "error",
+            "code": "MEMORY_WRITE_REQUIRES_SERVICE",
+            "msg": (
+                "MEMORY_WRITE_REQUIRES_SERVICE: use memory_update for managed memory, "
+                "or the authorized context resource import command for project resources."
+            ),
+        },
+        next_prompt="\n",
+        action=StepAction.CONTINUE,
+    )
+
+
+def _read_managed_legacy_alias(path: str, args: Dict[str, Any], handler: Any, config: AgentConfig) -> str | None:
+    managed_kind = _managed_path_kind(path, config)
+    if managed_kind is None:
+        return None
+    runtime = getattr(handler, "runtime_context", None)
+    service = getattr(handler, "context_service", None)
+    if runtime is None or service is None:
+        return "Error: local context identity is unavailable; use context_read with a logical URI."
+    if managed_kind == "context":
+        locator = getattr(service.store, "resolve_committed_revision_path", None)
+        reference = locator(path) if callable(locator) else None
+        if reference is None:
+            return "Error: physical context storage is not a logical object; use context_list or context_search."
+        uri, revision = reference
+        try:
+            obj = service.read(uri, revision=revision)
+        except ContextError as exc:
+            return f"Error: the committed context object is unavailable [{exc.code}]."
+        return _format_managed_context_read(obj.content, uri, revision, args)
+    root = Path(os.path.realpath(config.memory_dir))
+    resolved = Path(os.path.realpath(path))
     try:
-        return os.path.commonpath(
-            [os.path.abspath(path), os.path.abspath(directory)]
-        ) == os.path.abspath(directory)
+        relative = resolved.relative_to(root).as_posix()
     except ValueError:
-        return False
+        return "Error: legacy memory aliases outside the configured data root cannot be read in local_v1."
+
+    uri = None
+    if relative.startswith("sops/"):
+        try:
+            raw_hash = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            from zero_agent.skills.manifest import load_builtin_catalog
+
+            for skill in load_builtin_catalog():
+                if skill.source_path == f"memory_seed/{relative}" and skill.source_sha256 == raw_hash:
+                    uri = skill.uri
+                    break
+        except (OSError, ContextError):
+            pass
+    if uri is None:
+        from zero_agent.context.migration import legacy_uri_for_relative
+
+        uri = legacy_uri_for_relative(runtime.user_id, relative)
+    try:
+        obj = service.read(uri)
+    except ContextError as exc:
+        if exc.code == "PERMISSION_DENIED":
+            return "Error: managed context access denied [PERMISSION_DENIED]."
+        if uri.startswith("za://skills/builtin/"):
+            return f"Error: the bundled skill alias could not be loaded [{exc.code}]."
+        return (
+            "Error: the legacy file has not been migrated to local context. "
+            f"Use context_read after migration; proposed URI: {uri}."
+        )
+
+    return _format_managed_context_read(obj.content, uri, obj.revision, args)
+
+
+def _format_managed_context_read(content: str, uri: str, revision: int, args: Dict[str, Any]) -> str:
+    lines = content.splitlines()
+    start = max(1, int(args.get("start", 1)))
+    count = max(1, min(1000, int(args.get("count", 200))))
+    keyword = args.get("keyword")
+    if isinstance(keyword, str) and keyword:
+        match = next(
+            (index for index in range(start - 1, len(lines)) if keyword.casefold() in lines[index].casefold()),
+            None,
+        )
+        if match is not None:
+            start = max(start, match + 1 - count // 3)
+        else:
+            keyword = None
+    selected = list(enumerate(lines[start - 1 : start - 1 + count], start))
+    show_linenos = args.get("show_linenos", True)
+    body = "\n".join(
+        f"{line_number}|{line}" if show_linenos else line
+        for line_number, line in selected
+    )
+    if show_linenos:
+        body = f"[FILE] {len(lines)} lines | PARTIAL showing {len(selected)}\n" + body
+    elif start - 1 + len(selected) < len(lines):
+        body += f"\n\n[FILE PARTIAL: showing {len(selected)}/{len(lines)} lines]"
+    return (
+        body
+        + f"\n\n[Managed context alias. Use context_read(uri={uri}, revision={revision}).]"
+    )
 
 
 def _make_file_read_handler(config: AgentConfig):
@@ -391,17 +509,26 @@ def _make_file_read_handler(config: AgentConfig):
         handler: Any,
     ) -> Generator[str, None, str | StepOutcome]:
         path = _resolve_path(args.get("path", ""), config)
-        yield f"[Action] Reading file: {path}\n"
+        managed_kind = _managed_path_kind(path, config)
+        if managed_kind is None:
+            yield f"[Action] Reading file: {path}\n"
+        else:
+            yield "[Action] Reading managed context through its authorized logical URI.\n"
         start = args.get("start", 1)
         count = args.get("count", 200)
         keyword = args.get("keyword")
         show_linenos = args.get("show_linenos", True)
         cache = getattr(handler, "_file_read_cache", None)
         cache_key = (path, str(start), str(count), str(keyword), bool(show_linenos))
-        try:
-            stat = os.stat(path)
-            signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
-        except OSError:
+        if managed_kind is None:
+            try:
+                stat = os.stat(path)
+                signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+            except OSError:
+                signature = None
+        else:
+            # Managed aliases resolve through ContextService, so the physical file
+            # cache must never become a second source of authority.
             signature = None
         turn = int(getattr(handler, "current_turn", 0))
         previous = cache.get(cache_key) if isinstance(cache, dict) else None
@@ -419,18 +546,18 @@ def _make_file_read_handler(config: AgentConfig):
                 },
                 action=StepAction.CONTINUE,
             )
-        result = file_read(
-            path, start=start, keyword=keyword,
-            count=count, show_linenos=show_linenos,
-        )
+        if managed_kind is None:
+            result = file_read(
+                path, start=start, keyword=keyword,
+                count=count, show_linenos=show_linenos,
+            )
+        else:
+            result = _read_managed_legacy_alias(path, args, handler, config) or (
+                "Error: the managed context alias could not be resolved."
+            )
         if " ... [TRUNCATED]" in result:
             result += "\n\n（某些行被截断，如需完整内容可改用 code_run 读取）"
         next_prompt_suffix = None
-        # SOP 读取提示
-        is_memory_path = _is_under_dir(path, config.memory_dir)
-        if is_memory_path and not result.startswith("Error:"):
-            from zero_agent.utils.memory_stats import log_memory_access
-            log_memory_access(path, stats_dir=config.memory_dir)
         if (
             ("memory" in path or "sop" in path)
             and not result.startswith("Error:")
@@ -470,6 +597,9 @@ def _make_file_write_handler(config: AgentConfig):
     ) -> Generator[str, None, dict]:
         path = _resolve_path(args.get("path", ""), config)
         mode = args.get("mode", "overwrite")
+        if _managed_path_kind(path, config) is not None:
+            yield "[Action] Managed memory writes must use the context service.\n"
+            return _managed_write_outcome()
         action_str = {"prepend": "Prepending to", "append": "Appending to"}.get(mode, "Overwriting")
         yield f"[Action] {action_str} file: {os.path.basename(path)}\n"
 
@@ -519,6 +649,9 @@ def _make_file_patch_handler(config: AgentConfig):
         handler: Any,
     ) -> Generator[str, None, dict]:
         path = _resolve_path(args.get("path", ""), config)
+        if _managed_path_kind(path, config) is not None:
+            yield "[Action] Managed memory writes must use the context service.\n"
+            return _managed_write_outcome()
         yield f"[Action] Patching file: {path}\n"
         old_content = args.get("old_content", "")
         new_content = args.get("new_content", "")

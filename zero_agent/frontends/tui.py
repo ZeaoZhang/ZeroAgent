@@ -434,6 +434,16 @@ if _TEXTUAL_AVAILABLE:
             """Initialize agent and refresh intervals."""
             config = self._load_config()
             self.agent = self._za(config=config)
+            from pathlib import Path
+            from zero_agent.context.runtime import local_runtime_context
+
+            host_session_key = "tui:" + str(Path(config.workspace_dir).expanduser().resolve())
+            self.agent.entry_runtime_context_factory = lambda: local_runtime_context(
+                self.agent.config,
+                entry_type="tui",
+                host_session_key=host_session_key,
+                workspace_path=self.agent.config.workspace_dir,
+            )
 
             # Load command definitions
             self._load_commands()

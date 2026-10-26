@@ -1,13 +1,7 @@
-"""Workspace 命令 — junction/symlink-based workspace management for ZeroAgent.
+"""Workspace 命令 — safe junction/symlink-based workspace management.
 
-设计要点:
-  * 在 <project_root>/temp/projects/<name> 下建指向用户真实项目目录的目录联接
-    (Windows mklink /J 或 POSIX symlink),实现 project_mode 插件与 SOP 的文件共享。
-  * 维护注册表 temp/workspaces.json(原子写)与 session→workspace 映射。
-  * pid 锚 temp/.active_project.<pid> 兼容 project_mode 插件。
-  * 命名 name = f"{basename}-{blake2b_hex[:8]}",同一 workspace 恒定同名(幂等复用)。
-  * junction 安全:删除用 os.rmdir/os.unlink,绝不递归删目标文件。
-  * cleanup 只动已确认是链接且悬空/未注册的条目,真实目录一概不碰。
+Workspaces only select a working directory and maintain safe directory links;
+project identity and memory are provided by the authorized context service.
 """
 
 from __future__ import annotations
@@ -15,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import stat
 import subprocess
 import sys
@@ -29,22 +22,15 @@ if TYPE_CHECKING:
     from zero_agent.core.agent import ZeroAgent
 
 # --------------------------------------------------------------------------- #
-# 路径基准 (与 plugins/project_mode.py 的 _TEMP 保持一致)
+# 路径基准
 # --------------------------------------------------------------------------- #
 
 def _temp_root() -> Path:
-    """Return the temp directory under the project root."""
     return project_root() / "temp"
 
 
 def _projects_root() -> Path:
-    """Directory for workspace junction/symlink entries."""
     return _temp_root() / "projects"
-
-
-def _anchor_path() -> Path:
-    """Activation anchor file, keyed by PID (compatible with project_mode plugin)."""
-    return _temp_root() / f".active_project.{os.getpid()}"
 
 
 def _registry_path() -> Path:
@@ -53,6 +39,7 @@ def _registry_path() -> Path:
 
 
 _REGISTRY_VERSION = 1
+
 
 
 # --------------------------------------------------------------------------- #
@@ -255,20 +242,11 @@ def registry_remove(name: str) -> None:
         _registry_save(items)
 
 
-def _mem_lines(link: Path) -> int:
-    """Count lines in project_memory.md (read through junction). Returns 0 on error."""
-    mp = link / "project_memory.md"
-    try:
-        with open(str(mp), encoding="utf-8", errors="replace") as fh:
-            return sum(1 for _ in fh)
-    except OSError:
-        return 0
-
-
 def registry_list() -> list[dict]:
-    """Return workspace list for picker UI: [{name, path, last_used, mem_lines, dangling}].
+    """Return workspace entries for picker UI.
 
-    Sorted by last_used descending.
+    Sorted by last-used timestamp.  No project-memory files are created or
+    read by this workspace helper.
     """
     out: list[dict] = []
     for name, ent in registry_load().items():
@@ -277,11 +255,12 @@ def registry_list() -> list[dict]:
             "name": name,
             "path": path,
             "last_used": int((ent or {}).get("last_used") or 0),
-            "mem_lines": _mem_lines(_link_path(name)) if path else 0,
             "dangling": not (path and os.path.isdir(path)),
         })
     out.sort(key=lambda x: x["last_used"], reverse=True)
     return out
+
+
 
 
 # --------------------------------------------------------------------------- #
@@ -392,15 +371,7 @@ def validate_path(abs_path: str) -> tuple[bool, str]:
 # --------------------------------------------------------------------------- #
 
 def prepare(abs_path: str) -> dict:
-    """Prepare a workspace without writing the PID activation anchor.
-
-    Flow: validate → name → idempotent link → ensure project_memory.md →
-    register → read memory.
-
-    Returns:
-        {ok, name, link, target, mem_text, warning, error}.
-        TUI multi-session isolation uses this to avoid PID-anchor contention.
-    """
+    """Prepare a workspace by validating and safely creating its directory link."""
     p = abs_path.strip().strip('"').strip("'") if abs_path else ""
     ok, msg = validate_path(p)
     if not ok:
@@ -409,7 +380,7 @@ def prepare(abs_path: str) -> dict:
     target = os.path.abspath(p)
     name = _ws_name(target)
     link = _link_path(name)
-    warning = ""
+
 
     # Idempotent link creation
     if link.exists(follow_symlinks=False):
@@ -430,81 +401,17 @@ def prepare(abs_path: str) -> dict:
     else:
         if not make_dir_link(target, link):
             return {"ok": False, "error": "创建 junction 失败 (见 stderr)"}
-
-    # Ensure project_memory.md exists (via junction → real repo root)
-    mem_path = link / "project_memory.md"
-    if not mem_path.is_file():
-        try:
-            mem_path.touch(exist_ok=True)
-        except OSError as e:
-            warning = f"无法创建 project_memory.md: {e}"
-
-    mem_text = ""
-    try:
-        mem_text = mem_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        pass
-
     registry_upsert(name, target)
+
 
     return {
         "ok": True,
         "name": name,
         "link": str(link),
         "target": target,
-        "mem_text": mem_text,
-        "warning": warning,
         "error": "",
     }
 
-
-def activate(abs_path: str) -> dict:
-    """Set up and activate a process-level workspace.
-
-    Writes the PID anchor for project_mode plugin detection.
-    Kept for legacy SOP / non-multi-session UI usage.
-    """
-    r = prepare(abs_path)
-    if not r.get("ok"):
-        return r
-    try:
-        _anchor_path().write_text(r["name"], encoding="utf-8")
-    except OSError as e:
-        r = dict(r)
-        r.update({"ok": False, "error": f"写激活锚失败: {e}"})
-    return r
-
-
-def deactivate() -> bool:
-    """Remove the PID activation anchor only (link + registry preserved).
-
-    Returns:
-        True if there was an active workspace to deactivate.
-    """
-    anchor = _anchor_path()
-    if anchor.is_file():
-        try:
-            anchor.unlink()
-            return True
-        except OSError as e:
-            sys.stderr.write(f"[workspace] deactivate failed: {e}\n")
-    return False
-
-
-def current() -> Optional[dict]:
-    """Get the currently active workspace: {name, path}.
-
-    Returns None if no workspace is active.
-    """
-    anchor = _anchor_path()
-    try:
-        name = anchor.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    if not name:
-        return None
-    ent = registry_load().get(name) or {}
-    return {"name": name, "path": ent.get("path") or ""}
 
 
 def is_dangling(name: str) -> bool:
@@ -517,44 +424,13 @@ def is_dangling(name: str) -> bool:
 
 
 def remove(name: str) -> None:
-    """Explicitly unregister: delete junction (NOT real files) + registry entry.
-
-    Also removes the PID anchor if this workspace is currently active.
-    """
+    """Unregister a workspace and remove only its directory link."""
     link = _link_path(name)
     if is_dir_link(link):
         remove_dir_link(link)
     registry_remove(name)
-    cur = current()
-    if cur and cur["name"] == name:
-        deactivate()
 
 
-# project_mode 插件注入标记: ``[PROJECT MODE: <name>]``
-_PM_RE = re.compile(r"\[PROJECT MODE:\s*([^\]\n]+?)\s*\]")
-
-
-def workspace_from_log(log_path: str) -> Optional[dict]:
-    """Scan a model_responses log for the last active workspace.
-
-    Only returns results for names present in the registry (excludes
-    plain SOP projects without hash-suffixed names).
-
-    Returns:
-        {name, path} or None.
-    """
-    try:
-        content = Path(log_path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    names = _PM_RE.findall(content)
-    if not names:
-        return None
-    name = names[-1].strip()  # last activation wins
-    ent = registry_load().get(name)
-    if not ent or not ent.get("path"):
-        return None
-    return {"name": name, "path": ent["path"]}
 
 
 def cleanup() -> None:
@@ -585,53 +461,26 @@ def cleanup() -> None:
 # --------------------------------------------------------------------------- #
 
 def handle(args: str, agent: ZeroAgent) -> str:
-    """Handle ``/workspace`` slash commands.
-
-    ``/workspace``              — list registered workspaces
-    ``/workspace /path/to/dir`` — activate that workspace (abs path)
-    ``/workspace off``          — deactivate current workspace
-    ``/workspace rm <name>``    — remove a registered workspace
-    """
+    """Handle ``/workspace`` commands for directory selection and cleanup."""
     args = (args or "").strip()
-
     if not args:
-        # List registered workspaces
         items = registry_list()
         if not items:
             return "暂无已登记 workspace。用 /workspace <绝对路径> 新建/进入。"
-        lines: list[str] = []
-        for it in items:
-            flag = " ⚠失效" if it["dangling"] else ""
-            mem = f"{it['mem_lines']}行记忆" if it["mem_lines"] else "空"
-            lines.append(f"  {it['name']}{flag}  →  {it['path']}  ({mem})")
-        return "\n".join(lines)
-
-    # /workspace off
-    if args.lower() == "off":
-        cur = current()
-        if cur:
-            was_name = cur.get("name", "")
-            deactivate()
-            return f"已退出 workspace「{was_name}」"
-        return "当前未处于 workspace 模式。"
-
-    # /workspace rm <name>
+        return "\n".join(
+            f"  {it['name']}{' ⚠失效' if it['dangling'] else ''}  →  {it['path']}"
+            for it in items
+        )
     if args.startswith("rm "):
         name = args[3:].strip()
         if not name:
             return "用法: /workspace rm <name>"
         remove(name)
         return f"已注销 workspace「{name}」"
-
-    # /workspace <abs_path>
-    r = activate(args)
-    if not r.get("ok"):
-        return f"❌ workspace 设定失败: {r.get('error')}"
-    warning = r.get("warning", "")
-    msg = f"✅ 已进入 workspace「{r['name']}」→ {r['target']}"
-    if warning:
-        msg += f"\n⚠ {warning}"
-    return msg
+    result = prepare(args)
+    if not result.get("ok"):
+        return f"❌ workspace 设定失败: {result.get('error')}"
+    return f"✅ 已选择 workspace「{result['name']}」→ {result['target']}"
 
 
 # Command-to-handler mapping for integration with slash_commands.py

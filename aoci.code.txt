@@ -1,0 +1,340 @@
+#AOCI-CODE-VOLUME: 1
+
+===/Users/zhangzeao/workspace/ZeroAgent/===
+.gitattributes[FV8T]: F:固定文本检出为 LF，并保持二进制内容原样 | R:- | A:Git checkout | S:AOCI 基线按原始字节比较；换行转换会使跨平台源码变 stale
+.gitignore[FC6T]: F:排除本机秘密、运行时数据与生成产物 | R:code:README.md,code:config.example.yaml | A:Git ignore | S:默认 context-data/ 与 workspace/ 属于本机运行数据，不应提交
+AGENTS.md[SG9S]: F:规定项目 Agent 工作流与 AOCI 索引的认知治理流程 | R:code:aoci.txt,code:aoci.meta.txt,code:aoci.code.txt | A:AOCI candidate authoring | S:语义必须来自绑定源码证据并按当前 Guide 完整提交候选批次
+CONTEXT.md[SD7T]: F:界定频道、会话与上下文隔离等项目领域术语 | R:code:README.md,code:docs/architecture.md | A:- | S:-
+CONTRIBUTING.md[SV6T]: F:说明开发环境、贡献流程、编码规范、测试要求及 local_v1 核心工具边界 | R:code:README.md,code:pyproject.toml | A:pytest,ToolRegistry.with_builtins | S:公共 API 须使用 Google docstring 与完整参数/返回类型标注，并沿用 ZeroAgentError 异常层级；可选扩展工具不得默认进入 with_builtins
+DESIGN.md[SU7T]: F:记录桌面会话侧栏层级、交互与无障碍设计要求 | R:code:zero_agent/frontends/desktop/static/app.js,code:zero_agent/frontends/desktop/static/styles.css | A:- | S:侧栏操作必须保留键盘可达性与可读焦点状态
+LICENSE[SG3T]: F:授予软件在 MIT 条款下使用、修改、分发和再许可的权限 | R:- | A:软件分发 | S:复制或分发时须保留版权与许可声明
+README.md[SG8M]: F:介绍 ZeroAgent 的功能、安装配置、运行方式及本地上下文、记忆与技能边界 | R:code:config.example.yaml,code:docs/quickstart.md,code:docs/architecture.md,code:docs/context-memory-skills.md,code:CONTEXT.md | A:快速开始,CLI用法,local_v1配置 | S:local_v1 是唯一上下文模式；旧 legacy 配置会被拒绝，旧记忆文件不自动读取或迁移
+config.example.yaml[FC7S]: F:提供 Agent、LLM、bot 和唯一 local_v1 上下文运行时的 YAML 配置示例 | R:code:README.md,code:zero_agent/core/config.py,code:zero_agent/context/config.py | A:AgentConfig.from_yaml,ContextConfig.validate | S:技能网络和环境读取权限默认不授予，必须由宿主显式配置；示例不含真实 bot 凭据
+pyproject.toml[FV7S]: F:声明 Python 包构建依赖、CLI 入口、子包和随包上下文及技能资源 | R:code:setup.py,code:zero_agent/skills/manifest.py,code:zero_agent/assets/context/builtin_catalog.yaml | A:setuptools.build_meta,project.scripts,tool.setuptools.package-data | S:构建阶段依赖 PyYAML；规则、清单或 SOP 正文缺失会使运行时或打包校验失败
+uv.lock[FV5L]: F:锁定项目依赖及跨平台解析结果 | R:code:pyproject.toml | A:uv sync | S:锁文件要求 Python >=3.10,<3.14
+setup.py[XV6T]: F:在 setuptools build_py 阶段校验发行 SOP 清单及来源完整性后再构建包 | R:code:pyproject.toml,code:zero_agent/skills/manifest.py,code:zero_agent/assets/context/builtin_catalog.yaml,code:zero_agent/assets/memory_seed/sops/code_review_principles.md | A:VerifySkillCatalogBuildPy.run,load_builtin_catalog | S:SOP 来源、hash 或章节映射无效时构建直接失败
+
+===/Users/zhangzeao/workspace/ZeroAgent/.github/workflows/===
+pytest.yml[OV7T]: F:在 Python 3.10–3.12 上安装 gettext、编译语言目录并运行 pytest | R:- | A:pytest workflow | S:测试前必须安装 gettext 并编译 locale
+
+===/Users/zhangzeao/workspace/ZeroAgent/.superpowers/brainstorm/===
+visual-baseline.html[SU3T]: F:保存桌面会话侧栏的静态视觉基线 | R:- | A:- | S:-
+
+===/Users/zhangzeao/workspace/ZeroAgent/docs/===
+architecture.md[SD8T]: F:说明 Agent loop 与 local_v1 上下文、记忆服务、技能路由门禁及各入口的架构关系 | R:code:README.md,code:CONTEXT.md,code:zero_agent/core/agent.py,code:zero_agent/context/service.py,code:zero_agent/context/assembly.py,code:zero_agent/context/admin.py,code:zero_agent/memory/service.py,code:zero_agent/skills/gate.py | A:ZeroAgent._initialize_context_runtime,ContextAssembler.build,ContextService.search,SkillActionGate.check | S:local_v1 是唯一运行模式；未指定 scope 的搜索仅覆盖当前用户与绑定项目，扩大范围须显式授权；受保护操作与命中触发的任务完成须先路由并加载精确 SOP 修订；技能能力门禁不是操作系统沙箱
+memory-evaluation.md[SQ8S]: F:区分旧文件型记忆评测与 local_v1 离线契约测试，并说明模型评测限制 | R:code:zero_agent/evaluation/memory.py,code:zero_agent/evaluation/evidence.py,code:zero_agent/assets/evaluation/memory_cases.json,code:tests/test_memory_service.py,code:tests/test_context_assembly.py,code:tests/test_skill_gate.py | A:validate_dataset,run_campaign,--validate-only | S:旧 evaluator 不执行 local_v1 运行路径；九个合成样例的格式校验不是记忆质量证据
+quickstart.md[SV6S]: F:按步骤说明 ZeroAgent 安装、配置和不同运行模式的启动 | R:code:README.md,code:config.example.yaml | A:- | S:-
+reflect.md[SA7T]: F:说明 reflect 的模式选择、执行协议与记忆维护流程 | R:code:README.md | A:reflect | S:-
+context-memory-skills.md[SG8S]: F:说明 local_v1 配置、身份授权、项目管理、记忆来源、资源检索、技能路由及数据生命周期 | R:code:README.md,code:zero_agent/context/admin.py,code:zero_agent/context/local_store.py,code:zero_agent/context/service.py,code:zero_agent/context/resources.py,code:zero_agent/memory/service.py,code:zero_agent/skills/gate.py,code:zero_agent/skills/manifest.py | A:zero-agent context,context_search,memory_update,skill_route,skill_run | S:默认检索只覆盖当前用户和绑定项目，跨项目或技能目录需显式授权 scope；任务命中触发目录时必须路由全部匹配技能并在完成或受保护动作前按精确修订加载；未触发规则且无需受保护操作的普通文本无需路由
+
+===/Users/zhangzeao/workspace/ZeroAgent/docs/superpowers/plans/===
+2026-08-02-duplicate-final-response-plan.md[SU7T]: F:规划以桥接消息 ID 关联流式草稿和最终回复，避免重复显示 | R:code:zero_agent/frontends/desktop/static/app.js,code:tests/frontend_message_reconciliation.test.js | A:upsertPolledMessage,finalizeAssistantReply | S:仅相同有效消息 ID 合并；不同 ID 即使文本相同也必须保留为独立回复
+2026-08-05-session-sidebar-management.md[SU8M]: F:规划按更新时间分桶、分组移动和安全删除会话的桌面侧栏 | R:code:zero_agent/frontends/desktop/static/app.js,code:zero_agent/frontends/desktop_bridge.py,code:zero_agent/frontends/desktop/static/styles.css,code:tests/frontend_session_sidebar.test.js | A:session/delete,session/replace,session/group | S:仅剩一个会话时走 session/replace；远端删除 404 按幂等成功清理
+2026-08-07-session-sidebar-optimization.md[SU8M]: F:规划稳定分组实体、可折叠侧栏、拖拽移动和长列表事件优化 | R:code:zero_agent/frontends/desktop/static/app.js,code:zero_agent/frontends/desktop_bridge.py,code:zero_agent/frontends/desktop/static/za-web.js,code:zero_agent/frontends/desktop/static/styles.css | A:assignSessionToGroup,buildSessionSection,toggleGroup | S:仅自定义分组接受拖放；会话按更新时间倒序，折叠时不渲染其内容
+2026-08-13-empty-conversation-history.md[SD8S]: F:规划仅保留含有效用户内容的会话持久化与历史显示 | R:code:zero_agent/frontends/desktop_bridge.py,code:zero_agent/frontends/desktop/static/app.js,code:zero_agent/bots/shared/continue_cmd.py | A:session_has_user_message | S:空白用户文本及 system、assistant 消息不能使会话进入持久历史
+2026-08-14-configured-vision-backends.md[SI8T]: F:规划按后端能力路由无状态图像请求并注册条件 vision 工具 | R:code:zero_agent/core/config.py,code:zero_agent/llm/sessions.py,code:zero_agent/tools/registry.py,code:zero_agent/tools/builtin/vision.py | A:LiteLLMSession.vision,vision | S:文本后端拒绝视觉请求；vision 调用不改写聊天历史
+2026-08-18-plan-command-and-sop.md[SW9L]: F:规划 Desktop、CLI 与 TUI 共用真实 PLAN 契约、校验流程和显式执行审批 | R:code:zero_agent/frontends/plan_command.py,code:zero_agent/core/agent.py,code:zero_agent/runners/agent_runner.py,code:zero_agent/frontends/desktop_bridge.py,code:zero_agent/frontends/commands/slash_commands.py,code:zero_agent/runners/cli.py,code:zero_agent/frontends/tui.py | A:/plan <task>,TaskMode.PLAN,TaskMode.EXECUTING | S:仅经验证的计划进入 ready；只有用户明确审批才启动 EXECUTING
+2026-08-24-langfuse-tracing.md[SO8L]: F:规划统一 Langfuse 4.x 生命周期及每个 LiteLLM 请求的 generation 观测 | R:code:zero_agent/plugins/langfuse_tracing.py,code:zero_agent/llm/sessions.py,code:zero_agent/llm/factory.py,code:zero_agent/core/agent.py | A:LangfuseTracer,start_generation,finish_generation | S:每条 completion 路径只建一个 generation；不得修改 LiteLLM 全局 callback
+2026-08-25-plan-ui-display.md[SU7S]: F:规划展示结构化计划步骤和进度，并约束长标题与卡片文本 | R:code:zero_agent/frontends/desktop/static/app.js,code:zero_agent/frontends/desktop/static/styles.css,code:tests/frontend_plan_ui.test.js | A:renderPlanStatus,handleNotification | S:计划步骤以 textContent 渲染；完整标题保留在 title 与 aria-label 中
+2026-08-27-session-sqlite.md[SD9L]: F:规划以标准库 SQLite 取代桌面会话 JSON 全量持久化并保持 API 行为 | R:code:zero_agent/frontends/session_store.py,code:zero_agent/frontends/desktop_bridge.py,code:tests/test_session_store.py | A:SessionStore.append_message,SessionStore.upsert_session,SessionStore.load_state | S:旧 sessions.json 故意不迁移；原始 model_responses 日志仍独立保留
+2026-08-30-channel-control.md[SM8M]: F:规划 bot 进程状态、配置检测和频道消息链路控制面板 | R:code:zero_agent/bots/channel_control.py,code:zero_agent/frontends/desktop_commands.py,code:zero_agent/frontends/desktop_bridge.py,code:zero_agent/bots/common.py | A:channel_statuses,start_channel,stop_channel,set_channel_linked | S:关闭链路只阻止后续消息处理，不取消已运行任务；进程状态取自 OS
+
+===/Users/zhangzeao/workspace/ZeroAgent/docs/superpowers/specs/===
+2026-08-02-duplicate-final-response-design.md[SU7T]: F:规定用桥接消息 ID 将流式草稿与正式回复关联并只渲染一次 | R:code:zero_agent/frontends/desktop/static/app.js,code:tests/frontend_message_reconciliation.test.js | A:upsertPolledMessage,finalizeAssistantReply | S:无有效且相同的 ID 时按独立消息处理；不同消息不得用文本内容去重
+2026-08-05-session-sidebar-design.md[SU7T]: F:定义桌面会话删除、时间桶与前端本地分组元数据设计 | R:code:zero_agent/frontends/desktop/static/app.js,code:zero_agent/frontends/desktop_bridge.py,code:zero_agent/frontends/desktop/static/za-web.js | A:session/delete,session/replace,session/group | S:删除最后一个会话时原子替换容器；删除分组只解除归属，不删除会话
+2026-08-07-session-sidebar-optimization-design.md[SU8M]: F:定义稳定分组实体、折叠偏好、拖放移动及长列表优化边界 | R:code:zero_agent/frontends/desktop/static/app.js,code:zero_agent/frontends/desktop_bridge.py,code:zero_agent/frontends/desktop/static/za-web.js,code:zero_agent/frontends/desktop/static/styles.css | A:loadSidebarData,renderSessionSidebar,moveSessionToGroup,toggleSidebarSection | S:拖放目标仅限自定义组；无虚拟列表与手动排序，折叠区不保留隐藏行
+2026-08-13-empty-conversation-history-design.md[SW8T]: F:规定仅含有效用户内容的会话进入持久历史与历史界面 | R:code:zero_agent/frontends/desktop_bridge.py,code:zero_agent/frontends/desktop/static/app.js,code:zero_agent/bots/shared/continue_cmd.py | A:session_has_user_message | S:空白文本及 system、assistant 消息不构成有效用户内容
+2026-08-14-configured-vision-backends-design.md[SI8T]: F:设计可配置视觉后端及无状态图像请求的能力路由 | R:code:zero_agent/core/config.py,code:zero_agent/llm/sessions.py,code:zero_agent/tools/registry.py,code:zero_agent/tools/builtin/vision.py | A:LiteLLMSession.vision,vision | S:视觉请求不改写聊天历史
+2026-08-18-plan-command-design.md[SW9M]: F:统一 Desktop、CLI 与 TUI 的计划模式、校验和执行审批契约 | R:code:zero_agent/frontends/plan_command.py,code:zero_agent/core/agent.py,code:zero_agent/runners/agent_runner.py,code:zero_agent/frontends/desktop_bridge.py,code:zero_agent/frontends/commands/slash_commands.py,code:zero_agent/runners/cli.py,code:zero_agent/frontends/tui.py | A:/plan <task>,TaskMode.PLAN,TaskMode.EXECUTING | S:计划通过验证后才进入 ready；执行需用户明确审批
+2026-08-24-langfuse-tracing-design.md[SO8S]: F:定义 Langfuse 4.x 生命周期及 LiteLLM generation 观测设计 | R:code:zero_agent/plugins/langfuse_tracing.py,code:zero_agent/llm/sessions.py,code:zero_agent/llm/factory.py,code:zero_agent/core/agent.py | A:LangfuseTracer,start_generation,finish_generation | S:每个 completion 路径只创建一个 generation；不修改 LiteLLM 全局 callback
+2026-08-25-plan-ui-display-design.md[SU7T]: F:规定桌面计划卡片的步骤进度、长标题与安全文本展示 | R:code:zero_agent/frontends/desktop/static/app.js,code:zero_agent/frontends/desktop/static/styles.css,code:tests/frontend_plan_ui.test.js | A:renderPlanStatus,handleNotification | S:计划步骤使用 textContent；完整标题保留在 title 与 aria-label
+2026-08-27-session-sqlite-design.md[SP9M]: F:设计以标准库 SQLite 持久化桌面会话并保持 API 行为 | R:code:zero_agent/frontends/session_store.py,code:zero_agent/frontends/desktop_bridge.py,code:tests/test_session_store.py | A:SessionStore.append_message,SessionStore.upsert_session,SessionStore.load_state | S:旧 sessions.json 不迁移；model_responses 日志独立保留
+2026-08-30-channel-control-design.md[SM8S]: F:定义 bot 频道状态、启停、配置检测和消息链路控制 | R:code:zero_agent/bots/channel_control.py,code:zero_agent/frontends/desktop_commands.py,code:zero_agent/frontends/desktop_bridge.py,code:zero_agent/bots/common.py | A:channel_statuses,start_channel,stop_channel,set_channel_linked | S:关闭链路不取消正在执行的任务；进程状态来自操作系统
+2026-08-30-evidence-contract-fix-design.md[SR8T]: F:修正自定义工具证据类型与成功、错误和中断结果的判定契约 | R:code:zero_agent/tools/registry.py,code:zero_agent/core/agent.py | A:evidence_kind | S:自定义声明的普通返回值按成功处理，显式错误或中断除外
+2026-09-04-unified-gateway-session-isolation-design.md[SW9L]: F:设计统一 Gateway、频道适配器和严格隔离的会话运行时 | R:code:zero_agent/frontends/session_store.py,code:zero_agent/bots/channel_control.py,code:docs/architecture.md | A:Gateway,SessionKey | S:会话键由频道、频道账号、会话类型与会话 ID 共同确定
+
+===/Users/zhangzeao/workspace/ZeroAgent/plan_pi_desktop_check/===
+_dump.txt[XQ2T]: F:记录一次桌面 PLAN 状态检查的工作区诊断快照 | R:- | A:TaskMode.PLAN,verify=missing | S:该文件仅记录单次运行快照
+
+===/Users/zhangzeao/workspace/ZeroAgent/scripts/===
+compile_prompt_catalogs.sh[XV5T]: F:用 msgfmt --check 编译英文与中文 gettext 目录 | R:code:zero_agent/assets/locale/en/LC_MESSAGES/zero_agent.po,code:zero_agent/assets/locale/zh/LC_MESSAGES/zero_agent.po | A:msgfmt | S:-
+install.sh[OV8L]: F:自动安装和启动 macOS ZeroAgent Desktop 并等待服务就绪 | R:code:pyproject.toml,code:scripts/compile_prompt_catalogs.sh | A:install.sh | S:dry-run 不修改环境；默认流程会替换已安装的桌面应用
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/===
+__init__.py[CR5T]: F:在导入 LiteLLM 前为未设置的 LITELLM_LOG 指定 ERROR 默认级别 | R:- | A:os.environ.setdefault | S:setdefault 保留调用环境已提供的值
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/assets/===
+__init__.py[CZ1T]: F:标记 ZeroAgent 随包分发的资产模块 | R:- | A:- | S:-
+code_run_header.py[CR7T]: F:为模型生成的 Python 代码添加路径修复、子进程兼容和异常提示 | R:- | A:sys.path,subprocess.run,subprocess.Popen | S:模块会全局调整 subprocess 文本解码和 Windows 创建标志
+ga_ultraplan.py[AW8M]: F:提供 plan、phase、parallel 与 mapchain 计划编排工具 | R:- | A:plan,phase,parallel,mapchain | S:其他编排原语要求先成功调用 plan()
+global_mem_insight_template.txt[AA8T]: F:中文提示模板，指导记忆洞察分层、SOP 路由与索引更新 | R:code:zero_agent/assets/global_mem_insight_template_en.txt,code:zero_agent/assets/insight_fixed_structure.txt | A:global memory insight | S:写入记忆前要求读取 Meta-SOP
+global_mem_insight_template_en.txt[AA8T]: F:英文提示模板，指导记忆洞察分层、SOP 路由与索引更新 | R:code:zero_agent/assets/global_mem_insight_template.txt,code:zero_agent/assets/insight_fixed_structure_en.txt | A:global memory insight | S:写入记忆前要求读取 Meta-SOP
+insight_fixed_structure.txt[AA6T]: F:定义中文记忆洞察的固定层级输出结构 | R:code:zero_agent/assets/insight_fixed_structure_en.txt | A:L0,L1,L2,L3 | S:Meta-SOP 属于 L0；事实、代码根与 SOP 分别归入 L2、项目代码根和 L3
+insight_fixed_structure_en.txt[AA6T]: F:定义英文记忆洞察的固定层级输出结构 | R:code:zero_agent/assets/insight_fixed_structure.txt | A:L0,L1,L2,L3 | S:Meta-SOP 属于 L0；事实、代码根与 SOP 分别归入 L2、项目代码根和 L3
+sys_prompt.txt[AA8T]: F:定义 ZeroAgent 中文系统角色、自主执行边界和交互协议 | R:code:zero_agent/assets/sys_prompt_en.txt | A:operating_contract,interaction_protocol | S:回复需区分观察事实、推断与未知
+sys_prompt_en.txt[AA8T]: F:定义 ZeroAgent 英文系统角色、自主执行边界和交互协议 | R:code:zero_agent/assets/sys_prompt.txt | A:operating_contract,interaction_protocol | S:回复需区分观察事实、推断与未知
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/assets/evaluation/===
+memory_cases.json[TQ7L]: F:提供 OrionEval 的九个合成记忆保留与淘汰评估案例 | R:code:docs/memory-evaluation.md | A:OrionEval | S:案例中的 Orion 数据是合成评估样本，不代表项目运行配置
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/assets/locale/en/LC_MESSAGES/===
+zero_agent.po[SL5T]: F:保存 ZeroAgent 英文界面与任务状态的 gettext 字符串 | R:code:zero_agent/assets/locale/zh/LC_MESSAGES/zero_agent.po | A:gettext | S:-
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/assets/locale/zh/LC_MESSAGES/===
+zero_agent.po[SL5T]: F:保存 ZeroAgent 中文界面与任务状态的 gettext 字符串 | R:code:zero_agent/assets/locale/en/LC_MESSAGES/zero_agent.po | A:gettext | S:-
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/assets/memory_seed/sops/===
+autonomous_operation_sop.md[SW8T]: F:规定自主任务的选择、执行、报告和记忆提案流程 | R:code:zero_agent/utils/autonomous_operation_helper.py,code:zero_agent/assets/memory_seed/sops/autonomous_operation_task_planning.md | A:complete_task,set_todo | S:禁止读取密钥及修改核心代码库
+autonomous_operation_task_planning.md[SW7T]: F:定义自主任务待办规划、价值排序与第三方评审流程 | R:code:zero_agent/assets/memory_seed/sops/autonomous_operation_sop.md,code:zero_agent/assets/memory_seed/sops/subagent.md | A:TODO.txt | S:规划轮只产出待办，不执行待办
+checklist_sop.md[SW7T]: F:说明 Checklist 与 MapReduce 两种任务拆分、派发和验收流程 | R:code:zero_agent/utils/checklist_helper.py,code:zero_agent/assets/memory_seed/sops/subagent.md | A:CL.start_master,CL.add,CL.mark,CL.close | S:start_master 仅由 Booter 调用
+code_review_principles.md[SQ8T]: F:列出模块边界、可推理性、组合性与可验证性等代码质量原则 | R:code:zero_agent/assets/memory_seed/sops/review_sop.md | A:- | S:-
+computer_use.md[SS8T]: F:记录 Windows、macOS 与手机 GUI 操作的定位、坐标和验证约束 | R:code:zero_agent/utils/ljqctrl.py,code:zero_agent/utils/macljqctrl.py,code:zero_agent/utils/ui_detect.py | A:UIA,ui_detect,ljqCtrl | S:网络游戏默认必须使用硬件键鼠；不得用普通键鼠事件
+github_contribution_sop.md[SW8S]: F:定义开源项目贡献、分支、测试、PR、CI 与评审跟进流程 | R:code:CONTRIBUTING.md,code:pyproject.toml | A:gh pr status,gh pr checks | S:测试未通过时不得推送贡献分支
+goal_hive_master_duty.md[SW9T]: F:规定 Goal Hive Master 的拆解、派发、验收与偏差控制职责 | R:code:zero_agent/assets/memory_seed/sops/goal_hive_sop.md,code:zero_agent/assets/memory_seed/sops/subagent.md | A:J*,e,Ĵ | S:Master 只调度和验收，不亲自生产子任务产物
+goal_hive_sop.md[SW8T]: F:定义 Goal Hive 的 BBS 启动、Master 职责与 worker 协作协议 | R:code:zero_agent/assets/memory_seed/sops/goal_hive_master_duty.md,code:zero_agent/assets/memory_seed/sops/goal_mode_sop.md | A:BBS,goal_state.json | S:Hive Master 必须由独立 worker 进程承担
+goal_mode_sop.md[SW7T]: F:说明开放式长程目标的状态文件、后台启动与进度观察 | R:code:zero_agent/reflect/goal_mode.py | A:GOAL_STATE,budget_seconds,turns_used | S:默认最小预算为 10800 秒
+incubator_sop.md[SI5T]: F:记录远程部署 ZeroAgent 实例的文件、依赖与通信约定 | R:code:pyproject.toml,code:zero_agent/assets/sys_prompt.txt | A:zero-agent --task | S:config.yaml 属于本地配置，不应提交
+ljqCtrl_sop.md[SH8T]: F:说明 ljqCtrl 的窗口控制、DPI 换算与点击验证规则 | R:code:zero_agent/utils/ljqctrl.py,code:zero_agent/assets/memory_seed/sops/computer_use.md | A:ljqCtrl.Click,ljqCtrl.dpi_scale | S:Click 使用物理坐标；逻辑坐标须除以 dpi_scale
+memory_cleanup_sop.md[SA7T]: F:定义 local_v1 记忆对象的检索核对、撤回、清除与残留审计流程 | R:code:zero_agent/context/service.py,code:zero_agent/memory/service.py | A:context_search,context_list,context_read,memory_update | S:不得自动清理或直接编辑修订文件/manifest；retract 保留历史，purge 仅接受单对象精确 revision 与删除来源；来源清理未完成或存在受保留会话/备份/导出时不得声称彻底清除
+memory_management_sop.md[SA9T]: F:定义类型化长期记忆的来源核验、偏好冲突、观察与决策写入及项目作用域规则 | R:code:zero_agent/context/sources.py,code:zero_agent/memory/service.py,code:zero_agent/tools/builtin/context.py | A:context_sources,memory_update | S:来源回执只证明其记录字段、状态与作用域，工具成功不证明任意结论；偏好需明确持久意图并只用注册键，无明确替代意图的相反值全部退出默认注入；environment_fact/experience 需注册策略；禁止退回旧文件记忆
+morphling_sop.md[SW7T]: F:描述按目标、测例和组件决策进行能力吸收或替代的流程 | R:code:zero_agent/assets/memory_seed/sops/goal_hive_sop.md | A:Target,Tests,Actions | S:替代项目必须使用同一测例进行对照验证
+plan_sop.md[SW9M]: F:规定 PLAN 探索、编写、审批、执行和独立验证的状态协议 | R:code:zero_agent/frontends/plan_command.py,code:zero_agent/core/agent.py,code:zero_agent/assets/memory_seed/sops/verify_sop.md,code:docs/superpowers/specs/2026-08-18-plan-command-design.md | A:TaskContract,TaskMode.PLAN,TaskMode.EXECUTING | S:TaskContract 是计划状态唯一来源；ready 仅能由用户明确 /plan execute 进入执行
+procmem_scanner_sop.md[SR5T]: F:说明进程内存特征搜索、上下文查看与差集扫描用途 | R:code:zero_agent/utils/procmem_scanner.py | A:scan_memory | S:扫描需具备 PROCESS_QUERY_INFORMATION 与 PROCESS_VM_READ 权限
+project_mode_sop.md[SW7T]: F:定义项目模式的激活锚点、私域文件位置与记忆入库判据 | R:- | A:project_memory.md,.active_project | S:仅 L1 自动注入；L2 项目记忆需按任务相关性主动读取
+review_sop.md[SQ8S]: F:定义 /review 的只读对抗评审、证据门槛、严重度与报告格式 | R:code:zero_agent/bots/shared/review_cmd.py,code:zero_agent/assets/review_sop/review_inline_prompt.txt,code:zero_agent/assets/memory_seed/sops/code_review_principles.md | A:/review,FAIL,CONDITIONAL,PASS | S:评审只读且每条 finding 必须有可核对证据
+salient_mining_sop.md[SA6T]: F:规定从历史会话增量提取情绪事件与持续或已消失活动 | R:code:zero_agent/memory/compress_session.py | A:history_insight | S:活动只能依据用户主动请求或讨论判定
+scheduled_task_sop.md[SW6T]: F:描述定时任务 JSON、触发条件、报告和健康状态记录 | R:code:zero_agent/reflect/scheduler.py | A:scheduler.health_check | S:once 任务执行后按永久跳过处理
+skill_search.md[SI5T]: F:介绍内置技能卡语义检索的 Python API、CLI 与环境配置 | R:code:zero_agent/utils/skill_search/engine.py | A:search,SearchResult,SkillIndex | S:查询应使用英文以提高匹配质量
+subagent.md[SW8S]: F:说明 ZeroAgent CLI 子 Agent 的输入、启动、监控、验收与 Map 模式 | R:code:zero_agent/runners/cli.py,code:zero_agent/reflect/agent_team_worker.py | A:zero-agent --task,reply.txt | S:没有直接可调用的 subagent_run 工具；主 Agent 必须验收交付物
+supervisor_sop.md[SW8T]: F:定义只读监察者对工作 Agent 的约束清单、进度观察和纠偏 | R:code:zero_agent/assets/memory_seed/sops/subagent.md | A:_intervene,_keyinfo,_stop | S:监察者不得执行工作任务或修改业务文件
+tmwebdriver_sop.md[SI8S]: F:记录 TMWebDriver 浏览器控制、CDP 桥、页面输入与调试限制 | R:code:zero_agent/assets/tmwd_cdp_bridge/background.js,code:zero_agent/assets/tmwd_cdp_bridge/manifest.json,code:zero_agent/assets/memory_seed/sops/computer_use.md | A:web_scan,web_execute_js,web_screenshot | S:web_execute_js 中 await 结果需显式 return；首次 CDP attach 后再测坐标
+ultraplan_sop.md[SW9S]: F:定义 UltraPlan 的显式启用条件、阶段编排、提示契约与验证闭环 | R:code:zero_agent/assets/ga_ultraplan.py,code:zero_agent/assets/memory_seed/sops/subagent.md | A:plan,phase,parallel,mapchain | S:仅用户明确选择 UltraPlan 时才可启动
+verify_sop.md[SQ9T]: F:规定代码、文档、数据、API 等交付物的独立验证动作与裁定格式 | R:code:zero_agent/assets/memory_seed/sops/plan_sop.md | A:VERDICT: PASS,VERDICT: FAIL,VERDICT: PARTIAL | S:PASS 必须有实际工具执行证据和至少一项对抗性探测
+vision_sop.md[SI6T]: F:说明配置视觉 backend 的窗口检查、截图范围和 vision 工具调用方式 | R:code:zero_agent/tools/builtin/vision.py,code:zero_agent/core/config.py | A:vision | S:视觉模型来自 config.yaml，不使用独立视觉 API
+vue3_component_sop.md[SI7M]: F:记录 Vue 3 组件、表单、文件上传及富文本模型的页面操作方式 | R:code:zero_agent/assets/memory_seed/sops/tmwebdriver_sop.md | A:findCompByEl,nativeSetter,DataTransfer | S:只改 DOM 可能不更新 Vue 或编辑器 model
+web_setup_sop.md[SI4T]: F:说明仅在 web 工具未配置时安装并验证 TMWebDriver 扩展 | R:code:zero_agent/assets/tmwd_cdp_bridge/manifest.json,code:zero_agent/assets/memory_seed/sops/tmwebdriver_sop.md | A:web_scan,web_execute_js | S:web 工具已可用时无需执行安装流程
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/assets/review_sop/===
+review_inline_prompt.en.txt[SQ8S]: F:英文 in-session 只读代码评审 prompt，包含 Q1-Q4、误报筛选和报告协议 | R:code:zero_agent/assets/review_sop/review_inline_prompt.txt,code:zero_agent/assets/memory_seed/sops/review_sop.md | A:P0,P1,P2,P3 | S:每条 finding 必须有证据且能映射代码原则
+review_inline_prompt.txt[SQ8S]: F:中文 in-session 只读代码评审 prompt，规定审阅范围、严重度和输出格式 | R:code:zero_agent/assets/review_sop/review_inline_prompt.en.txt,code:zero_agent/assets/memory_seed/sops/review_sop.md | A:P0,P1,P2,P3 | S:评审只读，不得修改业务代码或落盘报告
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/assets/tmwd_cdp_bridge/===
+background.js[IN8L]: F:实现 Chrome 扩展的 cookies、tabs、CDP、批处理和本地 WebSocket 桥 | R:code:zero_agent/assets/tmwd_cdp_bridge/content.js,code:zero_agent/assets/tmwd_cdp_bridge/manifest.json,code:zero_agent/assets/tmwd_cdp_bridge/config.js | A:handleExtMessage,handleBatch,handleWsExec,connectWS | S:扩展通过 127.0.0.1:18765 连接 WebSocket 服务
+config.js[FC2T]: F:定义内容脚本与后台桥接使用的 TID DOM 消息标识 | R:code:zero_agent/assets/tmwd_cdp_bridge/content.js | A:TID | S:-
+content.js[IN6T]: F:通过 TID DOM 节点把页面 cookies、tabs、CDP 和批处理请求转发至扩展 | R:code:zero_agent/assets/tmwd_cdp_bridge/config.js,code:zero_agent/assets/tmwd_cdp_bridge/background.js | A:handle | S:-
+disable_dialogs.js[IR5T]: F:将页面 alert、confirm、prompt 替换为不会阻塞脚本的通知 | R:code:zero_agent/assets/tmwd_cdp_bridge/manifest.json | A:window.alert,window.confirm,window.prompt | S:替代 confirm 始终返回 true
+manifest.json[IS9T]: F:声明 TMWD MV3 扩展权限、全站内容脚本和后台 service worker | R:code:zero_agent/assets/tmwd_cdp_bridge/background.js,code:zero_agent/assets/tmwd_cdp_bridge/content.js,code:zero_agent/assets/tmwd_cdp_bridge/disable_dialogs.js | A:cookies,debugger,scripting,host_permissions | S:扩展拥有全站 host 权限及 cookies、debugger 权限
+popup.html[SU2T]: F:定义扩展弹窗中的 cookies 刷新按钮和文本展示区 | R:code:zero_agent/assets/tmwd_cdp_bridge/popup.js | A:refresh,out | S:-
+popup.js[IS9T]: F:读取活动标签页 cookies 并在扩展弹窗展示及复制 | R:code:zero_agent/assets/tmwd_cdp_bridge/popup.html,code:zero_agent/assets/tmwd_cdp_bridge/background.js | A:fetchCookies | S:刷新会将活动页 cookie 的 name=value 列表复制到剪贴板
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/bots/===
+__init__.py[CZ3T]: F:标记 Telegram、Discord、微信、QQ、企业微信、飞书和钉钉 bot 前端包 | R:code:zero_agent/bots/common.py | A:- | S:-
+channel_config.py[FC9M]: F:加载、合并并原子持久化 bot YAML 或 JSON 配置 | R:code:zero_agent/bots/channel_control.py,code:zero_agent/bots/common.py | A:load_keys,channel_config_snapshot,update_channel_config | S:非空环境变量覆盖文件值；配置文件原子写入并设为 0600
+channel_control.py[IR9M]: F:定义固定频道元数据、必填配置检测与消息链路开关持久化 | R:code:zero_agent/bots/channel_config.py,code:zero_agent/bots/common.py,code:docs/superpowers/specs/2026-08-30-channel-control-design.md | A:channel_definitions,is_channel_linked,set_channel_linked | S:缺失或损坏的频道设置默认 linked=true
+common.py[CG9L]: F:提供 bot 共用命令、消息处理、已验证身份 RuntimeContext 绑定和一次性身份链接兑换 | R:code:zero_agent/context/runtime.py,code:zero_agent/context/admin.py,code:zero_agent/bots/channel_control.py,code:zero_agent/bots/shared/continue_cmd.py | A:AgentBotMixin.runtime_context_for_message,_redeem_identity_link,run_agent | S:每次任务都从入口验证的 bot、sender 和会话信息构造并校验 RuntimeContext；群聊或未验证 sender 不得写入个人记忆；身份链接只在目标 bot 私聊兑换且日志脱敏
+dingtalk_app.py[IU8M]: F:接收钉钉 Stream 事件并传递 bot、验证发送者和会话类型以绑定任务身份 | R:code:zero_agent/bots/common.py,code:zero_agent/context/runtime.py,code:zero_agent/context/admin.py | A:DingTalkApp.on_message | S:仅 conversation_type=1 作为私聊链接兑换入口；群聊消息不得建立个人记忆写入
+discord_app.py[IU8L]: F:实现 Discord 私信与 Guild bot，按 chat 隔离 runner，并把验证过的平台身份绑定到任务 | R:code:zero_agent/bots/common.py,code:zero_agent/context/runtime.py,code:zero_agent/context/admin.py | A:DiscordApp._get_runner,handle_command,run_agent | S:每个 chat 使用独立 runner 与历史；run_agent 必须先构造并通过 RuntimeContext 类型校验再提交任务；Guild 消息不能兑换身份链接，链接只能从私信发起
+feishu_app.py[IU8L]: F:实现飞书长连接、多媒体消息与任务卡片并为任务绑定 APP_ID 和验证过的 open_id | R:code:zero_agent/bots/common.py,code:zero_agent/context/runtime.py,code:zero_agent/context/admin.py | A:handle_message,FeishuApp.run_agent,_claim_message_once | S:只有 chat_type=p2p 是私聊身份链接入口；同一进程同时只接受一个活动任务
+qq_app.py[IU7M]: F:实现 QQ 私聊与群聊消息处理、附件发送，并将 app 和 sender 身份传入任务 | R:code:zero_agent/bots/common.py,code:zero_agent/context/runtime.py,code:zero_agent/context/admin.py | A:QQApp.on_message,QQApp.send_file | S:群聊 session 按群会话隔离；身份来源为 APP_ID 与平台提供的 sender ID
+telegram_app.py[IM9L]: F:实现 Telegram 消息、媒体与命令入口，并按 bot 账号、发送者和会话类型为任务绑定身份 | R:code:zero_agent/bots/common.py,code:zero_agent/context/runtime.py,code:zero_agent/context/admin.py,code:zero_agent/runners/agent_runner.py | A:_telegram_runtime_context,_runtime_task_kwargs,handle_msg,_handle_review_command | S:sender 仅在同时取得 bot id 和发送者 id 时视为已验证；链接码只在私聊兑换；普通消息与 review 任务都必须携带由入口上下文构造的 RuntimeContext，不能信任模型参数
+wechat_app.py[IM9L]: F:通过 iLink 接收微信消息与媒体、处理命令并绑定平台验证的 bot 和发送者身份 | R:code:zero_agent/bots/common.py,code:zero_agent/context/runtime.py,code:zero_agent/context/admin.py,code:zero_agent/runners/agent_runner.py | A:WxBotClient,on_message | S:身份链接只在微信私聊兑换且缺少 uid 或 bot_id 时拒绝；任务提交前必须构造 bot_runtime_context；接收日志脱敏链接码，身份由平台字段而非用户名或模型参数建立
+wecom_app.py[IM8M]: F:通过企业微信 WebSocket 处理文本、多媒体和命令并将验证身份绑定到任务 | R:code:zero_agent/bots/common.py,code:zero_agent/context/runtime.py,code:zero_agent/context/admin.py | A:WeComApp.on_text,_on_media,run_agent | S:仅已识别的私聊类型可兑换链接码；群聊与私聊按不同 channel scope 处理
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/bots/shared/===
+__init__.py[CZ2T]: F:标记 bot 共享命令模块包 | R:code:zero_agent/bots/shared/continue_cmd.py,code:zero_agent/bots/shared/btw_cmd.py | A:- | S:-
+btw_cmd.py[AW7S]: F:实现不打断主 Agent 的一次性 /btw 侧问及 120 秒超时 | R:code:zero_agent/bots/common.py,code:zero_agent/runners/agent_runner.py | A:handle_frontend_command,_run | S:侧问使用独立 runner，不改变主 Agent 的对话历史
+continue_cmd.py[EU7L]: F:从日志与当前会话恢复有效对话历史，并为前端续接用户指令 | R:code:zero_agent/bots/shared/session_names.py,code:zero_agent/runners/agent_runner.py | A:handle_frontend_command,reset_conversation | S:恢复时排除历史中的系统注入标记；优先恢复原生完整历史，无法恢复时才使用摘要回退
+export_cmd.py[EU5T]: F:从模型响应日志提取最近助手答复并写出可导出的 Markdown 临时文件 | R:code:zero_agent/core/agent.py | A:export_last_response | S:生成围栏时使用比响应内现有围栏更长的反引号序列，避免文档代码块提前闭合
+review_cmd.py[EU6T]: F:加载本地化的内联代码审查提示，并拼接用户请求、项目与记忆原则 | R:code:zero_agent/assets/review_inline_prompt.txt,code:zero_agent/assets/review_inline_prompt_en.txt | A:handle | S:提示词按配置语言从随包资源读取，不在命令模块中硬编码审查主体
+session_names.py[CD7S]: F:维护会话日志键与用户命名的 JSON sidecar，并按精确名或前缀查找最新会话 | R:code:zero_agent/runners/agent_runner.py | A:set_session_name,get_session_name | S:sidecar 兼容旧日志键迁移；名称只接受安全 basename，查找冲突时选最新匹配项
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/browser/===
+__init__.py[CG3T]: F:标识 ZeroAgent 浏览器自动化运行时包 | R:code:zero_agent/browser/simphtml.py,code:zero_agent/browser/tm_webdriver.py | A:- | S:-
+simphtml.py[IZ8L]: F:将网页 DOM 转成压缩、便于 Agent 阅读与定位的简化 HTML，并支持页面差异处理 | R:code:zero_agent/browser/tm_webdriver.py,code:zero_agent/tools | A:简化 DOM 与文本提取 | S:处理包含主内容区、列表及截断策略；属性和 HTML 会按 token 预算裁剪，JS 执行后可用 DOM 差异而非整页重发
+tm_webdriver.py[IM8M]: F:提供浏览器扩展与 Python 工具间的 WebSocket/HTTP 轮询桥接及 JS 执行会话 | R:code:zero_agent/browser,code:zero_agent/tools | A:WebDriver bridge | S:桥接需处理会话确认、轮询结果、超时及重连；扩展通过本地 18765 端口维持连接与看门狗
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/core/===
+__init__.py[CG3T]: F:标识 ZeroAgent 核心编排模块包 | R:code:zero_agent/core/agent.py,code:zero_agent/core/handler.py,code:zero_agent/core/loop.py | A:- | S:-
+agent.py[AC9L]: F:组装 Agent 配置、工具、模型和执行循环，并在每个任务边界初始化 local_v1 服务、来源回执、技能门禁及提示上下文 | R:code:zero_agent/core/handler.py,code:zero_agent/context/runtime.py,code:zero_agent/context/service.py,code:zero_agent/context/sources.py,code:zero_agent/context/assembly.py,code:zero_agent/skills/gate.py,code:zero_agent/skills/runtime.py | A:ZeroAgent.run,_initialize_context_runtime,_build_prompt_assembly | S:等待用户输入的任务恢复时必须沿用原 RuntimeContext 身份和项目绑定，否则拒绝恢复
+completion.py[CR9M]: F:依据任务模式、成功工具证据与计划验证状态判定完成，并生成完成证书 | R:code:zero_agent/core/types.py,code:zero_agent/core/handler.py,code:zero_agent/evaluation/evidence.py | A:evaluate_completion,successful_evidence_refs | S:EXECUTING 完成必须引用当前账本中的成功证据；PLAN 需无未完成项并有独立验证状态，PARTIAL 只能在用户接受后通过
+completion_gate.py[CR9L]: F:审查无工具回复是否可完成，检测中断、危险停止原因、伪工具调用、未执行动作与计划完成声明 | R:code:zero_agent/core/interruption.py,code:zero_agent/core/handler.py | A:CompletionGate.evaluate | S:工具协议纠正最多重试 2 次、动作意图纠正最多 2 次、中断最多 3 次；成功工具调用会由 Handler 重置门控预算
+config.py[FC9L]: F:定义 Agent、LLM 后端与上下文配置，加载 YAML/环境变量、解析路径语言并校验运行选择 | R:code:zero_agent/core/exceptions.py,code:zero_agent/core/agent.py,code:zero_agent/context/config.py | A:AgentConfig.from_yaml,from_env,load_default_config | S:默认先读项目 config.yaml；context.root 相对配置文件解析，冲突的 YAML 与 ZA_CONTEXT_* 值会拒绝
+exceptions.py[CR4T]: F:定义配置错误、LLM 调用错误与工具执行错误的异常类型 | R:code:zero_agent/core/config.py,code:zero_agent/core/agent.py,code:zero_agent/core/handler.py | A:ConfigError,LLMError,ToolError | S:ConfigError 表示致命配置问题，LLMError 可恢复，ToolError 表示工具执行失败
+handler.py[AW9L]: F:分发模型工具调用、维护任务状态与证据，并在工具执行和无工具完成前实施技能路由门禁 | R:code:zero_agent/core/agent.py,code:zero_agent/core/types.py,code:zero_agent/tools/registry.py,code:zero_agent/skills/gate.py,code:zero_agent/context/sources.py | A:BaseHandler.dispatch,do_no_tool,_record_evidence,_finalize_tool_dispatch | S:缺少路由或所需精确修订时在工具执行或纯文本完成前拦截；skill_run 的 load 不产生成功执行证据；无匹配技能的普通回答可直接完成
+hooks.py[CE6S]: F:实现标准 Agent 生命周期事件的回调注册、触发、发现加载与移除 | R:code:zero_agent/core/agent.py,code:zero_agent/core/loop.py | A:HookSystem | S:单个回调或插件加载失败会被隔离，不阻断其他回调或插件
+interfaces.py[CG4T]: F:定义 LLM 客户端与工具分发器的结构化类型协议 | R:code:zero_agent/core/loop.py,code:zero_agent/core/handler.py | A:LLMClient,ToolDispatcher | S:-
+interruption.py[CR7T]: F:将 LLM 响应中的截断、中断与流异常归类并提供重试提示 | R:code:zero_agent/core/completion_gate.py,code:zero_agent/core/loop.py | A:classify_interruption | S:被判为中断的响应不得分发其中可能不完整的工具调用参数
+localization.py[CL6S]: F:提供中文与英文提示词本地化、回退及星期和任务控制文本 | R:code:zero_agent/core/agent.py,code:zero_agent/core/config.py | A:PromptLocalizer | S:翻译使用静态消息 ID；缺失或不完整的目录回退到内建中文/英文消息
+loop.py[AW9L]: F:执行 Agent 主循环，协调 LLM 流式响应、工具调用、证据进展、生命周期钩子与终态 | R:code:zero_agent/core/agent.py,code:zero_agent/core/handler.py,code:zero_agent/core/types.py,code:zero_agent/llm/base.py | A:AgentLoop.run | S:无效或截断工具参数不执行；完成终态要求 Handler 提供证书；连续三轮没有新证据即以预算耗尽结束
+types.py[CG8S]: F:定义任务模式、终态、证据账本、步骤结果及可恢复任务状态数据契约 | R:code:zero_agent/core/agent.py,code:zero_agent/core/completion.py,code:zero_agent/core/handler.py,code:zero_agent/context/types.py | A:TaskContract,EvidenceLedger,PendingTaskState,RuntimeContext | S:OPEN、PLAN、EXECUTING 是不同任务模式；暂停后 RuntimeContext 随 pending task 保留
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/evaluation/===
+__init__.py[TQ3T]: F:标识 ZeroAgent 评估工具包 | R:code:zero_agent/evaluation/evidence.py,code:zero_agent/evaluation/memory.py | A:- | S:-
+evidence.py[TQ7T]: F:验证历史工具结果的明确关联与成功状态，并提取评估可观察结果 | R:code:zero_agent/evaluation/memory.py | A:historical_tool_evidence,observed_tool_results,trace_context | S:只把按 tool_call_id 关联且明确成功的工具结果作为历史行动证据；口头自称成功不算证据
+memory.py[TQ9L]: F:在隔离会话中评估长期记忆更新与检索，通过词面指标或独立裁判生成回执和报告 | R:code:zero_agent/evaluation/evidence.py,code:zero_agent/core/agent.py,code:zero_agent/memory/manager.py | A:load_cases,run_campaign,validate_dataset | S:各历史阶段和答题阶段使用新 Agent 与工作区，仅共享用例记忆目录；裁判须使用不同模型，评估回执记录输入哈希与证据文件校验和
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/frontends/===
+__init__.py[EU3T]: F:标识 ZeroAgent 前端入口模块包 | R:code:zero_agent/frontends/acp_bridge.py | A:- | S:-
+acp_bridge.py[EI8L]: F:实现 ACP JSON-RPC 会话与任务入口，并将 session ID 和工作区绑定为 local_v1 身份 | R:code:zero_agent/runners/agent_runner.py,code:zero_agent/core/agent.py,code:zero_agent/context/runtime.py | A:ZeroAgentAcpBridge.new_agent,handle_session_new,handle_session_prompt | S:缺少稳定 session_id 或 cwd 时拒绝创建 local_v1 Agent；stdout 仅承载 ACP 协议
+at_complete.py[EU7M]: F:为工作区文件提供@路径与名称补全 | R:- | A:按根目录缓存文件路径并作模糊排序，路径样式输入直接补全目录 | S:单根扫描达到5万条即停止；补全只匹配路径，不读取文件内容
+channel_onboarding.py[IN7M]: F:管理微信扫码登录二维码与短期会话 | R:code:zero_agent/frontends/desktop/static/app.js | A:创建和轮询扫码会话，处理确认、过期、失败与取消状态 | S:只有扫码确认后才保存令牌；公开会话快照会剔除凭据字段
+conductor.html[EU6L]: F:提供多代理编排工作台界面 | R:code:zero_agent/frontends/conductor.py | A:展示子代理、审批、聊天和日志，通过WebSocket接收更新并重连 | S:批准审批会向后端发起子代理启动请求；聊天输入限制为10000字符
+conductor.py[EW7M]: F:提供本地多代理编排API与WebSocket服务 | R:code:zero_agent/frontends/conductor.html | A:管理子代理状态、任务文件、干预与中止信号，并广播实时事件 | S:服务默认仅绑定127.0.0.1:8900；子代理干预与中止通过信号文件传递
+desktop_bridge.py[EN9L]: F:提供桌面本地 HTTP/WebSocket 桥接和持久会话，并为任务绑定会话身份与项目路径 | R:code:zero_agent/frontends/session_store.py,code:zero_agent/core/agent.py,code:zero_agent/context/runtime.py,code:zero_agent/context/admin.py | A:AgentManager.make_agent,submit_prompt | S:本地上下文身份由持久桌面 session ID 与会话 cwd 绑定；非公开路由仍要求桥接令牌
+desktop_commands.py[AW8L]: F:处理桌面端斜杠命令、渠道和后台服务生命周期 | R:code:zero_agent/frontends/desktop_bridge.py | A:生成中英提示词、列举调度任务、发现渠道进程并提供启动停止入口 | S:停止渠道前会复核脚本路径与进程创建时间，并对匹配进程树先终止、再强制结束
+hub.pyw[EU5M]: F:提供反思任务与机器人服务的Tk启动器 | R:- | A:发现服务、启动停止子进程、显示输出并每秒刷新状态 | S:单实例锁绑定本机TCP端口19735；每项服务输出缓冲最多500行
+launcher.py[EU5T]: F:用pywebview启动共享Web前端 | R:code:zero_agent/frontends/desktop_bridge.py,code:zero_agent/frontends/desktop/static/za-web.js | A:探测默认桥接地址，未就绪时启动后台服务并创建桌面窗口 | S:默认仅连接127.0.0.1:14168，可由BRIDGE_HOST和BRIDGE_PORT覆盖
+plan_command.py[DW7M]: F:创建带安全标题的计划工作区 | R:code:zero_agent/frontends/plan_state.py,code:zero_agent/frontends/desktop_bridge.py | A:将任务转为有界ASCII目录名并写入待规划plan.md | S:目录使用mkdir(exist_ok=False)分配唯一后缀；写文件失败时只删除本次创建的目录
+plan_state.py[KW7S]: F:解析计划清单并读取当前计划步骤 | R:code:zero_agent/frontends/plan_command.py,code:zero_agent/frontends/desktop/static/app.js | A:识别多种Markdown勾选格式，汇总完成度并从PLAN任务契约解析计划路径 | S:仅当当前TaskContract处于PLAN模式且文件存在非空时才返回活动计划路径
+session_store.py[PD9L]: F:以SQLite保存桌面会话、消息、分组和活动会话状态 | R:code:zero_agent/frontends/desktop_bridge.py | A:提供并发安全的读写、会话同步、消息追加、分组维护与状态恢复 | S:数据库schema版本必须为1，缺表、缺列或版本不符会拒绝启动；消息按会话级联删除，分组删除将会话group_id置空
+stapp.py[EU5S]: F:提供 Streamlit 聊天界面、工作区文件呈现及浏览器会话级 local_v1 身份绑定 | R:code:zero_agent/core/agent.py,code:zero_agent/context/runtime.py | A:main | S:上下文 host session key 存入 Streamlit session_state 并跨 rerun 复用；下载文件须位于 Agent 工作区
+tui.py[EU7L]: F:提供 Textual 终端聊天、命令面板、文件树和计划侧栏，并按工作区绑定 local_v1 会话 | R:code:zero_agent/frontends/plan_state.py,code:zero_agent/frontends/worldline.py,code:zero_agent/frontends/commands/slash_commands.py,code:zero_agent/context/runtime.py | A:ZeroAgentTUI.on_mount,local_runtime_context | S:计划就绪不会自动执行；执行仍需用户调用 /plan execute
+worldline.py[KD9L]: F:保存会话代码检查点并编排历史与文件回退 | R:code:zero_agent/frontends/desktop_bridge.py,code:zero_agent/llm/sessions.py | A:使用内容寻址压缩blob、基线和树形节点，提供树投影、对话重建及both/conv/code恢复 | S:文件回退只改store追踪过的路径；reconcile必须输入日志解析出的全量历史，不能使用已压缩的内存历史
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/frontends/commands/===
+__init__.py[CL4T]: F:汇总斜杠命令模块的公共导出 | R:code:zero_agent/frontends/commands/slash_commands.py | A:集中暴露命令定义与注册入口 | S:-
+_builtins.py[EU6S]: F:提供帮助、会话和工具类内置命令 | R:code:zero_agent/frontends/commands/slash_commands.py | A:注册help、exit、new、save、llms、resume、stop、tools及会话属性命令 | S:save快照写入用户主目录下的.zero_agent/snapshots
+export_cmd.py[EU5S]: F:将当前对话导出为Markdown | R:code:zero_agent/frontends/commands/slash_commands.py | A:整理消息、多模态文本和工具调用，裁剪过长内容并写入指定路径 | S:未指定路径时导出到临时目录
+model_cmd.py[IN6M]: F:运行时查询并切换模型与推理参数 | R:code:zero_agent/frontends/commands/slash_commands.py | A:支持列举模型、设置模型与effort、temperature；模型列表最多返回50项 | S:模型目录请求携带Bearer密钥，超时10秒；设置只作用于当前进程
+review_cmd.py[EU5T]: F:使用语言对应的SOP提示词发起代码审查 | R:code:zero_agent/frontends/commands/slash_commands.py | A:读取审查规则并附带原则文件；无输入时审查未提交diff | S:缺少语言SOP时回退到内置提示词
+scheduler_cmd.py[AW7M]: F:查询、启动和停止反思及机器人服务 | R:code:zero_agent/frontends/commands/slash_commands.py | A:发现服务进程并缓存状态，启动子进程并支持停止其进程树 | S:进程发现结果缓存2秒；停止时先terminate进程树，再按需kill
+slash_commands.py[AW8L]: F:注册、分派并执行斜杠命令 | R:code:zero_agent/frontends/commands/__init__.py,code:zero_agent/frontends/commands/_builtins.py | A:懒加载内置与扩展命令，统一处理快照恢复、配置更新、目标及计划流程 | S:计划执行需通过核心契约、证书与清单状态校验；pending计划不能按ready计划执行
+workspace_cmd.py[AW7L]: F:管理临时工作区目录链接、会话映射及安全清理，不承担项目身份或记忆职责 | R:code:zero_agent/frontends/commands/slash_commands.py,code:zero_agent/core/config.py | A:prepare,remove,cleanup,session_ws_set,session_ws_get,registry_list | S:工作区仅选择任务目录；清理前用 is_dir_link 验证链接身份，只移除链接本身而不递归删除目标
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/frontends/desktop/===
+.gitignore[FV2T]: F:排除桌面端生成物与构建缓存 | R:- | A:忽略Rust target、生成文件及node_modules | S:-
+package-lock.json[FV3M]: F:锁定桌面端Node开发依赖 | R:code:zero_agent/frontends/desktop/package.json | A:记录Tauri CLI依赖解析结果 | S:-
+package.json[FV3T]: F:声明桌面端Tauri CLI开发依赖 | R:code:zero_agent/frontends/desktop/src-tauri/Cargo.toml | A:提供tauri命令脚本并依赖Tauri 2 CLI | S:-
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/frontends/desktop/src-tauri/===
+Cargo.lock[FV3L]: F:锁定桌面端Rust依赖版本 | R:code:zero_agent/frontends/desktop/src-tauri/Cargo.toml | A:固定Tauri宿主及插件依赖解析结果 | S:-
+Cargo.toml[FV4T]: F:声明Tauri桌面宿主及Rust依赖 | R:code:zero_agent/frontends/desktop/src-tauri/src/lib.rs | A:使用Tauri 2、单实例插件、Serde、dirs、rand与urlencoding | S:-
+build.rs[FV2T]: F:调用Tauri构建脚本 | R:code:zero_agent/frontends/desktop/src-tauri/Cargo.toml | A:交由tauri-build生成桌面应用构建资源 | S:-
+tauri.conf.json[FV6T]: F:配置桌面应用窗口与安装包目标 | R:code:zero_agent/frontends/desktop/src-tauri/capabilities/default.json | A:定义加载页和设置页窗口，打包NSIS与DMG安装包 | S:CSP配置为null，WebView未启用内容安全策略
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/frontends/desktop/src-tauri/capabilities/===
+default.json[FS5T]: F:定义主窗口与设置窗口的WebView能力 | R:code:zero_agent/frontends/desktop/src-tauri/tauri.conf.json | A:授予默认核心、窗口显示隐藏聚焦关闭及WebView能力 | S:-
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/frontends/desktop/src-tauri/src/===
+lib.rs[ER8L]: F:启动桌面窗口并管理本地Python桥接服务 | R:code:zero_agent/frontends/desktop/static/fallback.html,code:zero_agent/frontends/desktop/src-tauri/tauri.conf.json | A:发现项目与Python环境，生成或读取桥接令牌，认证探测服务并管理本应用启动的子进程 | S:令牌来自环境变量或随机32字节十六进制值；复用监听器前必须以当前令牌认证，退出时只终止本实例启动的桥接进程
+main.rs[ER3T]: F:调用桌面应用库启动Tauri宿主 | R:code:zero_agent/frontends/desktop/src-tauri/src/lib.rs | A:将进程入口交给zero_agent_desktop_lib::run | S:-
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/frontends/desktop/static/===
+app.js[EU8L]: F:管理桌面会话、消息流、桥接状态与渠道设置 | R:code:zero_agent/frontends/desktop/src-tauri/src/lib.rs,code:zero_agent/frontends/commands/slash_commands.py,code:zero_agent/frontends/channel_onboarding.py | A:协调本地会话、消息轮询与流式状态、代理和计划操作、附件发送及渠道配置 | S:每个会话独立跟踪流状态并用消息ID和轮次令牌合并轮询与推送结果；消息轮询间隔为500毫秒
+fallback.html[EU5T]: F:在后端启动失败时收集Python与项目目录配置 | R:code:zero_agent/frontends/desktop/src-tauri/src/lib.rs | A:调用宿主命令启动桥接服务，成功后显示主窗口并隐藏设置窗口 | S:-
+index.html[EU6M]: F:定义桌面端会话聊天主界面结构 | R:code:zero_agent/frontends/desktop/static/app.js | A:提供会话抽屉、消息区、输入区、设置及弹窗容器 | S:-
+loading.html[EU2T]: F:展示桌面应用桥接启动等待界面 | R:code:zero_agent/frontends/desktop/static/app.js | A:在启动期间显示加载状态 | S:-
+styles.css[EU6L]: F:定义桌面聊天界面的颜色、布局与组件样式 | R:code:zero_agent/frontends/desktop/static/index.html | A:通过亮暗主题变量和分区样式覆盖抽屉、会话列表、消息、计划卡、输入框及弹窗 | S:-
+za-web.js[EN8M]: F:为WebView提供桌面桥接HTTP与事件适配器 | R:code:zero_agent/frontends/desktop_bridge.py,code:zero_agent/frontends/desktop/static/app.js | A:把前端RPC映射到HTTP路由，并通过WebSocket传递桥接和会话状态事件 | S:启动令牌从URL片段读取后立即清除地址栏；HTTP使用Bearer令牌，WebSocket令牌放在查询参数
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/frontends/desktop/static/vendor/katex/===
+LICENSE[SV3T]: F:记录随包KaTeX组件的MIT许可条款 | R:- | A:保留版权声明与许可条件 | S:分发软件或其重要部分时必须附带版权声明和许可文本
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/llm/===
+__init__.py[CL1T]: F:标记ZeroAgent LLM集成包 | R:- | A:无包级公开逻辑 | S:-
+base.py[CL8M]: F:统一封装模型响应、工具调用、停止原因与用量指标 | R:code:zero_agent/llm/sessions.py,code:zero_agent/llm/sse_parsers.py,code:zero_agent/llm/text_tool_client.py | A:提供跨供应商MockResponse及缓存和令牌用量字段归一化 | S:max_tokens、中断、取消、内容过滤和错误等受保护停止原因不会在合并文本工具响应时被tool_use覆盖
+converters.py[IN7M]: F:转换Claude、OpenAI Chat与Responses消息及工具格式 | R:code:zero_agent/llm/sessions.py,code:zero_agent/llm/sse_parsers.py | A:映射文本、图像、thinking、tool_use和tool_result结构 | S:-
+factory.py[IN8M]: F:按配置创建模型会话及回退包装 | R:code:zero_agent/llm/sessions.py,code:zero_agent/llm/failover.py,code:zero_agent/llm/text_tool_client.py | A:校验配置后建立主后端、可选故障转移列表与文本工具协议包装 | S:创建单后端会话前必须同时提供api_key和model
+failover.py[IR8L]: F:在模型后端间切换并恢复主后端 | R:code:zero_agent/llm/sessions.py,code:zero_agent/llm/base.py | A:异常时按优先级尝试备用后端，迁移历史并定期探测主后端健康 | S:已输出部分内容的中断轮不会重放到备用端，而是切换后端供下一轮使用；主后端恢复后按健康检查间隔自动切回
+sessions.py[IN9L]: F:管理LiteLLM请求、对话历史、上下文和用量 | R:code:zero_agent/llm/base.py,code:zero_agent/llm/converters.py,code:zero_agent/llm/sse_parsers.py,code:zero_agent/llm/failover.py | A:处理流式或同步聊天、视觉、供应商消息格式、历史压缩、缓存标记、日志及Langfuse追踪 | S:中断或不完整响应只显示给调用方，不写入assistant历史，避免下轮重放部分工具JSON；请求和错误日志会脱敏API密钥
+sse_parsers.py[IN8M]: F:解析Anthropic与OpenAI Responses及Chat流式事件 | R:code:zero_agent/llm/base.py,code:zero_agent/llm/sessions.py | A:逐块输出文本并聚合thinking、工具参数和结束状态 | S:Claude流未收到message_stop或stop_reason时会附加中断标记；非对象或无法解析的工具参数保留为malformed对象
+text_tool_client.py[IN8L]: F:通过文本标签协议模拟模型工具调用 | R:code:zero_agent/llm/base.py,code:zero_agent/llm/factory.py | A:向底层会话注入工具描述，将thinking、summary和tool_use回复解析为统一响应 | S:工具参数必须解析为JSON对象；解析错误会生成bad_json调用并清空工具描述缓存
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/memory/===
+__init__.py[CL1T]: F:标记ZeroAgent记忆管理包 | R:- | A:无包级公开逻辑 | S:-
+compress_session.py[PD7M]: F:压缩会话响应日志并归档提取的历史 | R:code:zero_agent/memory/manager.py,code:zero_agent/core/config.py | A:按显式参数或共享配置解析会话源与L4归档目录，批量压缩并合并历史块 | S:默认批处理为dry-run；传入--run后会删除已处理源文件及非recent的跳过源文件
+manager.py[CD6S]: F:初始化分层文件记忆并构造记忆提示上下文 | R:code:zero_agent/llm/sessions.py | A:维护L1索引、L2事实、L3 SOP和L4会话归档目录，复制SOP种子并提供查找 | S:初始化只在目标缺失时创建或复制文件，不覆盖现有记忆；SOP种子目录缺失会抛ConfigError
+service.py[DB8L]: F:基于来源回执与授权范围验证记忆操作，并原子写入带修订的类型化记忆对象 | R:code:zero_agent/context/sources.py,code:zero_agent/context/types.py,code:zero_agent/context/store.py | A:MemoryService.update,_prepare_preference,_prepare_object,_prepare_retraction | S:来源存在或工具成功不证明任意结论；未验证候选不默认注入；同键无明确替代时冲突双方退出默认注入；retract/purge 需精确 revision 和用户来源
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/plugins/conductor_im_plugins/===
+_TEMPLATE.py[IE4T]: F:定义Conductor即时通信插件模板契约 | R:code:zero_agent/frontends/conductor.py | A:规定notify推送、廉价check轮询、间隔及采集代理提示词 | S:check不得调用LLM，PROMPT应限制为有界消息扫描
+_email_example.py[IE4T]: F:示例实现SMTP邮件通知与Gmail未读检查 | R:code:zero_agent/plugins/conductor_im_plugins/_TEMPLATE.py | A:通过STARTTLS发送纯文本通知，并可调用ezgmail.unread | S:邮件通知异常返回False；检查端缺少ezgmail或调用失败也返回False
+_lark_example.py[IE6S]: F:示例实现飞书卡片Webhook通知与消息轮询 | R:code:zero_agent/plugins/conductor_im_plugins/_TEMPLATE.py | A:可选签名后发送交互卡片，并用lark-cli查询配置会话的近期消息 | S:check以shell=True执行命令，chat id来自插件本地配置；配置值进入命令前须做安全转义
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/plugins/===
+langfuse_tracing.py[IO7L]: F:为Agent、轮次、工具与模型生成记录Langfuse观察 | R:code:zero_agent/core/hooks.py,code:zero_agent/llm/sessions.py | A:把生命周期钩子组织为Agent根观察、轮次span、工具子观察及generation，并归一化令牌用量 | S:Langfuse观察的创建、更新、结束与flush失败只记日志并吞掉，不中断Agent执行
+worldline_tracking.py[PD7S]: F:将文件编辑前状态与轮次完成信息接入Worldline回退存储 | R:code:zero_agent/frontends/worldline.py,code:zero_agent/core/hooks.py | A:在file_write和file_patch前记录已有文件，并在轮次结束提交摘要与历史检查点 | S:必须由配置enable_worldline或ZA_ENABLE_WORLDLINE=1显式启用，默认不会写入回退数据
+project_mode.py[EB7S]: F:提供旧式 Project Mode 的 agent_before 注入钩子，按进程锚点读取项目记忆指针 | R:code:zero_agent/core/hooks.py,code:zero_agent/core/agent.py | A:register,_on_agent_before,_build_injection | S:该插件未被 Agent 自动注册且依赖 workspace/projects 锚点与 project_memory.md，和 local_v1 ContextService 项目记忆不兼容；不得作为新运行时启用
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/reflect/===
+__init__.py[RW1T]: F:说明Reflect模块的check、init与on_done协议 | R:code:zero_agent/runners/reflect_runner.py | A:约定以INTERVAL和ONCE控制轮询及单次运行 | S:-
+agent_team_worker.py[IE6T]: F:轮询协作BBS并在出现新帖时唤醒worker接单 | R:code:zero_agent/reflect/agent_team_worker.py,code:zero_agent/runners/reflect_runner.py | A:用X-API-Key请求最近帖子，按最大帖子ID去重并生成协作执行提示 | S:连续10次BBS请求异常后返回/exit；成功请求会清零失败计数
+autonomous.py[AW4T]: F:每30分钟生成一次自主任务唤醒提示 | R:code:zero_agent/runners/reflect_runner.py | A:Reflect调度器调用check时始终返回要求阅读自主SOP并执行自动任务的提示 | S:-
+checklist_master.py[AW6T]: F:周期唤醒清单主控以推进任务或验收BBS回帖 | R:code:zero_agent/utils/checklist_helper.py,code:zero_agent/runners/reflect_runner.py | A:读取state.json并按checklist或mapreduce状态生成派发、继续或验收提示 | S:mapreduce模式只负责派发、轮询和验收，不得自行执行子任务
+goal_mode.py[AW7S]: F:按预算与最大轮数持续唤醒Goal Mode并在耗尽时收口 | R:code:zero_agent/runners/reflect_runner.py | A:从GOAL_STATE指定的JSON状态计算剩余预算、递增轮次并写入wrapping_up或done_budget状态 | S:预算耗尽或turn超过max_turns时先持久化wrapping_up，再发出最后收口提示
+scheduler.py[RW8M]: F:按JSON任务计划、cron、冷却期及延迟窗口触发定时任务 | R:code:zero_agent/core/config.py,code:zero_agent/memory/compress_session.py | A:每次检查先按共享配置尝试L4会话归档，再从sche_tasks目录选择首个到期任务并生成报告路径 | S:每12小时以dry_run=False调用batch_process归档会话；单实例由默认45762回环端口绑定锁保护
+subagent.py[RW7M]: F:以受限并发子进程运行Agent任务并收集文件结果 | R:code:zero_agent/runners/cli.py,code:zero_agent/utils/subagent_registry.py | A:提交任务目录中的input.txt，通过--task启动子进程，并汇总output.txt或兼容的output.md | S:子进程退出码为0仍须产出非空结果才标记done；启动时设置EXIT_AFTER_ROUND_ENV=1
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/runners/===
+__init__.py[RW1T]: F:标记CLI、task与reflect运行模式的runner包 | R:code:zero_agent/runners/cli.py,code:zero_agent/runners/reflect_runner.py | A:- | S:-
+agent_runner.py[AW8L]: F:为前端提供串行任务队列、流式输出、终态、取消、历史与后端管理接口 | R:code:zero_agent/core/agent.py,code:zero_agent/core/types.py,code:zero_agent/context/types.py | A:包装ZeroAgent生成器run并提供稳定queue消息和runtime属性适配，可将可选RuntimeContext传入任务执行 | S:后台worker一次只执行一个排队任务；取消会关闭生成器并返回CANCELLED终态
+cli.py[EU8L]: F:提供 CLI 交互、任务与上下文管理命令，并为 Agent 任务创建绑定 principal、会话和工作区的 RuntimeContext | R:code:zero_agent/core/agent.py,code:zero_agent/runners/agent_runner.py,code:zero_agent/context/cli.py,code:zero_agent/context/runtime.py | A:main,_build_parser,_run_task_mode_impl | S:CLI 会话键按历史、任务、函数或 REPL 工作区生成；context 子命令走共享管理服务；local_v1 没有 legacy 配置回退
+reflect_runner.py[RW7M]: F:轮询用户Reflect模块并执行其返回的自动化任务 | R:code:zero_agent/core/types.py,code:zero_agent/runners/agent_runner.py | A:加载并热重载模块，调用init、check、on_done，记录任务日志并处理周期休眠与退出 | S:check返回None时休眠，返回/exit时退出；ONCE为真时仅在一个任务执行后退出
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/tools/===
+__init__.py[CG1T]: F:标记工具定义与内置工具实现包 | R:code:zero_agent/tools/registry.py | A:- | S:-
+registry.py[CG7M]: F:声明工具参数、证据契约和技能动作元数据，加载内置工具并生成多供应商工具 Schema | R:code:zero_agent/tools/builtin/code.py,code:zero_agent/core/handler.py,code:zero_agent/tools/builtin/context.py,code:zero_agent/tools/builtin/skill.py,code:zero_agent/skills/gate.py | A:ToolDefinition,ToolRegistry.with_builtins,generate_openai_schema,generate_claude_schema | S:重复名称注册会覆盖旧定义；上下文和技能路由模块必须加载，受保护写入、执行或浏览器工具缺少 skill_action 时拒绝构建注册表
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/tools/builtin/===
+__init__.py[CG3T]: F:列出内置工具、内部控制工具与条件视觉能力 | R:code:zero_agent/tools/registry.py | A:区分由with_builtins注册的工具与由Handler内部处理的no_tool和bad_json | S:-
+code.py[IR8L]: F:校验并执行 Python、Shell 或 PowerShell 子进程，支持工作区脚本路径、超时和流式输出 | R:code:zero_agent/tools/registry.py,code:zero_agent/core/handler.py,code:zero_agent/utils/files.py,code:zero_agent/skills/gate.py | A:code_run,register_code_tools | S:script_path 必须解析到工作区内普通文件且与 script 互斥；ZeroAgent 在执行前要求完成 code.execute 技能门禁；通用执行器仍拥有宿主权限
+control.py[ER7T]: F:声明 complete_task 完成工具及其答案和证据编号参数，并登记 task.complete 技能门禁 | R:code:zero_agent/core/handler.py,code:zero_agent/core/types.py,code:zero_agent/skills/gate.py | A:register_control_tools | S:注册 handler 本身为空操作，状态转换和证据校验由 BaseHandler 执行；complete_task 调用前会经过任务完成技能门禁
+file.py[CD8L]: F:提供工作区文件读、写和精细 patch，并将 local_v1 受管别名映射到授权逻辑上下文对象 | R:code:zero_agent/context/service.py,code:zero_agent/context/migration.py,code:zero_agent/utils/files.py,code:zero_agent/core/handler.py,code:zero_agent/skills/gate.py | A:register_file_tools,_resolve_path,_managed_path_kind,_read_managed_legacy_alias,_make_file_read_handler,_make_file_write_handler | S:受管上下文只读且写入返回 MEMORY_WRITE_REQUIRES_SERVICE；file_patch 要求旧文本唯一匹配；路径保护同时检查真实路径和符号链接
+memory.py[PD7S]: F:注册本轮工作便签更新和长期记忆兼容入口，并将 local_v1 长期更新转给 memory_update 服务 | R:code:zero_agent/core/handler.py,code:zero_agent/context/sources.py,code:zero_agent/memory/service.py,code:zero_agent/tools/builtin/context.py | A:register_memory_tools,update_working_checkpoint,start_long_term_update | S:local_v1 下旧长期记忆入口不读写文件并返回 MEMORY_UPDATE_REQUIRES_SERVICE
+user.py[EU6S]: F:注册ask_user工具并将提问映射为等待用户输入的任务结果 | R:code:zero_agent/core/types.py,code:zero_agent/tools/registry.py | A:以问题及可选项构造HUMAN_INTERVENTION中断结果 | S:handler返回WAIT_FOR_USER动作及human_intervention原因，不会自行等待或读取用户回复
+vision.py[IA7S]: F:按当前或显式视觉后端路由图片理解请求，并将结果返回给 Agent | R:code:zero_agent/core/config.py,code:zero_agent/llm/sessions.py,code:zero_agent/core/handler.py,code:zero_agent/skills/gate.py | A:register_vision_tools,_active_backend_name,_handler | S:仅视觉能力后端可执行；未指定后端且当前后端不支持视觉时按配置顺序选择首个支持者
+web.py[IN8L]: F:通过浏览器扩展提供标签扫描、页面 JavaScript 操作和 CDP 截图工具 | R:code:zero_agent/tools/registry.py,code:zero_agent/frontends/desktop_bridge.py,code:zero_agent/browser/tm_webdriver.py,code:zero_agent/core/handler.py,code:zero_agent/skills/gate.py | A:web_scan,web_execute_js,web_screenshot | S:所有注册的浏览器操作都声明 browser.access 门禁；工具本身不会授予宿主更高权限
+context.py[EB8M]: F:注册授权范围内的逻辑上下文读取、列表、默认受限检索、来源回执与记忆更新工具 | R:code:zero_agent/context/service.py,code:zero_agent/memory/service.py,code:zero_agent/core/handler.py,code:zero_agent/tools/registry.py,code:zero_agent/skills/gate.py | A:register_context_tools,_context_read,_context_search,_memory_update | S:memory_update 绑定 memory.write 门禁；context_search 无 scope 时只查当前用户和项目，显式 scope 才能扩域；读取游标固定 URI、修订和摘要
+skill.py[EE7T]: F:注册任务 SOP 路由与固定版本技能的加载和执行模型入口 | R:code:zero_agent/skills/gate.py,code:zero_agent/skills/runtime.py,code:zero_agent/skills/manifest.py,code:zero_agent/tools/registry.py | A:register_skill_tools,_skill_route,_skill_run | S:路由证据必须引用当前请求原文；只有固定 URI/revision 加载成功才解锁关联操作，执行证据另由真实入口结果判定
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/utils/===
+__init__.py[CG1T]: F:标记文本、文件操作等通用工具包 | R:- | A:- | S:-
+adb_ui.py[IH7M]: F:通过ADB读取Android界面层级并执行点击、滑动和截图 | R:code:zero_agent/utils/ui_detect.py | A:优先用uiautomator2导出UI XML，回退原生uiautomator并解析为带文本、类型和中心坐标的节点 | S:原生dump要求设备空闲并将XML落到模块目录ui_mt.xml；uiautomator2失败后才回退原生dump
+autonomous_operation_helper.py[PW6S]: F:读取自主任务清单与历史并归档完成报告 | R:- | A:报告按R编号移动到autonomous_reports并把带日期的历史行前置，随后返回由Agent修改TODO的指令 | S:若写入history失败，会尝试将已移动报告回滚到原路径；该模块不直接修改TODO.txt
+checklist_helper.py[PW7M]: F:以state.json管理串行清单或基于BBS的MapReduce任务 | R:code:zero_agent/reflect/checklist_master.py,code:zero_agent/reflect/agent_team_worker.py,code:zero_agent/runners/cli.py | A:支持任务增删标记、关闭条件、启动外部BBS及反射master和worker进程 | S:workers为0时不启动BBS；workers大于0的MapReduce模式依赖外部agent_bbs.py资产存在
+configure.py[FC7M]: F:提供交互式或环境变量驱动的LLM配置向导并写入项目配置 | R:code:zero_agent/core/config.py | A:选择提供商、模型、密钥与工作目录后生成config.yaml | S:API密钥以明文写入YAML；覆盖现有config.yaml前先重命名为config.yaml.bak
+cost_tracker.py[MO6S]: F:按线程汇总LLM请求、输入输出令牌与缓存用量 | R:code:zero_agent/core/hooks.py,code:zero_agent/llm/base.py | A:订阅llm_after事件更新令牌统计，并可从子Agent日志恢复输出及缓存计数 | S:有缓存指标时命中率分母为cache_read+cache_miss；旧格式才用input+cache_read
+files.py[CD6S]: F:提供工作区路径解析、路径包含判断、信号文件消费和文件片段引用展开 | R:code:zero_agent/tools/builtin/code.py,code:zero_agent/tools/builtin/file.py,code:zero_agent/runners/cli.py,code:zero_agent/context/config.py | A:resolve_workspace_path,path_is_within,paths_overlap,consume_file,expand_file_refs | S:resolve_workspace_path 经 Path.resolve 与 relative_to 阻止符号链接或 .. 逃逸；consume_file 先读取再删除并非并发原子领取
+keychain.py[PS7S]: F:以SecretStr接口持久化并访问本地凭据 | R:code:zero_agent/plugins/langfuse_tracing.py,code:zero_agent/core/config.py | A:支持凭据读写删除与隐藏repr，默认保存到用户目录的加密文件 | S:文件内容使用基于用户名固定哈希的重复XOR混淆，不是强加密；SecretStr.use()返回明文
+ljqctrl.py[IH7S]: F:提供Windows前台鼠标键盘、窗口截图及图像模板匹配操作 | R:code:zero_agent/utils/macljqctrl.py,code:zero_agent/utils/ljqctrl_bg.py | A:把物理屏幕坐标按dpi_scale换算为Windows逻辑坐标并调用win32api | S:禁止在该工具链导入pyautogui，否则会污染win32api行为
+ljqctrl_bg.py[IH7M]: F:提供不激活窗口的Windows后台截图与鼠标键盘消息操作 | R:code:zero_agent/utils/ljqctrl.py | A:按客户区坐标定位子窗口并投递消息，可用WGC或PrintWindow截图核对变化 | S:PostMessage操作仅为best-effort且不保证生效；默认后台点击后可通过截图差异核验
+macljqctrl.py[IH8L]: F:以Quartz、screencapture和辅助功能实现macOS桌面控制 | R:code:zero_agent/utils/ljqctrl.py,code:zero_agent/utils/ui_detect.py | A:提供物理坐标鼠标键盘、屏幕窗口截图、模板匹配和AX控件枚举 | S:接口坐标统一为物理像素并按dpi_scale转逻辑点；AX操作需要辅助功能权限，截图需要屏幕录制权限
+ocr_utils.py[KA7S]: F:通过RapidOCR识别图片、屏幕或Windows窗口中的文本及位置 | R:code:zero_agent/utils/ui_detect.py | A:复用延迟创建的OCR引擎并返回全文、行文本和置信度框 | S:增强默认关闭，因为三倍对比度可能损害清晰文字；ocr_window只支持Windows
+procmem_scanner.py[IS6S]: F:在Windows目标进程的可读内存中用YARA规则搜索字节或文本 | R:- | A:枚举已提交内存区域并返回命中地址及周边数据或LLM上下文 | S:OpenProcess仅请求查询与读取权限，并以ReadProcessMemory读取，不写入目标进程内存
+subagent_registry.py[PR6T]: F:通过追加式JSONL事件文件同步桌面会话与子Agent进程状态 | R:code:zero_agent/runners/cli.py,code:zero_agent/reflect/subagent.py | A:追加子进程事件、按字节偏移读取增量记录并查询本机PID | S:读取器只消费换行完整的JSON记录并把offset保留在已消费记录边界
+text.py[CG5T]: F:提供首尾截断、紧凑异常定位与JSON默认转换 | R:code:zero_agent/tools/builtin/code.py,code:zero_agent/tools/builtin/web.py | A:统一限制展示文本长度并将set转换为list、其他未知对象转换为字符串 | S:format_error只报告traceback最后一帧，不提供完整异常堆栈
+ui_detect.py[KH7S]: F:融合YOLO图标检测与RapidOCR文本框生成带标签的UI元素列表 | R:code:zero_agent/utils/adb_ui.py,code:zero_agent/utils/ocr_utils.py,code:zero_agent/utils/macljqctrl.py | A:优先请求回环YOLO守护进程并回退本地推理，支持空间匹配或拼接裁剪OCR | S:_iou实际用交集面积除以第二个OCR框面积而非并集；框坐标对应输入截图像素
+memory_stats.py[CD5T]: F:按 basename 汇总包含 memory 的路径访问次数与最后日期到本地 JSON | R:- | A:log_memory_access | S:旧式文件访问统计，未被 local_v1 ContextService 引用；非 memory 路径和写入失败均静默忽略
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/utils/skill_search/===
+__init__.py[IL3T]: F:导出技能检索引擎的数据类型、搜索、统计和环境检测API | R:code:zero_agent/utils/skill_search/engine.py | A:将SkillIndex、SearchResult与公开服务函数暴露为包接口 | S:-
+__main__.py[EU6S]: F:提供技能检索CLI的查询、环境、统计及JSON输出模式 | R:code:zero_agent/utils/skill_search/engine.py | A:解析CLI参数并将搜索结果格式化为人读或结构化JSON | S:环境和统计子命令不要求搜索词；服务请求异常时以非零状态退出
+engine.py[IA7S]: F:检测运行环境并请求外部技能检索与统计服务 | R:code:zero_agent/utils/skill_search/__main__.py | A:归一化技能索引响应，并通过环境变量配置API地址与可选密钥 | S:搜索请求会发送查询及环境信息；默认API是明文HTTP地址，配置服务时须考虑数据暴露
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/assets/context/===
+always_rules.md[CS8S]: F:规定上下文数据可信度、偏好作用域、技能触发路由和受保护操作门禁规则 | R:code:zero_agent/context/assembly.py,code:zero_agent/context/service.py,code:zero_agent/memory/service.py,code:zero_agent/skills/gate.py,code:zero_agent/assets/context/builtin_catalog.yaml | A:ContextAssembler._load_required_rules,skill_route,skill_run | S:路由必须引用用户请求原文并覆盖全部匹配技能；命中触发规则而未路由或未加载精确修订时对应动作与任务完成会被拒绝；未触发操作规则的普通文本无需路由；未验证或冲突记忆不得作为事实默认注入
+builtin_catalog.yaml[FC8S]: F:登记发行 SOP 的来源 hash、分类、路由触发词、章节级要求映射及获准入口 | R:code:zero_agent/skills/manifest.py,code:zero_agent/skills/runtime.py,code:zero_agent/assets/memory_seed/sops/code_review_principles.md,code:zero_agent/assets/memory_seed/sops/skill_search.md,code:tests/test_skill_gate.py | A:load_builtin_catalog,VerifySkillCatalogBuildPy.run,SkillActionGate.route | S:每个打包 SOP 必须唯一登记且 hash、章节映射或获准入口无效时拒绝加载；全部条目必须有 trigger_terms，triggered_rule 不得为空；新增未登记来源或来源漂移会阻止清单加载和发行构建
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/context/===
+__init__.py[CG3T]: F:标记上下文包并公开核心对象、运行身份与授权读取服务 | R:code:zero_agent/context/service.py,code:zero_agent/context/types.py | A:ContextService,ContextObject,RuntimeContext | S:-
+admin.py[DI9L]: F:通过共享服务管理项目绑定、成员授权、会话绑定、bot 身份和一次性链接码 | R:code:zero_agent/context/local_store.py,code:zero_agent/context/types.py | A:ContextAdminService.create_project,rebind_project,grant_project,resolve_bot_principal,redeem_identity_link,revoke_identity_link | S:项目授权仅 owner 可操作并使用 revision CAS；bot principal 只由平台、bot 账号和已验证 sender 决定；链接码只存 hash、10 分钟过期、仅目标 bot 私聊一次性兑换，错目标累计尝试后失效；撤销链接不删除记忆
+assembly.py[DD8M]: F:把固定规则、无冲突偏好、当前项目概览、完整技能触发目录和工作便签装入有界提示块 | R:code:zero_agent/context/service.py,code:zero_agent/memory/service.py,code:zero_agent/assets/context/always_rules.md,code:zero_agent/assets/context/builtin_catalog.yaml,code:zero_agent/skills/gate.py,code:zero_agent/core/agent.py | A:ContextAssembler.build,_memory_objects,_skill_candidates,_candidate_block | S:预算按 UTF-8 字节计算；固定规则、完整技能目录或总预算放不下时抛出 ConfigError，不静默截断目录；只聚合当前用户与绑定项目的有效对象，stale/missing 摘要回落到正文
+cli.py[EU8M]: F:将项目身份、授权、迁移、校验、导出与资源导入命令路由到共享上下文服务 | R:code:zero_agent/context/admin.py,code:zero_agent/context/migration.py,code:zero_agent/context/resources.py,code:zero_agent/context/service.py | A:run_context_command,_export_visible_context,_resource_service | S:导出分页遍历全部授权对象；迁移 dry-run 不初始化目标，导出目标不得是符号链接
+config.py[FC8S]: F:定义唯一 local_v1 上下文模式、存储根、提示预算、搜索后端和技能能力配置 | R:code:zero_agent/core/config.py,code:zero_agent/context/runtime.py,code:zero_agent/utils/files.py | A:ContextConfig.__post_init__,ContextConfig.validate,context_from_mapping | S:legacy 模式以及 YAML 与环境变量冲突会拒绝启动；context.root 不得与 memory_dir、源码或测试目录重叠，路径包含关系统一由共享路径辅助函数判断
+errors.py[CR4T]: F:定义带稳定错误码的上下文异常，并接入 ZeroAgentError 异常层级 | R:code:zero_agent/context/service.py,code:zero_agent/context/local_store.py,code:zero_agent/tools/builtin/context.py,code:zero_agent/core/exceptions.py | A:ContextError,ContextConflictError | S:ContextError 继承 ZeroAgentError 并保留 code；冲突异常固定 REVISION_CONFLICT
+local_store.py[PD9L]: F:以 SQLite manifest、不可变内容修订和 CAS 指针提供本地 ContextStore 持久化 | R:code:zero_agent/context/types.py,code:zero_agent/context/admin.py,code:zero_agent/context/sources.py,code:zero_agent/context/resources.py | A:LocalContextStore.commit_many,backup_to,restore_backup,purge_object | S:manifest 指针是提交状态权威；正文先按 hash 原子发布再切换指针，损坏或缺失 manifest 时不从文件推断状态
+migration.py[IR8M]: F:为显式 legacy 源根生成 hash 绑定迁移计划并安全应用、校验旧记忆对象 | R:code:zero_agent/context/local_store.py,code:zero_agent/context/sources.py,code:zero_agent/skills/manifest.py,code:zero_agent/utils/files.py | A:ContextMigrationService.create_plan,apply,verify | S:apply 必须匹配完整 source preimage 且目标独立；疑似秘密隔离规则为启发式且不删除源文件
+resources.py[PD8M]: F:将获准项目中的有界 UTF-8 文本文件导入为带来源回执和 hash 的不可变资源修订 | R:code:zero_agent/context/local_store.py,code:zero_agent/context/sources.py,code:zero_agent/context/uri.py | A:ResourceService.import_file,import_directory | S:只接受非符号链接文本并限制文件数、深度和总字节；目标必须属于当前项目 writer grant
+retrieval.py[KA6T]: F:对英文词元和中文子串、字符二元组执行确定性词法匹配并返回命中跨度 | R:code:zero_agent/context/service.py | A:match_text,_query_terms | S:中文部分命中需覆盖至少一半查询二元组；非中文不接受部分词元匹配
+runtime.py[EI8T]: F:由本地或 bot 入口的可信账号、发送者和宿主会话数据创建 RuntimeContext 并绑定项目授权 | R:code:zero_agent/context/admin.py,code:zero_agent/context/types.py,code:zero_agent/core/config.py | A:local_runtime_context,bot_runtime_context | S:bot sender 未验证时拒绝身份；会话身份按平台、bot 账号、发送者与 host session 绑定
+service.py[DI9M]: F:按 RuntimeContext 授权解析逻辑 URI，并提供读取、分页列表、来源回执读取和词法检索 | R:code:zero_agent/context/uri.py,code:zero_agent/context/types.py,code:zero_agent/context/retrieval.py,code:zero_agent/context/sources.py | A:ContextService.read,read_view,list,search,list_task_receipts | S:先鉴权再分页以避免计数泄露；无 scope 搜索仅覆盖当前用户与绑定项目，扩大范围必须显式授权；检索游标绑定查询、范围和快照；隔离对象拒绝读取，未验证对象不进入 active 搜索
+sources.py[DS9M]: F:持久化用户消息、工具结果和资源导入回执，并按工具版本字段策略验证 claim | R:code:zero_agent/context/types.py,code:zero_agent/context/local_store.py,code:zero_agent/core/handler.py,code:zero_agent/memory/service.py | A:EvidenceReceiptService.record_user_message,record_tool_result,validate_claim | S:工具 success 只支持注册策略允许的字段和值；未登记工具、错误状态或已撤回回执不能证明 claim
+store.py[PD3S]: F:提供并发安全的内存 ContextStore，用于契约测试和无文件的本地组合 | R:code:zero_agent/context/types.py,code:zero_agent/context/local_store.py | A:InMemoryContextStore.commit_many,get,lookup_idempotency | S:批量修订在锁内先完整校验 CAS，再一次发布；幂等键 payload 不匹配时冲突
+types.py[CD8M]: F:定义身份与能力、版本化上下文对象、来源回执、派生摘要及存储提供方协议 | R:code:zero_agent/context/service.py,code:zero_agent/context/local_store.py,code:zero_agent/context/sources.py | A:RuntimeContext,ContextObject,EvidenceReceipt,ContextStore | S:RuntimeContext 由宿主入口创建；逻辑身份段拒绝路径分隔符、NUL 和控制字符
+uri.py[CS8S]: F:解析并规范化 za 逻辑 URI，支持 me 身份展开及授权集合范围比较 | R:code:zero_agent/context/service.py,code:zero_agent/context/types.py | A:parse_context_uri,uri_is_within | S:只解码一次并拒绝 ..、反斜线、NUL、畸形百分号编码和非支持 scheme
+
+===/Users/zhangzeao/workspace/ZeroAgent/zero_agent/skills/===
+__init__.py[CG4T]: F:暴露版本固定且受权限校验的内置技能加载接口 | R:code:zero_agent/skills/manifest.py,code:zero_agent/skills/runtime.py | A:导出BuiltinSkill、SkillRuntime与内置技能清单加载器 | S:-
+manifest.py[DS8M]: F:验证并加载随包 SOP 清单、来源 hash、章节映射、触发分类与触发词及受批准入口 | R:code:zero_agent/assets/context/builtin_catalog.yaml,code:zero_agent/context/errors.py,code:zero_agent/context/types.py,code:zero_agent/skills/runtime.py,code:setup.py | A:load_builtin_catalog,_parse_skill,_requirement_sections | S:每个打包 SOP 必须唯一登记且 hash、章节覆盖或入口无效时拒绝加载；triggered_rule 必须声明非空 trigger_terms，未登记来源或 hash 漂移阻止发行构建
+runtime.py[DS8M]: F:按精确 URI 与来源修订加载内置 SOP，并在能力、参数和依赖 hash 校验后执行获批入口 | R:code:zero_agent/skills/manifest.py,code:zero_agent/context/service.py,code:zero_agent/context/types.py,code:zero_agent/tools/builtin/code.py | A:SkillRuntime.run,_resolve,_check_permissions | S:load 只读取正文而不执行；入口必须获宿主 capability 授权，依赖 hash 不匹配或执行退出码非零均不算成功
+gate.py[CI8S]: F:记录任务级 SOP 路由和精确加载修订，并在动作或任务完成前校验匹配的触发规则 | R:code:zero_agent/skills/manifest.py,code:zero_agent/core/handler.py,code:zero_agent/tools/registry.py,code:zero_agent/assets/context/builtin_catalog.yaml | A:SkillActionGate.route,mark_loaded,check | S:路由必须覆盖任务命中的全部技能并引用用户请求原文；缺少匹配项或精确修订即拒绝动作；首个受保护动作后路由锁定；无匹配规则的普通文本可直接完成

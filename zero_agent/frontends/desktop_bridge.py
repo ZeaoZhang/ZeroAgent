@@ -664,6 +664,14 @@ class AgentManager:
             if not sess.log_path and _DESKTOP_SESSION_ID_RE.fullmatch(sess.id):
                 sess.log_path = _desktop_log_path(self.sessions_dir, sess.id)
             agent = ZeroAgent(config=config, session_log_path=sess.log_path)
+            from zero_agent.context.runtime import local_runtime_context
+
+            agent.entry_runtime_context_factory = lambda: local_runtime_context(
+                agent.config,
+                entry_type="desktop",
+                host_session_key=sess.id,
+                workspace_path=sess.cwd or agent.config.workspace_dir,
+            )
             if sess.restore_history:
                 history = [
                     {"role": message["role"], "content": message["content"]}

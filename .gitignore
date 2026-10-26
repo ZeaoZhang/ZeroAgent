@@ -44,6 +44,7 @@ logs/
 workspace/
 sessions/
 /memory/
+/context-data/
 task_*/
 temp/
 zero_agent/temp/

@@ -666,20 +666,66 @@ class TestAgentLoop:
         mock_handler: BaseHandler,
     ) -> None:
         _set_open_contract(mock_handler)
-        client = _make_mock_client([
+        client = _make_mock_client([_complete_response("Done.", [1])])
+        loop = AgentLoop(
+            client=client, handler=mock_handler, tools_schema=[],
+            max_turns=5, verbose=False,
+        )
+        _exhaust(loop.run("system prompt", "inspect context"))
+        assert mock_handler.history_info[0] == "[USER]: inspect context"
+
+    def test_prompt_metrics_count_system_tools_and_full_messages_disjointly(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        _set_open_contract(mock_handler)
+        tools = [{"name": "echo", "parameters": {"type": "object"}}]
+        _add_success_evidence(mock_handler)
+        client = _make_recording_client([
+            MockResponse(tool_calls=[MockToolCall(
+                function=MockFunction(name="echo", arguments='{"message":"α"}'),
+                id="call-metric",
+            )]),
             _complete_response("Done.", [1]),
         ])
         loop = AgentLoop(
             client=client,
             handler=mock_handler,
-            tools_schema=[],
-            max_turns=5,
+            tools_schema=tools,
+            max_turns=2,
             verbose=False,
         )
+        system = "system λ"
+        initial = "inspect é"
 
-        _exhaust(loop.run("system prompt", "inspect context"))
+        _exhaust(loop.run(system, initial))
 
-        assert mock_handler.history_info[0] == "[USER]: inspect context"
+        stats = mock_handler.prompt_size_stats
+        system_bytes = len(system.encode("utf-8"))
+        tools_bytes = len(json.dumps(tools, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        assert len(client.calls) == 2
+        sent_messages = client.calls[1]
+        assert "tool_results" in sent_messages[0]
+        messages_bytes = len(json.dumps(
+            sent_messages, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8"))
+        message_content_bytes = sum(
+            len(message["content"].encode("utf-8"))
+            if isinstance(message.get("content", ""), str)
+            else len(json.dumps(message.get("content"), ensure_ascii=False).encode("utf-8"))
+            for message in sent_messages
+        )
+        assert stats["system_bytes"] == system_bytes
+        assert stats["tools_schema_bytes"] == tools_bytes
+        assert stats["messages_bytes"] == messages_bytes
+        assert stats["api_request_components_bytes"] == system_bytes + tools_bytes + messages_bytes
+        assert stats["user_message_content_bytes"] == message_content_bytes
+        assert stats["initial_user_content_bytes"] == len(initial.encode("utf-8"))
+        assert stats["user_message_content_bytes"] != stats["initial_user_content_bytes"]
+        assert stats["api_request_components_estimated_tokens"] == (
+            stats["api_request_components_bytes"] + 3
+        ) // 4
+        assert stats["json_serialized_payload_estimate"] is True
 
     def test_loop_records_initial_user_input_in_compacted_history(
         self,

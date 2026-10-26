@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from zero_agent.core.exceptions import ConfigError
+from zero_agent.context.config import ContextConfig, context_from_mapping
 
 # 配置文件 mtime 缓存，用于热加载检测
 _config_mtime: dict[str, int] = {}
@@ -180,6 +181,7 @@ class AgentConfig:
     enable_worldline: bool = False
     litellm_model_cost_map: Optional[str] = None
     langfuse: Optional[dict] = None
+    context: ContextConfig = field(default_factory=ContextConfig)
 
     @property
     def resolved_language(self) -> str:
@@ -245,6 +247,7 @@ class AgentConfig:
 
     def validate(self) -> None:
         """Reject invalid backend selection before creating LLM sessions."""
+        self.context.validate(memory_dir=self.memory_dir)
         if not self.llm_backends:
             raise ConfigError("no LLM backends configured")
         if self.default_backend == "":
@@ -323,10 +326,18 @@ class AgentConfig:
             "sessions_dir",
             "log_dir",
             "litellm_model_cost_map",
+            "context.root",
         ):
-            val = getattr(self, attr)
+            if attr.startswith("context."):
+                val = getattr(self.context, attr.split(".", 1)[1])
+            else:
+                val = getattr(self, attr)
             if val and not os.path.isabs(val):
-                setattr(self, attr, os.path.normpath(os.path.join(base_dir, val)))
+                resolved = os.path.normpath(os.path.join(base_dir, val))
+                if attr.startswith("context."):
+                    setattr(self.context, attr.split(".", 1)[1], resolved)
+                else:
+                    setattr(self, attr, resolved)
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -385,6 +396,7 @@ class AgentConfig:
             workspace_dir=workspace_dir,
             memory_dir=memory_dir,
             sessions_dir=sessions_dir,
+            context=context_from_mapping({}),
             language=language,
             peer_hint=peer_hint,
             litellm_model_cost_map=litellm_model_cost_map,
@@ -396,6 +408,10 @@ class AgentConfig:
     def _from_dict(cls, data: dict) -> "AgentConfig":
         """Build AgentConfig from parsed YAML data."""
         data = data or {}
+        context_data = data.get("context", {})
+        if context_data is not None and not isinstance(context_data, dict):
+            raise ConfigError("context configuration must be a mapping")
+        context = context_from_mapping(context_data)
         backends: dict[str, LLMBackendConfig] = {}
         env_pattern = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
         for name, cfg in data.get("llm_backends", {}).items():
@@ -418,6 +434,7 @@ class AgentConfig:
             workspace_dir=data.get("workspace_dir", "./workspace"),
             memory_dir=data.get("memory_dir", "./memory"),
             sessions_dir=data.get("sessions_dir", "./workspace/sessions"),
+            context=context,
             verbose=data.get("verbose", True),
             language=data.get("language", "auto"),
             incremental_output=data.get("incremental_output", False),

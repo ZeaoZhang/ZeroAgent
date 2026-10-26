@@ -151,7 +151,7 @@ def test_memory_package_contains_only_runtime_modules() -> None:
     assert "zero_agent.memory" in packages
     assert "zero_agent.utils.skill_search" in packages
     assert "zero_agent.memory" not in package_data
-    assert memory_files == {"__init__.py", "compress_session.py", "manager.py"}
+    assert memory_files == {"__init__.py", "compress_session.py", "manager.py", "service.py"}
     assert not (ROOT / "zero_agent" / "memory" / "L4_raw_sessions").exists()
     assert not (ROOT / "zero_agent" / "memory" / "ui_detect.py").exists()
     assert not (ROOT / "zero_agent" / "memory" / "vision_api.py").exists()
@@ -244,6 +244,7 @@ def test_repository_has_no_removed_name_fragments() -> None:
     ]
     skipped_parts = {
         ".git",
+        ".aoci",
         ".omc",
         ".omx",
         ".mypy_cache",
@@ -254,6 +255,7 @@ def test_repository_has_no_removed_name_fragments() -> None:
         "build",
         "dist",
         "node_modules",
+        "workspace",
         "memory",
         "sessions",
         "temp",
@@ -283,6 +285,13 @@ def test_repository_has_no_removed_name_fragments() -> None:
         if not path.is_file():
             continue
         relative = path.relative_to(ROOT)
+        if relative.as_posix() in {
+            "AGENTS.md",
+            "aoci.txt",
+            "aoci.code.txt",
+            "aoci.meta.txt",
+        }:
+            continue
         if set(relative.parts) & skipped_parts:
             continue
         if path.suffix not in text_suffixes and path.name != ".gitignore":

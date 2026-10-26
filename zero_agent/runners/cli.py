@@ -122,6 +122,19 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    if getattr(args, "root_command", None) == "context":
+        if args.config:
+            config = AgentConfig.from_yaml(args.config)
+            config._source_path = args.config  # type: ignore[attr-defined]
+        else:
+            config = load_default_config()
+        from zero_agent.context.cli import run_context_command
+
+        result = run_context_command(config, args.context_admin_command, args)
+        if result:
+            raise SystemExit(result)
+        return
+
     # --func/--task bg 模式：不带 --nobg 时，重新以 --nobg 启动自身并退出
     functional_mode = args.func or args.task
     if functional_mode and not args.nobg:
@@ -180,6 +193,23 @@ def main(argv: Optional[list[str]] = None) -> None:
     # 创建 agent
     agent = ZeroAgent(config=config)
     agent.handler.max_turns = agent.config.max_turns
+    from pathlib import Path
+    from zero_agent.context.runtime import local_runtime_context
+
+    if args.history:
+        host_session_key = str(Path(args.history).expanduser().resolve())
+    elif args.task:
+        host_session_key = "task:" + str(Path(args.task).expanduser().resolve())
+    elif args.func:
+        host_session_key = "func:" + str(Path(args.func).expanduser().resolve())
+    else:
+        host_session_key = "repl:" + str(Path(config.workspace_dir).expanduser().resolve())
+    agent.entry_runtime_context_factory = lambda: local_runtime_context(
+        agent.config,
+        entry_type="cli",
+        host_session_key=host_session_key,
+        workspace_path=agent.config.workspace_dir,
+    )
 
     # --no-user-tools: 从运行时注册表中移除 ask_user 和 long_term_update
     if args.no_user_tools:
@@ -311,6 +341,90 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="移除 ask_user 和 start_long_term_update 工具",
     )
+    root_commands = parser.add_subparsers(dest="root_command")
+    context = root_commands.add_parser("context", help="管理本地上下文项目和身份")
+    context.add_argument("-c", "--config", default=argparse.SUPPRESS, help="YAML 配置文件路径")
+    context_commands = context.add_subparsers(dest="context_admin_command", required=True)
+
+    project = context_commands.add_parser("project", help="项目绑定和授权")
+    project_commands = project.add_subparsers(dest="project_action", required=True)
+    create = project_commands.add_parser("create")
+    create.add_argument("--path", required=True)
+    create.add_argument("--name", default="")
+    create.set_defaults(context_admin_command="project_create")
+    rebind = project_commands.add_parser("rebind")
+    rebind.add_argument("--id", required=True)
+    rebind.add_argument("--path", required=True)
+    rebind.add_argument("--expected-revision", type=int, required=True)
+    rebind.set_defaults(context_admin_command="project_rebind")
+    grant = project_commands.add_parser("grant")
+    grant.add_argument("--id", required=True)
+    grant.add_argument("--principal", required=True)
+    grant.add_argument("--role", choices=("reader", "writer"), required=True)
+    grant.add_argument("--expected-revision", type=int, required=True)
+    grant.set_defaults(context_admin_command="project_grant")
+    revoke = project_commands.add_parser("revoke")
+    revoke.add_argument("--id", required=True)
+    revoke.add_argument("--principal", required=True)
+    revoke.add_argument("--expected-revision", type=int, required=True)
+    revoke.set_defaults(context_admin_command="project_revoke")
+    transfer = project_commands.add_parser("transfer-owner")
+    transfer.add_argument("--id", required=True)
+    transfer.add_argument("--to", required=True)
+    transfer.add_argument("--expected-revision", type=int, required=True)
+    transfer.set_defaults(context_admin_command="project_transfer_owner")
+
+    identity = context_commands.add_parser("identity", help="查看身份链接")
+    identity_commands = identity.add_subparsers(dest="identity_action", required=True)
+    identity_list = identity_commands.add_parser("list")
+    identity_list.set_defaults(context_admin_command="identity_list")
+    identity_link = identity_commands.add_parser("link", help="创建或撤销一次性 bot 身份链接")
+    identity_link_commands = identity_link.add_subparsers(dest="identity_link_action", required=True)
+    identity_link_begin = identity_link_commands.add_parser("begin")
+    identity_link_begin.add_argument("--target", required=True, help="platform/bot-account")
+    identity_link_begin.set_defaults(context_admin_command="identity_link_begin")
+    identity_link_revoke = identity_link_commands.add_parser("revoke")
+    identity_link_revoke.add_argument("--target", required=True, help="platform/bot-account")
+    identity_link_revoke.add_argument("--principal", required=True)
+    identity_link_revoke.add_argument("--expected-revision", type=int, required=True)
+    identity_link_revoke.set_defaults(context_admin_command="identity_link_revoke")
+
+    migrate = context_commands.add_parser("migrate", help="预检或应用 legacy 数据迁移清单")
+    migration_mode = migrate.add_mutually_exclusive_group(required=True)
+    migration_mode.add_argument("--dry-run", action="store_true")
+    migration_mode.add_argument("--apply", dest="apply_manifest", metavar="MANIFEST")
+    migrate.add_argument("--source")
+    migrate.add_argument("--manifest")
+    migrate.set_defaults(context_admin_command="migration")
+    verify = context_commands.add_parser("verify", help="验证迁移清单和已提交对象")
+    verify.add_argument("--manifest", required=True)
+    verify.set_defaults(context_admin_command="migration_verify")
+    export = context_commands.add_parser("export", help="导出当前用户或获准项目的数据")
+    export.add_argument("--output", required=True)
+    export.add_argument("--project-id")
+    export.set_defaults(context_admin_command="context_export")
+    gc = context_commands.add_parser("gc", help="回收已脱离清单的本地修订文件")
+    gc.add_argument("--grace-seconds", type=int, required=True)
+    gc.add_argument("--apply", action="store_true")
+    gc.set_defaults(context_admin_command="context_gc")
+    reindex = context_commands.add_parser("reindex", help="校验本地对象修订")
+    reindex.set_defaults(context_admin_command="context_reindex")
+    resource = context_commands.add_parser("resource", help="显式导入项目文本资料")
+    resource_commands = resource.add_subparsers(dest="resource_action", required=True)
+    import_file = resource_commands.add_parser("import-file")
+    import_file.add_argument("--project-id", required=True)
+    import_file.add_argument("--path", required=True)
+    import_file.add_argument("--target-uri", required=True)
+    import_file.add_argument("--title")
+    import_file.add_argument("--expected-revision", type=int)
+    import_file.add_argument("--idempotency-key")
+    import_file.set_defaults(context_admin_command="resource_import_file")
+    import_directory = resource_commands.add_parser("import-dir")
+    import_directory.add_argument("--project-id", required=True)
+    import_directory.add_argument("--path", required=True)
+    import_directory.add_argument("--target-prefix", required=True)
+    import_directory.add_argument("--idempotency-key")
+    import_directory.set_defaults(context_admin_command="resource_import_directory")
     return parser
 
 

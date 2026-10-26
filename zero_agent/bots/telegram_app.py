@@ -56,6 +56,38 @@ runner.verbose = False
 
 ALLOWED = set(_KEYS.get("tg_allowed_users", []))
 
+
+def _telegram_runtime_context(update, ctx):
+    from zero_agent.context.runtime import bot_runtime_context
+
+    user = getattr(update, "effective_user", None)
+    chat = getattr(update, "effective_chat", None)
+    query = getattr(update, "callback_query", None)
+    if user is None and query is not None:
+        user = getattr(query, "from_user", None)
+    if chat is None and query is not None:
+        chat = getattr(getattr(query, "message", None), "chat", None)
+    sender_id = getattr(user, "id", None)
+    chat_id = getattr(chat, "id", None)
+    chat_type = str(getattr(chat, "type", "") or "").casefold()
+    bot = getattr(ctx, "bot", None)
+    bot_id = getattr(bot, "id", None)
+    return bot_runtime_context(
+        za.config,
+        platform="telegram",
+        bot_account_id=str(bot_id or ""),
+        verified_sender_id=str(sender_id or ""),
+        host_session_key=str(chat_id or sender_id or ""),
+        is_private_chat=chat_type == "private",
+        is_group_chat=chat_type in {"group", "supergroup"},
+        sender_verified=bool(sender_id and bot_id),
+    )
+
+
+def _runtime_task_kwargs(update, ctx):
+    runtime_context = _telegram_runtime_context(update, ctx)
+    return {"runtime_context": runtime_context}
+
 # —— Telegram SDK ——
 try:
     from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
@@ -816,6 +848,7 @@ async def _handle_review_command(update, ctx, cmd):
         prompt,
         source="telegram",
         prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+        **_runtime_task_kwargs(update, ctx),
     )
     task = asyncio.create_task(_stream(task_dq, update.message))
     ctx.user_data["stream_task"] = task
@@ -831,6 +864,7 @@ async def handle_msg(update, ctx):
         update.message.text,
         source="telegram",
         prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+        **_runtime_task_kwargs(update, ctx),
     )
     task = asyncio.create_task(_stream(dq, update.message))
     ctx.user_data["stream_task"] = task
@@ -889,6 +923,7 @@ async def handle_ask_callback(update, ctx):
             selected,
             source="telegram",
             prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+            **_runtime_task_kwargs(update, ctx),
         )
         task = asyncio.create_task(_stream(dq, query.message))
         ctx.user_data["stream_task"] = task
@@ -913,6 +948,7 @@ async def handle_ask_callback(update, ctx):
         selected,
         source="telegram",
         prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+        **_runtime_task_kwargs(update, ctx),
     )
     task = asyncio.create_task(_stream(dq, query.message))
     ctx.user_data["stream_task"] = task
@@ -1021,6 +1057,7 @@ async def handle_photo(update, ctx):
         prompt,
         source="telegram",
         prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+        **_runtime_task_kwargs(update, ctx),
     )
     task = asyncio.create_task(_stream(dq, update.message))
     ctx.user_data["stream_task"] = task
@@ -1034,6 +1071,38 @@ async def handle_command(update, ctx):
         return await update.message.reply_text("no")
     cmd = _normalized_command(update.message.text)
     op = cmd.split()[0] if cmd else ""
+    if op == "/link":
+        parts = cmd.split()
+        if len(parts) != 2:
+            return await update.message.reply_text("用法: /link <一次性链接码>")
+        if str(getattr(update.effective_chat, "type", "")).casefold() != "private":
+            return await update.message.reply_text("身份链接码只能在 bot 私聊中兑换。")
+        try:
+            from zero_agent.context.admin import ContextAdminService
+            from zero_agent.context.local_store import LocalContextStore
+
+            bot_id = str(getattr(ctx.bot, "id", "") or "")
+            if not bot_id or not uid:
+                return await update.message.reply_text("当前入口无法验证 bot 或发送者身份。")
+            result = ContextAdminService(
+                LocalContextStore(za.config.context.root)
+            ).redeem_identity_link(
+                parts[1],
+                platform="telegram",
+                bot_account_id=bot_id,
+                verified_sender_id=str(uid),
+                verified=True,
+                is_private_chat=True,
+            )
+            return await update.message.reply_text(
+                f"身份链接已完成（{result.platform}/{result.bot_account_id}）。"
+            )
+        except Exception as exc:
+            from zero_agent.context.errors import ContextError
+
+            if isinstance(exc, ContextError):
+                return await update.message.reply_text(f"身份链接失败 [{exc.code}]。")
+            return await update.message.reply_text("身份链接失败。")
     if op == "/help":
         return await update.message.reply_text(HELP_TEXT)
     if op == "/status":

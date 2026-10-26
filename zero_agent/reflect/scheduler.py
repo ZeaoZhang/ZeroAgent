@@ -137,14 +137,13 @@ def check():
         _l4_t = _time.time()
         try:
             from zero_agent.memory.compress_session import batch_process
-            from zero_agent.bots.shared.continue_cmd import _sessions_dir
-            raw_dir = os.path.abspath(
-                os.environ.get("ZA_MODEL_RESPONSES_DIR")
-                or _sessions_dir
-            )
+            from zero_agent.core.config import load_default_config
+
+            config = load_default_config()
+            raw_dir = os.path.abspath(os.environ.get("ZA_MODEL_RESPONSES_DIR") or config.sessions_dir)
             l4_dir = os.path.abspath(
                 os.environ.get("ZA_L4_DIR")
-                or str(project_root() / "memory" / "L4_raw_sessions")
+                or os.path.join(config.memory_dir, "L4_raw_sessions")
             )
             r = batch_process(raw_dir, l4_dir, dry_run=False)
             print(f'[L4 cron] {r}')

@@ -41,8 +41,8 @@ pytest tests/ -v
 
 ## 工具边界
 
-`ToolRegistry.with_builtins()` 的默认注册范围必须保持为 9 个核心原子工具:
-`code_run`、`file_read`、`file_write`、`file_patch`、`web_scan`、`web_execute_js`、`update_working_checkpoint`、`start_long_term_update`、`ask_user`。
+`ToolRegistry.with_builtins()` 注册 local_v1 核心工具，包含 `context_sources` 来源回执发现：
+`code_run`、`file_read`、`file_write`、`file_patch`、`web_scan`、`web_execute_js`、`web_screenshot`、`update_working_checkpoint`、`start_long_term_update`、`ask_user`、`context_read`、`context_list`、`context_search`、`context_sources`、`memory_update`、`skill_route`、`skill_run` 和 `complete_task`。
 
 `search_web`、`vision`、`memory_plot`、`send_im` 属于 ZeroAgent 可选/实验性扩展模块。不要默认放进 `with_builtins()`。
 
