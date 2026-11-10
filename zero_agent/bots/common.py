@@ -59,23 +59,6 @@ def build_help_text(commands=HELP_COMMANDS) -> str:
     return "📖 命令列表:\n" + "\n".join(f"{cmd} - {desc}" for cmd, desc in commands)
 
 
-def _strip_bot_identity_context(context: dict) -> dict:
-    private = {
-        "bot_account_id",
-        "verified_sender_id",
-        "sender_verified",
-        "is_private_chat",
-        "is_group_chat",
-        "host_session_key",
-    }
-    return {key: value for key, value in context.items() if key not in private}
-
-
-def redact_private_link_code(text: str) -> str:
-    """Hide one-time identity tokens from ordinary bot logs."""
-    return re.sub(r"(?i)(/link\s+)\S+", r"\1[redacted]", text or "")
-
-
 HELP_TEXT = build_help_text()
 IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif"})
 TAG_PATS = [r"<" + t + r">.*?</" + t + r">" for t in ("thinking", "summary", "tool_use", "file_content")]
@@ -553,60 +536,6 @@ class AgentBotMixin:
         self.runner = runner
         self.user_tasks = user_tasks
 
-    def runtime_context_for_message(self, chat_id, **ctx):
-        """Bind a bot task only from verified platform/account/sender identity."""
-        config = getattr(self.runner, "config", None)
-        if config is None:
-            from zero_agent.context.errors import ContextError
-            raise ContextError(
-                "PERMISSION_DENIED",
-                "The bot entry has no configured context identity.",
-            )
-        from zero_agent.context.runtime import bot_runtime_context
-        return bot_runtime_context(
-            config,
-            platform=self.source,
-            bot_account_id=ctx.get("bot_account_id", ""),
-            verified_sender_id=ctx.get("verified_sender_id", ""),
-            host_session_key=str(ctx.get("host_session_key", chat_id)),
-            is_private_chat=ctx.get("is_private_chat") is True,
-            is_group_chat=ctx.get("is_group_chat") is True,
-            sender_verified=ctx.get("sender_verified") is True,
-        )
-
-    async def _redeem_identity_link(self, chat_id, code: str, *, transport_context=None, **ctx):
-        send_ctx = transport_context or {}
-        if ctx.get("is_private_chat") is not True:
-            return await self.send_text(chat_id, "身份链接码只能在目标 bot 私聊中兑换。", **send_ctx)
-        if ctx.get("sender_verified") is not True:
-            return await self.send_text(chat_id, "当前入口无法验证发送者身份，不能兑换链接码。", **send_ctx)
-        config = getattr(self.runner, "config", None)
-        try:
-            from zero_agent.context.admin import ContextAdminService
-            from zero_agent.context.local_store import LocalContextStore
-
-            result = ContextAdminService(
-                LocalContextStore(config.context.root)
-            ).redeem_identity_link(
-                code,
-                platform=self.source,
-                bot_account_id=ctx.get("bot_account_id", ""),
-                verified_sender_id=ctx.get("verified_sender_id", ""),
-                verified=ctx.get("sender_verified") is True,
-                is_private_chat=True,
-            )
-            return await self.send_text(
-                chat_id,
-                f"身份链接已完成（{result.platform}/{result.bot_account_id}）。",
-                **send_ctx,
-            )
-        except Exception as exc:
-            from zero_agent.context.errors import ContextError
-
-            if isinstance(exc, ContextError):
-                return await self.send_text(chat_id, f"身份链接失败 [{exc.code}]。", **send_ctx)
-            return await self.send_text(chat_id, "身份链接失败。", **send_ctx)
-
     async def send_text(self, chat_id, content, **ctx):
         """发送文本消息 (子类必须实现)."""
         raise NotImplementedError
@@ -634,8 +563,6 @@ class AgentBotMixin:
     async def handle_command(self, chat_id, cmd, **ctx):
         if not channel_is_linked(self.source):
             return None
-        identity_context = dict(ctx)
-        ctx = _strip_bot_identity_context(ctx)
         from zero_agent.bots.shared.continue_cmd import handle_frontend_command, reset_conversation
         from zero_agent.bots.shared.btw_cmd import handle_frontend_command as handle_btw_frontend_command
         from zero_agent.bots.shared.review_cmd import handle as handle_review_command
@@ -652,15 +579,6 @@ class AgentBotMixin:
                 state["running"] = False
             runner.abort()
             return await self.send_text(chat_id, "⏹️ 正在停止...", **ctx)
-        if op == "/link":
-            if len(parts) != 2:
-                return await self.send_text(chat_id, "用法: /link <一次性链接码>", **ctx)
-            return await self._redeem_identity_link(
-                chat_id,
-                parts[1],
-                transport_context=ctx,
-                **identity_context,
-            )
         if op == "/status":
             llm = runner.get_llm_name() if runner.llmclient else "未配置"
             return await self.send_text(
@@ -720,27 +638,16 @@ class AgentBotMixin:
     async def run_agent(self, chat_id, text, **ctx):
         if not channel_is_linked(self.source):
             return None
-        identity_context = dict(ctx)
-        ctx = _strip_bot_identity_context(ctx)
         state = {"running": True}
         self.user_tasks[chat_id] = state
         terminal = None
         try:
             await self.send_text(chat_id, "思考中...", **ctx)
-            runtime_context = self.runtime_context_for_message(chat_id, **identity_context)
-            from zero_agent.context.errors import ContextError
-            from zero_agent.context.types import RuntimeContext
-            if not isinstance(runtime_context, RuntimeContext):
-                raise ContextError(
-                    "PERMISSION_DENIED",
-                    "The bot entry must provide a RuntimeContext.",
-                )
-            task_kwargs = {
-                "source": self.source,
-                "prompt_capabilities": (PROMPT_CAPABILITY_FILE_DELIVERY,),
-            }
-            task_kwargs["runtime_context"] = runtime_context
-            dq = self.runner.put_task(text, **task_kwargs)
+            dq = self.runner.put_task(
+                text,
+                source=self.source,
+                prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+            )
             last_ping = time.time()
             while state["running"]:
                 try:

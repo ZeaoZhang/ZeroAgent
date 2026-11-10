@@ -11,11 +11,10 @@ import os
 import re
 import shutil
 import subprocess
-import signal
+import sys
 import tempfile
 import threading
 import time
-import sys
 from importlib import resources
 from typing import Any, Dict, Generator, List, Optional
 
@@ -57,7 +56,6 @@ def code_run(
     stop_signal: Optional[List[bool]] = None,
     maxlen: int = 10000,
     env: Optional[dict[str, str]] = None,
-    isolated_process: bool = False,
 ) -> Generator[str, None, dict]:
     """在子进程中执行 Python 或 shell 代码.
 
@@ -68,10 +66,11 @@ def code_run(
         code: 待执行的代码文本.
         code_type: 代码类型 "python" | "bash" | "powershell".
         timeout: 执行超时秒数，超时后强制终止子进程.
+        cwd: 子进程工作目录，默认使用当前目录.
         code_cwd: Python 临时 .py 文件存放目录，默认使用系统临时目录.
         stop_signal: 外部停止信号，传入可变列表 [True] 时终止执行.
         maxlen: 返回 stdout 的最大字符数，超出部分截断.
-        isolated_process: 为调用建立独立进程组，停止时只终止该调用及其子进程.
+
     Yields:
         执行过程中的状态信息字符串.
 
@@ -111,11 +110,11 @@ def code_run(
     # Windows 下隐藏控制台窗口
     startupinfo = None
     creationflags = 0
-    start_new_session = False
-    if isolated_process and os.name != "nt":
-        start_new_session = True
-    if isolated_process and os.name == "nt":
-        creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0  # SW_HIDE
+        creationflags = 0x08000000
 
     full_stdout: List[str] = []
 
@@ -134,15 +133,6 @@ def code_run(
             pass
 
     process = None
-    def _terminate(proc: subprocess.Popen) -> None:
-        if isolated_process and os.name != "nt":
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
-            return
-        if proc.poll() is None:
-            proc.kill()
     try:
         process = subprocess.Popen(
             cmd,
@@ -152,7 +142,6 @@ def code_run(
             cwd=cwd,
             startupinfo=startupinfo,
             creationflags=creationflags,
-            start_new_session=start_new_session,
             env=env,
         )
         start_t = time.time()
@@ -165,7 +154,7 @@ def code_run(
             is_timeout = time.time() - start_t > timeout
             should_stop = stop_signal and stop_signal[0] if stop_signal else False
             if is_timeout or should_stop:
-                _terminate(process)
+                process.kill()
                 if is_timeout:
                     full_stdout.append("\n[Timeout Error] 超时强制终止")
                 else:
@@ -173,10 +162,7 @@ def code_run(
                 break
             time.sleep(1)
 
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
+        reader_thread.join(timeout=1)
         exit_code = process.poll()
 
         stdout_str = "".join(full_stdout)
@@ -203,19 +189,9 @@ def code_run(
         }
     except Exception as e:
         if process is not None:
-            try:
-                _terminate(process)
-                process.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+            process.kill()
         return {"status": "error", "msg": str(e)}
     finally:
-        if process is not None and process.poll() is None:
-            try:
-                _terminate(process)
-                process.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
         if code_type in ("python", "py") and tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
 
@@ -233,7 +209,6 @@ def register_code_tools(registry: ToolRegistry, config: AgentConfig) -> None:
 
     registry.register(ToolDefinition(
         evidence_kind="execute",
-        skill_action="code.execute",
         name="code_run",
         description=_t(
             "代码执行器。长代码或大量数据先用 file_write 写入 scripts/，再用 script_path 执行；"

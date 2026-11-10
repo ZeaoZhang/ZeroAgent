@@ -39,7 +39,6 @@ class ToolDefinition:
             status=error 或 status=interrupt 时记录为失败。未声明时保守地保持 OPEN，
             避免产生无法被 complete_task 引用的证据死路.
         promotes_task_state: 成功分发前是否将 OPEN 任务推进到 EXECUTING.
-        contract_version: 用于来源回执的稳定工具适配器契约版本.
     """
 
     name: str
@@ -49,8 +48,6 @@ class ToolDefinition:
     category: str = "general"
     promotes_task_state: bool = True
     evidence_kind: Optional[Literal["read", "write", "execute", "web", "user", "memory", "verify", "system"]] = None
-    contract_version: str = "v1"
-    skill_action: Optional[str] = None
 
 
 @dataclass
@@ -229,23 +226,6 @@ class ToolRegistry:
             except ImportError:
                 # 内置模块不存在时跳过，不阻断注册流程
                 pass
-
-        module = importlib.import_module("zero_agent.tools.builtin.context")
-        module.register_context_tools(registry, registration_config)
-        skill_module = importlib.import_module("zero_agent.tools.builtin.skill")
-        skill_module.register_skill_tools(registry, registration_config)
-
-        missing_skill_gates = sorted(
-            tool.name
-            for tool in registry.list_all()
-            if tool.evidence_kind in {"write", "execute", "web"}
-            and tool.skill_action is None
-        )
-        if missing_skill_gates:
-            raise ValueError(
-                "Action tools must declare a skill gate class: "
-                + ", ".join(missing_skill_gates)
-            )
 
         core_order = [
             "complete_task",

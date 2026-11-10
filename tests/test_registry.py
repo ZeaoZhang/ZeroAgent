@@ -179,13 +179,6 @@ class TestToolRegistry:
             "update_working_checkpoint",
             "ask_user",
             "start_long_term_update",
-            "context_read",
-            "context_list",
-            "context_search",
-            "context_sources",
-            "memory_update",
-            "skill_route",
-            "skill_run",
         }
         assert "search_web" not in names
         assert "vision" not in names

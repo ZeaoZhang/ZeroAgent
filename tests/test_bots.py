@@ -29,12 +29,7 @@ from zero_agent.bots.common import (
     extract_waiting_event,
     terminal_notice,
     resolve_output_files,
-    redact_private_link_code,
 )
-from zero_agent.context.admin import ContextAdminService
-from zero_agent.context.config import ContextConfig
-from zero_agent.context.local_store import LocalContextStore
-from zero_agent.core.config import AgentConfig, LLMBackendConfig
 from zero_agent.bots.shared.continue_cmd import (
     _pairs,
     _first_user,
@@ -212,34 +207,21 @@ class TestCommonHelpers:
             ("budget_exhausted", "任务未完成"),
         ],
     )
-    async def test_agent_mixin_consumes_terminal_statuses(self, status, expected, tmp_path):
+    async def test_agent_mixin_consumes_terminal_statuses(self, status, expected):
         class FakeRunner:
             is_running = False
-            config = AgentConfig(
-                llm_backends={
-                    "default": LLMBackendConfig(name="default", provider="openai", api_key="test",
-                        api_base="https://api.invalid", model="test"),
-                },
-                default_backend="default",
-                context=ContextConfig(mode="local_v1", root=str(tmp_path / ".pytest-context"), local_user_id="alice"),
-            )
 
             def put_task(self, *_args, **_kwargs):
-                assert _kwargs.get("runtime_context") is not None
                 dq = queue.Queue()
                 dq.put({
-                    "type": "terminal", "status": status, "reason": "test_reason",
-                    "text": "", "data": {"question": "请提供下一步输入。", "candidates": []},
+                    "type": "terminal",
+                    "status": status,
+                    "reason": "test_reason",
+                    "text": "",
+                    "data": {"question": "请提供下一步输入。", "candidates": []},
                 })
                 return dq
-        identity_context = {
-            "bot_account_id": "bot-test",
-            "verified_sender_id": "sender-test",
-            "host_session_key": "chat-test",
-            "is_private_chat": True,
-            "is_group_chat": False,
-            "sender_verified": True,
-        }
+
         class Bot(AgentBotMixin):
             def __init__(self):
                 super().__init__(FakeRunner(), {})
@@ -249,38 +231,26 @@ class TestCommonHelpers:
                 self.sent.append(content)
 
         bot = Bot()
-        await bot.run_agent("chat", "task", **identity_context)
+        await bot.run_agent("chat", "task")
 
         assert expected in bot.sent[-1]
         assert "任务完成" not in bot.sent[-1]
 
     @pytest.mark.asyncio
-    async def test_agent_mixin_completed_uses_final_text(self, tmp_path):
+    async def test_agent_mixin_completed_uses_final_text(self):
         class FakeRunner:
             is_running = False
-            config = AgentConfig(
-                llm_backends={"default": LLMBackendConfig(name="default", provider="openai", api_key="test", api_base="https://api.invalid", model="test")},
-                default_backend="default",
-                context=ContextConfig(mode="local_v1", root=str(tmp_path / "context"), local_user_id="alice"),
-            )
 
             def put_task(self, *_args, **_kwargs):
-                assert _kwargs.get("runtime_context") is not None
                 dq = queue.Queue()
                 dq.put({
-                    "type": "terminal", "status": "completed",
-                    "reason": "completion_certificate", "text": "final answer",
-                    "summary": "final answer",
+                    "type": "terminal",
+                    "status": "completed",
+                    "reason": "completion_certificate",
+                    "text": "final answer",
                 })
                 return dq
-        identity_context = {
-            "bot_account_id": "bot-test",
-            "verified_sender_id": "sender-test",
-            "host_session_key": "chat-test",
-            "is_private_chat": True,
-            "is_group_chat": False,
-            "sender_verified": True,
-        }
+
         class Bot(AgentBotMixin):
             def __init__(self):
                 super().__init__(FakeRunner(), {})
@@ -290,7 +260,7 @@ class TestCommonHelpers:
                 self.sent.append(content)
 
         bot = Bot()
-        await bot.run_agent("chat", "task", **identity_context)
+        await bot.run_agent("chat", "task")
 
         assert bot.sent[-1] == "final answer"
 
@@ -298,62 +268,6 @@ class TestCommonHelpers:
         text = build_help_text()
         assert "/help" in text
         assert "/stop" in text
-
-    def test_bot_link_command_requires_private_chat_and_binds_verified_sender(self, tmp_path):
-        config = AgentConfig(
-            llm_backends={
-                "default": LLMBackendConfig(
-                    name="default", provider="openai", api_key="test",
-                    api_base="https://api.openai.com/v1", model="test",
-                ),
-            },
-            context=ContextConfig(mode="local_v1", root=str(tmp_path / "context"), local_user_id="alice"),
-        )
-        admin = ContextAdminService(LocalContextStore(config.context.root))
-        challenge = admin.begin_identity_link("alice", "telegram", "bot-a")
-
-        class CaptureBot(AgentBotMixin):
-            source = "telegram"
-
-            def __init__(self):
-                super().__init__(SimpleNamespace(config=config), {})
-                self.sent = []
-
-            async def send_text(self, _chat_id, content, **_ctx):
-                self.sent.append(content)
-
-        bot = CaptureBot()
-        asyncio.run(bot._redeem_identity_link(
-            "chat",
-            challenge.code,
-            is_private_chat=False,
-            sender_verified=True,
-            bot_account_id="bot-a",
-            verified_sender_id="sender-1",
-        ))
-        assert "只能在目标 bot 私聊" in bot.sent[-1]
-        assert admin.list_identities("alice") == ()
-
-        asyncio.run(bot._redeem_identity_link(
-            "chat",
-            challenge.code,
-            is_private_chat=True,
-            sender_verified=True,
-            bot_account_id="bot-a",
-            verified_sender_id="sender-1",
-        ))
-        assert "身份链接已完成" in bot.sent[-1]
-        runtime = bot.runtime_context_for_message(
-            "chat",
-            bot_account_id="bot-a",
-            verified_sender_id="sender-1",
-            sender_verified=True,
-            is_private_chat=True,
-            is_group_chat=False,
-            host_session_key="chat",
-        )
-        assert runtime.user_id == "alice"
-        assert redact_private_link_code(f"/link {challenge.code}") == "/link [redacted]"
 
     def test_public_access(self):
         assert public_access(set()) is True

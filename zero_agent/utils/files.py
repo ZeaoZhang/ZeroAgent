@@ -10,42 +10,6 @@ from pathlib import Path
 from typing import Optional
 
 
-def paths_overlap(first: str | Path, second: str | Path) -> bool:
-    """Return whether either resolved path is equal to or nested under the other.
-
-    Args:
-        first: First filesystem path.
-        second: Second filesystem path.
-
-    Returns:
-        ``True`` when the resolved paths overlap by containment.
-    """
-
-    first_path = Path(first).expanduser().resolve(strict=False)
-    second_path = Path(second).expanduser().resolve(strict=False)
-    return path_is_within(first_path, second_path) or path_is_within(second_path, first_path)
-
-
-def path_is_within(path: str | Path, parent: str | Path) -> bool:
-    """Return whether a resolved path is equal to or below its parent.
-
-    Args:
-        path: Path to check.
-        parent: Candidate containing directory.
-
-    Returns:
-        ``True`` when ``path`` is equal to or nested beneath ``parent``.
-    """
-
-    try:
-        Path(path).expanduser().resolve(strict=False).relative_to(
-            Path(parent).expanduser().resolve(strict=False)
-        )
-        return True
-    except ValueError:
-        return False
-
-
 def resolve_workspace_path(path: str, workspace_dir: str) -> str:
     """Resolve a path under ``workspace_dir`` and reject traversal escapes.
 

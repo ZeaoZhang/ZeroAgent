@@ -1,19 +1,37 @@
-# Memory Cleanup SOP
+# 记忆整理 SOP
 
-## Purpose
+## 核心原则：存在性编码
+LLM自身是压缩器+解码器。L1只需让它**意识到某类知识存在**，它就能通过tool call自行取用深层内容。
 
-Keep persistent local_v1 memory accurate and small. Never edit or reconstruct file-layer `global_mem*` indexes at runtime.
+**L1本质：用最短词数表达——什么场景下有什么记忆可用（存在性）。**
 
-## Review and cleanup
+L1两类内容，统一ROI评估：
+- **存在性指针**：指向L2/L3知识的最短触发词
+- **行为规则**：不提醒就会犯的错（致命/高频均可，只要ROI过门槛）
 
-1. Use `context_search` or `context_list` under the current authorized URI; inspect an exact object and revision with `context_read` before proposing a change.
-2. Preserve typed value, scope, revision and source references. Do not merge across principals/projects or activate candidate, conflicted, superseded, retracted or legacy-unverified objects without new supported evidence.
-3. Prefer `retract` when the user wants the memory no longer used but retained in history. Require an explicit user retraction receipt and the current expected revision.
-4. Use `purge` only for an explicit request to delete a specific object. It must be a single-object batch with its exact current revision and authorized deletion receipt. Never infer a deletion target by basename or memory age.
-5. Read the result. A `purge_pending` result may be retried only with the exact same idempotency key and payload. Report source-cleanup status, unresolved legacy provenance, and retained session/backup/export identifiers; do not claim complete erasure when any remain.
+ROI = (不放这几个词的犯错概率 × 代价) / 每轮词数成本
 
-## Prohibitions
+## 快速判断
+**该留**：反直觉触发词——没提示就想不到去查SOP的场景词。如`tmwebdriver_sop(httponly cookie)`：没有`httponly cookie`这个词，你不会想到取cookie要查tmwebdriver
+**该删**：
+- 名字翻译：`proxy-pool/(代理池)` → 名字自解释，括号是废词，直接`proxy-pool`即可
+- 内容描述：`opencli_sop(66站点CLI,复用Chrome session)` → 实现细节属于SOP内部，不是触发场景
+- 直觉能力：不提醒也能想到 → 0收益，白交每轮成本
+- 冗余：L3已覆盖的规则 / L1其他行已含的片段
 
-- No automatic cleanup, bulk rewriting, or file deletion.
-- No direct edits to ContextStore revision files or manifest.
-- If source provenance, object identity or authority is uncertain, stop and ask for the owner/user to resolve it.
+## 压缩四原则
+1. **命名自解释 > 加描述**：SOP名能说清的，L1不加注释；改名的ROI常高于改L1
+2. **存在性集合最小描述**：多个相近条目若可被同一上位场景覆盖，用集合名表达这类能力的存在，不必平铺子项。如`qq操作/飞书操作/企微操作`→`im操作:*_im_sop`；子项名自解释则只列名不翻译
+3. **条目 = 场景↔方案存在性**：如`视频理解:yt-dlp取字幕`、`fofa(资产测绘)`——场景名是触发词，方案名编码存在性；括号内**只放反直觉触发词**，非反直觉的（纯翻译/内容描述/实现细节）全是浪费
+4. **分层归位**：带行为规则或高频高ROI的条目放上方场景行，纯存在性指针归L2/L3平铺列表
+
+## 整理流程
+1. 逐行读L1，按`|`拆片段，先分类：存在性指针 / RULES / 翻译 / 内容描述 / 实现细节 / 冗余
+2. 先清RULES：逐条问“这是全局高ROI，还是特定场景低危险规则？”
+   - 全局高ROI → 留
+   - 特定场景 / 低危险 → 降级到L3或删除
+3. 再清存在性指针：检查是否在表达**场景↔方案存在性**；场景触发词只在**反直觉**时才加，翻译/内容描述/实现细节删掉
+4. 检查L3文件名是否自解释；能靠改名解决的，不靠L1加描述；最后验证总行数 ≤ 30
+
+**红线**：记忆修改是持久性伤害，错误每轮复利。L1只能patch词级别修改，禁overwrite
+产生误导应及时修正L1或记忆更名

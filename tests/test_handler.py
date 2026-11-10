@@ -620,12 +620,12 @@ class TestBaseHandlerDispatch:
         assert result.data["status"] == "error"
         assert result.next_prompt == "\n"
 
-    def test_real_registry_file_read_does_not_load_unimported_legacy_sop(
+    def test_real_registry_file_read_memory_tip_is_next_prompt(
         self,
         mock_config,
         tmp_path,
     ) -> None:
-        """旧 memory_dir 中的 SOP 不会绕过 context 导入自动读取."""
+        """读取 memory/SOP 文件时，提示应进 next_prompt 而非污染工具结果."""
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
         sops_dir = memory_dir / "sops"
@@ -644,8 +644,10 @@ class TestBaseHandlerDispatch:
         ))
 
         assert isinstance(result.data, str)
-        assert "step one" not in result.data
-        assert result.data.startswith("Error:")
+        assert "step one" in result.data
+        assert "SYSTEM TIPS" not in result.data
+        assert "SYSTEM TIPS" in result.next_prompt
+        assert result.next_prompt.startswith("\n### [WORKING MEMORY]")
 
     def test_real_registry_file_read_uses_line_number_prefix(
         self,
@@ -720,12 +722,12 @@ class TestBaseHandlerDispatch:
         assert "SYSTEM TIPS" in result.next_prompt
         assert result.next_prompt.startswith("\n### [WORKING MEMORY]")
 
-    def test_file_read_memory_alias_requires_explicit_context_import(
+    def test_file_read_memory_alias_resolves_outside_workspace(
         self,
         mock_config,
         tmp_path,
     ) -> None:
-        """memory/... paths do not expose old files unless explicitly imported."""
+        """memory/... paths should resolve to config.memory_dir, not workspace/memory."""
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         memory_dir = tmp_path / "memory"
@@ -743,15 +745,15 @@ class TestBaseHandlerDispatch:
             MockResponse(content=""),
         ))
 
-        assert "goal body" not in result.data
-        assert result.data.startswith("Error:")
+        assert "goal body" in result.data
+        assert "File not found" not in result.data
 
-    def test_real_registry_start_long_term_update_is_a_no_write_pointer(
+    def test_real_registry_start_long_term_update_includes_global_memory(
         self,
         mock_config,
         tmp_path,
     ) -> None:
-        """The retired file-based tool only points callers to memory_update."""
+        """start_long_term_update 的结算 prompt 应包含全局记忆上下文."""
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
         sops_dir = memory_dir / "sops"
@@ -775,9 +777,10 @@ class TestBaseHandlerDispatch:
             MockResponse(content=""),
         ))
 
-        assert result.data["code"] == "MEMORY_UPDATE_REQUIRES_SERVICE"
-        assert "memory_update" in result.data["msg"]
-        assert "# Insight" not in result.data["msg"]
+        assert "This is L0" in result.data
+        assert "总结提炼经验" in result.next_prompt
+        assert "global_mem_insight.txt" in result.next_prompt
+        assert "# Insight" in result.next_prompt
 
     def test_complete_task_finishes_open_answer_without_evidence(
         self,

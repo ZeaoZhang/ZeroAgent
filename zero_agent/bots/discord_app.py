@@ -371,18 +371,9 @@ class DiscordApp(AgentBotMixin):
         """
         if not channel_is_linked(self.source):
             return None
-        identity_context = dict(ctx)
-        from zero_agent.bots.common import _strip_bot_identity_context
-        ctx = _strip_bot_identity_context(ctx)
         r = self._get_runner(chat_id)
         parts = (cmd or "").split()
         op = (parts[0] if parts else "").lower()
-        if op == "/link":
-            if len(parts) != 2:
-                return await self.send_text(chat_id, "用法: /link <一次性链接码>", **ctx)
-            return await self._redeem_identity_link(
-                chat_id, parts[1], transport_context=ctx, **identity_context,
-            )
         if op == "/help":
             return await self.send_text(chat_id, HELP_TEXT, **ctx)
         if op == "/stop":
@@ -441,26 +432,17 @@ class DiscordApp(AgentBotMixin):
         """在隔离的 per-chat agent 上消费 chunk/terminal 输出."""
         if not channel_is_linked(self.source):
             return None
-        identity_context = dict(ctx)
-        from zero_agent.bots.common import _strip_bot_identity_context
-        ctx = _strip_bot_identity_context(ctx)
         r = self._get_runner(chat_id)
         state = {"running": True}
         self.user_tasks[chat_id] = state
         terminal = None
         try:
             await self.send_text(chat_id, "思考中...", **ctx)
-            runtime_context = self.runtime_context_for_message(chat_id, **identity_context)
-            from zero_agent.context.errors import ContextError
-            from zero_agent.context.types import RuntimeContext
-            if not isinstance(runtime_context, RuntimeContext):
-                raise ContextError("PERMISSION_DENIED", "The bot entry must provide a RuntimeContext.")
-            task_kwargs = {
-                "source": self.source,
-                "prompt_capabilities": (PROMPT_CAPABILITY_FILE_DELIVERY,),
-            }
-            task_kwargs["runtime_context"] = runtime_context
-            dq = r.put_task(text, **task_kwargs)
+            dq = r.put_task(
+                text,
+                source=self.source,
+                prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+            )
             last_ping = time.time()
             while state["running"]:
                 try:
@@ -566,22 +548,13 @@ class DiscordApp(AgentBotMixin):
         if not content:
             return
 
-        from zero_agent.bots.common import redact_private_link_code
-        print(f"[Discord] message from {user_name} ({user_id}, {'dm' if is_dm else 'guild'}): {redact_private_link_code(content[:200])}")
-        runtime_context = {
-            "bot_account_id": str(getattr(self.client.user, "id", "") or ""),
-            "verified_sender_id": user_id,
-            "sender_verified": bool(user_id),
-            "is_private_chat": is_dm,
-            "is_group_chat": is_guild,
-            "host_session_key": chat_id,
-        }
+        print(f"[Discord] message from {user_name} ({user_id}, {'dm' if is_dm else 'guild'}): {content[:200]}")
 
         if content.startswith("/"):
-            return await self.handle_command(chat_id, content, **runtime_context)
+            return await self.handle_command(chat_id, content)
 
         # 后台执行 agent 任务
-        task = asyncio.create_task(self.run_agent(chat_id, content, **runtime_context))
+        task = asyncio.create_task(self.run_agent(chat_id, content))
         self.background_tasks.add(task)
         task.add_done_callback(self.background_tasks.discard)
 

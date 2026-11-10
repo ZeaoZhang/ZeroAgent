@@ -6,11 +6,10 @@ ZeroAgent 是一个基于 `litellm` 的可复用自主 Agent 框架，采用 gen
 
 - **Generator-based Agent Loop**: LLM 调用和工具执行以 Python generator 流式产出状态，最终返回结构化结果。
 - **多后端与容错**: 支持多个 LLM backend、运行时切换、failover 和 spring-back。
-- **工具注册表**: `ToolRegistry.with_builtins()` 注册核心操作、上下文和技能路由工具，并支持自定义工具注册。
+- **工具注册表**: `ToolRegistry.with_builtins()` 默认注册 9 个核心原子工具，并支持自定义工具注册。
 - **双语自适应**: 系统提示、工具描述和 handler 消息支持中文、英文和自动语言选择。
 - **文本工具调用回退**: 对不支持原生 tool calling 的模型，可从 XML/JSON 文本中解析工具调用。
 - **记忆与压缩**: 分层记忆管理、历史标签压缩、消息裁剪和 OCR/视觉记忆扩展。
-- **本地上下文**: `local_v1` 是唯一支持模式，提供逻辑 URI、来源回执、用户/项目作用域、显式资源导入和版本固定的内置技能；旧 `legacy` 模式配置会被拒绝。
 - **Hook 与插件**: 8 个标准事件钩子，包含 Langfuse tracing 插件示例。
 - **UltraPlan 编排**: Python 脚本多 agent 编排，支持 Explore/Sweep/Hunt/Improve 模式。
 - **持续子 Agent**: 基于文件 I/O 的持续子 agent 协作，支持 reply.txt 轮询和 conductor UI。
@@ -145,23 +144,6 @@ llm_backends:
 ```
 
 > 不要把真实 API Key 提交到 Git。`config.yaml` 已加入 `.gitignore`，默认作为本机项目配置使用。
-
-## 本地上下文、记忆与技能
-
-新上下文运行时以显式身份和授权访问用户记忆、项目资料与内置 SOP。开发阶段不迁移旧用户数据，也不自动读取旧记忆文件。配置、项目与 bot 身份管理、显式导入、备份/导出、删除边界和
-执行权限说明见[上下文与记忆指南](docs/context-memory-skills.md)。
-
-```yaml
-context:
-  mode: local_v1
-  root: ./context-data
-  local_user_id: local
-  auto_injection_max_bytes: 8000
-  search_backend: lexical
-```
-
-开发期间从空的 `context-data/` 开始；旧配置和旧记忆文件不会迁移或自动读取。该目录是本机
-运行数据，已加入 Git 忽略；manifest 和正文应一并纳入用户自己的备份策略。
 
 ## 快速开始
 

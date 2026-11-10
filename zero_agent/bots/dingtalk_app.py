@@ -29,7 +29,6 @@ from zero_agent.bots.common import (
     require_runtime,
     split_text,
     IMAGE_EXTS,
-    redact_private_link_code,
 )
 
 try:
@@ -310,19 +309,11 @@ class DingTalkApp(AgentBotMixin):
             # 群聊使用 group: 前缀区分会话类型
             is_group = conversation_type == "2" and conversation_id
             chat_id = f"group:{conversation_id}" if is_group else sender_id
-            print(f"[DingTalk] message from {sender_name} ({sender_id}): {redact_private_link_code(content)}")
-            context = {
-                "bot_account_id": CLIENT_ID,
-                "verified_sender_id": sender_id,
-                "sender_verified": sender_id not in {"", "unknown"},
-                "is_private_chat": conversation_type == "1",
-                "is_group_chat": bool(is_group),
-                "host_session_key": str(conversation_id or sender_id),
-            }
+            print(f"[DingTalk] message from {sender_name} ({sender_id}): {content}")
             if content.startswith("/"):
-                return await self.handle_command(chat_id, content, **context)
+                return await self.handle_command(chat_id, content)
             # 后台执行 agent 任务, 不阻塞消息回调
-            task = asyncio.create_task(self.run_agent(chat_id, content, **context))
+            task = asyncio.create_task(self.run_agent(chat_id, content))
             self.background_tasks.add(task)
             task.add_done_callback(self.background_tasks.discard)
         except Exception:

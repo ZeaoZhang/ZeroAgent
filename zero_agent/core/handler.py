@@ -96,12 +96,6 @@ class BaseHandler:
             mode=TaskMode.OPEN,
         )
         self.evidence_ledger = EvidenceLedger()
-        self.runtime_context = None
-        self.context_service = None
-        self.memory_service = None
-        self.source_receipt_writer = None
-        self.skill_action_gate = None
-        self.require_skill_action_gate = False
         self.plan_verify_status = "missing"
         self.completion_gate = CompletionGate(
             retry_prompt_factory=self._native_tool_retry_prompt,
@@ -259,36 +253,9 @@ class BaseHandler:
         """
         args["_index"] = index
         args["_tool_num"] = tool_num
-        tool_def = self.registry.get(tool_name)
         if tool_name != "no_tool":
             self.completion_gate.reset()
-            skill_action = getattr(tool_def, "skill_action", None)
-            if skill_action:
-                gate = getattr(self, "skill_action_gate", None)
-                if gate is None:
-                    blocked = (
-                        {
-                            "status": "error",
-                            "code": "SKILL_ROUTER_UNAVAILABLE",
-                            "message": "The task skill router is unavailable; this action is blocked.",
-                        }
-                        if self.require_skill_action_gate
-                        else None
-                    )
-                else:
-                    blocked = gate.check(skill_action, tool_name=tool_name, args=args)
-                if blocked:
-                    ret = StepOutcome(
-                        blocked,
-                        next_prompt=(
-                            "[System] The requested action was blocked by the task skill gate. "
-                            "Follow the returned requirement: route triggered skills and load each exact pinned revision before retrying."
-                        ),
-                        action=StepAction.CONTINUE,
-                    )
-                    return self._finalize_tool_dispatch(tool_name, args, ret)
-            if not (tool_name == "skill_run" and args.get("entrypoint") == "load"):
-                self._mark_executing(tool_name)
+            self._mark_executing(tool_name)
 
         # tool_before 钩子
         self._trigger_hook("tool_before", {
@@ -667,20 +634,7 @@ class BaseHandler:
                 action=StepAction.CONTINUE,
             )
 
-        gate = getattr(self, "skill_action_gate", None)
-        if gate is not None and gate.has_matching_skills:
-            blocked = gate.check("task.complete", tool_name="no_tool", args=args)
-            if blocked is not None:
-                return StepOutcome(
-                    blocked,
-                    next_prompt=(
-                        "[System] Route every matching SOP and load its exact pinned revision "
-                        "before completing this task."
-                    ),
-                    action=StepAction.CONTINUE,
-                )
         certificate, continuation_prompt = evaluate_completion(
-
             self.task_contract,
             self.evidence_ledger,
             response,
@@ -761,37 +715,12 @@ class BaseHandler:
             if not str(k).startswith("_")
         }
         summary = f"{tool_name}({self._summarize_evidence_args(clean_args)})"
-        data_ref = None
-        receipt_writer = getattr(self, "source_receipt_writer", None)
-        if callable(receipt_writer):
-            event_sequence = (
-                len(self.evidence_ledger.records)
-                + getattr(self, "_source_event_sequence_offset", 0)
-                + 1
-            )
-            try:
-                tool_definition = self.registry.get(tool_name)
-                data_ref = receipt_writer(
-                    tool_name=tool_name,
-                    contract_version=getattr(tool_definition, "contract_version", "v1"),
-                    status=status,
-                    data=data,
-                    source_id=f"{self.task_contract.task_id}:{event_sequence}:{tool_name}",
-                    event_sequence=event_sequence,
-                )
-            except Exception:
-                import logging
-                logging.getLogger("zero_agent").exception(
-                    "Failed to persist tool source receipt for %s",
-                    tool_name,
-                )
         self.evidence_ledger.records.append(EvidenceRecord(
             turn=self.current_turn,
             tool_name=tool_name,
             status=status,
             kind=kind,
             summary=summary,
-            data_ref=data_ref,
         ))
 
     @staticmethod
@@ -825,16 +754,6 @@ class BaseHandler:
             return (
                 "success"
                 if isinstance(data, str) and not data.startswith("Error:")
-                else "error"
-            )
-        if tool_name == "skill_run":
-            if isinstance(data, dict) and data.get("status") == "loaded":
-                return "unknown"
-            return (
-                "success"
-                if isinstance(data, dict)
-                and data.get("status") == "success"
-                and data.get("exit_code") == 0
                 else "error"
             )
         if tool_name in {"file_write", "file_patch", "web_scan", "web_execute_js"}:
@@ -1189,6 +1108,13 @@ class BaseHandler:
                 "1. Probe physical boundaries 2. Request user assistance. "
                 "Call update_working_checkpoint if needed to save key context.",
             )
+
+        # ——— 3. 定期记忆注入 ———
+        elif turn % 10 == 0:
+            if self.parent is not None and hasattr(self.parent, "memory"):
+                memory_ctx = self.parent.memory.get_global_memory_context()
+                if memory_ctx:
+                    next_prompt += "\n" + memory_ctx
 
         # ─── 3.5 Plan Mode 提示 ───
         if plan_active:

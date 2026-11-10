@@ -44,7 +44,6 @@ from zero_agent.bots.common import (
     terminal_reply_text,
     terminal_output_text,
     terminal_notice,
-    redact_private_link_code,
 )
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -180,7 +179,7 @@ class WeComApp(AgentBotMixin):
             await self.send_media(chat_id, fp)
 
     # —— agent execution ——
-    async def run_agent(self, chat_id, text, **ctx):
+    async def run_agent(self, chat_id, text, **_):
         if not channel_is_linked(self.source):
             return None
         state = {"running": True}
@@ -189,14 +188,11 @@ class WeComApp(AgentBotMixin):
 
         try:
             await self.send_text(chat_id, "🤔 思考中...")
-            runtime_context = self.runtime_context_for_message(chat_id, **ctx)
-            task_kwargs = {
-                "source": self.source,
-                "prompt_capabilities": (PROMPT_CAPABILITY_FILE_DELIVERY,),
-            }
-            if runtime_context is not None:
-                task_kwargs["runtime_context"] = runtime_context
-            dq = runner.put_task(text, **task_kwargs)
+            dq = runner.put_task(
+                text,
+                source=self.source,
+                prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+            )
             while state["running"]:
                 try:
                     item = await asyncio.to_thread(dq.get, True, 1)
@@ -236,33 +232,17 @@ class WeComApp(AgentBotMixin):
         content = str((body.get("text", {}) or {}).get("content", "") or "").strip()
         if not content:
             return
-        _tprint(f"[{_ts()}] 📩 {sender_id}: {redact_private_link_code(content)}")
-        context = {
-            "bot_account_id": BOT_ID,
-            "verified_sender_id": sender_id,
-            "sender_verified": sender_id not in {"", "unknown"},
-            "is_private_chat": str(body.get("chattype", "")).casefold() in {"single", "private", "p2p"},
-            "is_group_chat": str(body.get("chattype", "")).casefold() in {"group", "room"},
-            "host_session_key": chat_id,
-        }
+        _tprint(f"[{_ts()}] 📩 {sender_id}: {content}")
         if content.startswith("/"):
-            _tprint(f"[{_ts()}] 🔧 命令 {redact_private_link_code(content)} from {sender_id}")
-            return await self.handle_command(chat_id, content, **context)
-        asyncio.create_task(self.run_agent(chat_id, content, **context))
+            _tprint(f"[{_ts()}] 🔧 命令 {content} from {sender_id}")
+            return await self.handle_command(chat_id, content)
+        asyncio.create_task(self.run_agent(chat_id, content))
 
     async def _on_media(self, frame, key, icon):
         parsed = self._accept(frame)
         if not parsed:
             return
         body, sender_id, chat_id = parsed
-        context = {
-            "bot_account_id": BOT_ID,
-            "verified_sender_id": sender_id,
-            "sender_verified": sender_id not in {"", "unknown"},
-            "is_private_chat": str(body.get("chattype", "")).casefold() in {"single", "private", "p2p"},
-            "is_group_chat": str(body.get("chattype", "")).casefold() in {"group", "room"},
-            "host_session_key": chat_id,
-        }
         info = body.get(key) or {}
         url = info.get("url", "")
         if not url:
@@ -275,7 +255,7 @@ class WeComApp(AgentBotMixin):
             path = await self._save_media(url, info.get("aeskey", ""), default)
             label = "一张图片" if key == "image" else f"文件 {os.path.basename(path)}"
             asyncio.create_task(
-                self.run_agent(chat_id, f"[用户发送了{label}, 已保存到: {path}]", **context)
+                self.run_agent(chat_id, f"[用户发送了{label}, 已保存到: {path}]")
             )
         except Exception as e:
             print(f"[WeCom] on_{key} error: {e}")

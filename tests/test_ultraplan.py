@@ -17,34 +17,14 @@ def test_ultraplan_sop_contains_keyword():
     assert "zero_agent.assets.ga_ultraplan" in content
 
 
-def test_project_mode_sop_uses_authorized_context_memory_only():
-    """The project SOP must not direct prompt injection through legacy files."""
+def test_project_mode_sop_contains_keyword():
+    """project_mode_sop.md contains 'PROJECT MODE' reference."""
     path = os.path.join(
         os.path.dirname(os.path.dirname(__file__)),
         "zero_agent", "assets", "memory_seed", "sops", "project_mode_sop.md",
     )
     content = open(path, encoding="utf-8").read()
     assert "Project Mode" in content
-    assert "za://projects/<id>/memories" in content
-    assert "project_memory.md" not in content
-    assert ".active_project" not in content
-
-
-def test_default_plugins_do_not_register_legacy_project_injection(tmp_path):
-    """Legacy project-mode hooks cannot enter task prompts or turns."""
-    from types import SimpleNamespace
-
-    from zero_agent.core.agent import ZeroAgent
-    from zero_agent.core.hooks import HookSystem, EVENT_AGENT_BEFORE
-
-    hooks = HookSystem()
-    agent = object.__new__(ZeroAgent)
-    agent.hooks = hooks
-    agent.config = SimpleNamespace(workspace_dir=str(tmp_path))
-    agent._register_builtin_plugins()
-    context = {"messages": [{"role": "user", "content": "continue"}]}
-    hooks.trigger(EVENT_AGENT_BEFORE, context)
-    assert context["messages"] == [{"role": "user", "content": "continue"}]
 
 
 def test_computer_use_contains_macos():
@@ -128,3 +108,12 @@ def test_goal_mode_continuation_has_phases():
     assert "创造阶段" in CONTINUATION_PROMPT
     assert "检验阶段" in CONTINUATION_PROMPT
     assert "改进阶段" in CONTINUATION_PROMPT
+
+
+def test_project_mode_plugin_register():
+    """project_mode plugin register() is callable and returns True."""
+    from zero_agent.plugins.project_mode import register
+    from zero_agent.core.hooks import HookSystem
+    hs = HookSystem()
+    result = register(hs)
+    assert result is True

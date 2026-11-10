@@ -865,15 +865,13 @@ class TestZeroAgentConfigReload:
         )
         agent = ZeroAgent(config=config)
         old_registry = agent.registry
-        old_handler = agent.handler
+        old_memory = agent.memory
         old_cwd = agent.handler.cwd
 
-        assert agent.handler.context_service is None
-        assert agent.handler.memory_service is None
         agent._apply_pending_runtime_config()
 
         assert agent.registry is old_registry
-        assert agent.handler is old_handler
+        assert agent.memory is old_memory
         assert agent.handler.cwd == old_cwd
 
     def test_reload_preserves_actual_active_backup_identity(
@@ -942,7 +940,7 @@ class TestZeroAgentConfigReload:
         agent = ZeroAgent(config=config)
         old_handler = agent.handler
         old_registry = agent.registry
-        # local_v1 services are task-bound and intentionally absent until a task starts.
+        old_memory = agent.memory
         contract = TaskContract("task-1", "inspect", TaskMode.EXECUTING)
         ledger = EvidenceLedger()
         old_handler.task_contract = contract
@@ -958,8 +956,7 @@ class TestZeroAgentConfigReload:
         assert agent.handler.client is agent.client
         assert agent.handler.cwd == str(old_workspace)
         assert agent.registry is old_registry
-        assert agent.handler.context_service is None
-        assert agent.handler.memory_service is None
+        assert agent.memory is old_memory
         assert agent.pending_runtime_config is agent.config
         assert agent.handler.task_contract is contract
         assert agent.handler.evidence_ledger is ledger
@@ -971,8 +968,7 @@ class TestZeroAgentConfigReload:
         assert agent.handler.cwd == str(new_workspace)
         assert agent.handler.registry is agent.registry
         assert agent.registry is not old_registry
-        assert agent.handler.context_service is None
-        assert agent.handler.memory_service is None
+        assert agent.memory is not old_memory
 
 
 def _complete_response(answer: str, evidence_refs: list[int]) -> MockResponse:
@@ -984,18 +980,6 @@ def _complete_response(answer: str, evidence_refs: list[int]) -> MockResponse:
             arguments=json.dumps({"answer": answer, "evidence_refs": evidence_refs}),
         ),
         id="call_complete",
-    )])
-
-
-def _no_skill_route_response() -> MockResponse:
-    import json
-
-    return MockResponse(tool_calls=[MockToolCall(
-        function=MockFunction(
-            name="skill_route",
-            arguments=json.dumps({"skills": [], "trigger_evidence": {}}),
-        ),
-        id="call_skill_route",
     )])
 
 class TestZeroAgentHooks:
@@ -1102,7 +1086,6 @@ class TestZeroAgentHooks:
         fake_client = _FakeClient(
             config.llm_backends["default"],
             [
-                _no_skill_route_response(),
                 MockResponse(
                     content="",
                     tool_calls=[
@@ -1129,13 +1112,8 @@ class TestZeroAgentHooks:
 
         assert exit_reason.status is TerminalStatus.COMPLETED
         assert exit_reason.certificate is not None
-        tool_results = [
-            result["content"]
-            for request, *_ in fake_client.calls
-            if isinstance(request, dict)
-            for result in request.get("tool_results", [])
-        ]
-        tool_result = next(result for result in tool_results if "after abort" in result)
+        assert fake_client.calls[1][0]["role"] == "user"
+        tool_result = fake_client.calls[1][0]["tool_results"][0]["content"]
         assert "after abort" in tool_result
         assert '"status": "success"' in tool_result
 
@@ -1172,7 +1150,7 @@ class TestZeroAgentHooks:
         )
         fake_client = _FakeClient(
             config.llm_backends["default"],
-            [_no_skill_route_response(), missing_code, missing_code, missing_code, missing_code],
+            [missing_code, missing_code, missing_code, missing_code],
         )
         monkeypatch.setattr(
             "zero_agent.core.agent.LLMFactory.create_all_sessions",
@@ -1184,7 +1162,7 @@ class TestZeroAgentHooks:
 
         assert terminal.status is TerminalStatus.PROTOCOL_ERROR
         assert terminal.reason == "code_run_argument_retry_limit"
-        assert fake_client._call_count == 5
+        assert fake_client._call_count == 4
 
     def test_run_creates_fresh_handler_and_ages_key_info(
         self,

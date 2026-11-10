@@ -32,7 +32,6 @@ from zero_agent.bots.common import (
     require_runtime,
     split_text,
     IMAGE_EXTS,
-    redact_private_link_code,
 )
 
 try:
@@ -342,22 +341,10 @@ class QQApp(AgentBotMixin):
             if not public_access(ALLOWED) and user_id not in ALLOWED:
                 print(f"[QQ] unauthorized user: {user_id}")
                 return
-            print(f"[QQ] message from {user_id} ({'group' if is_group else 'c2c'}): {redact_private_link_code(content)}")
-            context = {
-                "bot_account_id": APP_ID,
-                "verified_sender_id": user_id,
-                "sender_verified": user_id != "unknown",
-                "is_private_chat": not is_group,
-                "is_group_chat": is_group,
-                "host_session_key": chat_id,
-            }
+            print(f"[QQ] message from {user_id} ({'group' if is_group else 'c2c'}): {content}")
             if content.startswith("/"):
-                return await self.handle_command(
-                    chat_id, content, msg_id=msg_id, is_group=is_group, **context,
-                )
-            asyncio.create_task(self.run_agent(
-                chat_id, content, msg_id=msg_id, is_group=is_group, **context,
-            ))
+                return await self.handle_command(chat_id, content, msg_id=msg_id, is_group=is_group)
+            asyncio.create_task(self.run_agent(chat_id, content, msg_id=msg_id, is_group=is_group))
         except Exception:
             import traceback
             print("[QQ] handle_message error")

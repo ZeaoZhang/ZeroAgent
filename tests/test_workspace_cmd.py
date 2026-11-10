@@ -157,22 +157,31 @@ def test_validate_strips_quotes():
 # --------------------------------------------------------------------------- #
 
 
-def test_prepare_creates_safe_junction_without_memory_side_effect(real_target_dir):
+def test_prepare_creates_junction_and_returns_info(real_target_dir):
     r = wcmd.prepare(str(real_target_dir))
     assert r["ok"]
     assert r["name"]
     assert r["link"]
     assert r["target"]
-    assert not (real_target_dir / "project_memory.md").exists()
+    assert r["error"] == ""
+    # The link path should exist
     assert Path(r["link"]).exists(follow_symlinks=False)
 
 
 def test_prepare_is_idempotent(real_target_dir):
     r1 = wcmd.prepare(str(real_target_dir))
     r2 = wcmd.prepare(str(real_target_dir))
-    assert r1["ok"] and r2["ok"]
+    assert r1["ok"]
+    assert r2["ok"]
     assert r1["name"] == r2["name"]
     assert r1["link"] == r2["link"]
+
+
+def test_prepare_ensures_project_memory_md(real_target_dir):
+    wcmd.prepare(str(real_target_dir))
+    # Check that project_memory.md exists in the target
+    mem = real_target_dir / "project_memory.md"
+    assert mem.is_file(), "prepare should create project_memory.md"
 
 
 def test_prepare_rejects_invalid_path():
@@ -181,7 +190,73 @@ def test_prepare_rejects_invalid_path():
     assert r["error"]
 
 
+def test_prepare_returns_mem_text(real_target_dir):
+    mem = real_target_dir / "project_memory.md"
+    mem.write_text("Hello from memory!", encoding="utf-8")
+    r = wcmd.prepare(str(real_target_dir))
+    assert r["ok"]
+    assert "Hello from memory!" in r["mem_text"]
 
+
+# --------------------------------------------------------------------------- #
+# activate / deactivate / current
+# --------------------------------------------------------------------------- #
+
+
+def test_activate_sets_anchor_and_returns_success(real_target_dir):
+    r = wcmd.activate(str(real_target_dir))
+    assert r["ok"]
+    assert r["name"]
+    # Anchor file should exist
+    anchor = wcmd._anchor_path()
+    assert anchor.is_file()
+    assert anchor.read_text(encoding="utf-8").strip() == r["name"]
+
+
+def test_current_returns_dict_when_active(real_target_dir):
+    wcmd.activate(str(real_target_dir))
+    cur = wcmd.current()
+    assert cur is not None
+    assert "name" in cur
+    assert "path" in cur
+
+
+def test_current_returns_none_when_not_active():
+    # Ensure no anchor
+    anchor = wcmd._anchor_path()
+    if anchor.exists():
+        anchor.unlink()
+    cur = wcmd.current()
+    assert cur is None
+
+
+def test_deactivate_removes_anchor_and_returns_true(real_target_dir):
+    wcmd.activate(str(real_target_dir))
+    assert wcmd.current() is not None
+
+    result = wcmd.deactivate()
+    assert result is True
+    assert wcmd.current() is None
+
+
+def test_deactivate_returns_false_when_no_anchor():
+    anchor = wcmd._anchor_path()
+    if anchor.exists():
+        anchor.unlink()
+    result = wcmd.deactivate()
+    assert result is False
+
+
+def test_deactivate_preserves_registry(real_target_dir):
+    wcmd.activate(str(real_target_dir))
+
+    # Deactivate
+    wcmd.deactivate()
+
+    # Registry entry should still exist
+    items = wcmd.registry_load()
+    expected_name = wcmd._ws_name(str(real_target_dir))
+    assert expected_name in items
 
 
 # --------------------------------------------------------------------------- #
@@ -310,6 +385,14 @@ def test_remove_does_not_delete_target_files(real_target_dir):
     assert (real_target_dir / "README.md").is_file()
 
 
+def test_remove_deactivates_if_currently_active(real_target_dir):
+    wcmd.activate(str(real_target_dir))
+    assert wcmd.current() is not None
+
+    name = wcmd._ws_name(str(real_target_dir))
+    wcmd.remove(name)
+
+    assert wcmd.current() is None
 
 
 # --------------------------------------------------------------------------- #
@@ -387,11 +470,30 @@ def mock_agent():
     return MagicMock()
 
 
-def test_handle_path_selects_workspace_without_legacy_activation(real_target_dir, mock_agent):
-    msg = wcmd.handle(str(real_target_dir), mock_agent)
-    assert "已选择" in msg
-    assert not list(wcmd._temp_root().glob(".active_project.*"))
+def test_handle_empty_args_lists_workspaces(temp_project, mock_agent):
+    msg = wcmd.handle("", mock_agent)
+    # No workspaces registered → shows "暂无已登记"
+    assert "暂无" in msg or len(msg) > 0
 
+
+def test_handle_empty_args_with_workspaces(real_target_dir, mock_agent):
+    wcmd.registry_upsert("test-ws", str(real_target_dir))
+    msg = wcmd.handle("", mock_agent)
+    assert "test-ws" in msg
+
+
+def test_handle_off_deactivates(real_target_dir, mock_agent):
+    wcmd.activate(str(real_target_dir))
+    msg = wcmd.handle("off", mock_agent)
+    assert "退出" in msg
+    assert wcmd.current() is None
+
+
+def test_handle_off_when_none_active(mock_agent):
+    # Ensure deactivated
+    wcmd.deactivate()
+    msg = wcmd.handle("off", mock_agent)
+    assert "未处于" in msg
 
 
 def test_handle_rm_removes_and_returns_message(real_target_dir, mock_agent):
@@ -408,10 +510,10 @@ def test_handle_rm_without_name(mock_agent):
     assert "需要绝对路径" in msg
 
 
-def test_handle_path_selects_workspace(real_target_dir, mock_agent):
+def test_handle_activates_from_path(real_target_dir, mock_agent):
     msg = wcmd.handle(str(real_target_dir), mock_agent)
-    assert "已选择" in msg
-    assert not list(wcmd._temp_root().glob(".active_project.*"))
+    assert "已进入" in msg
+    assert wcmd.current() is not None
 
 
 def test_handle_invalid_path_returns_error(mock_agent):

@@ -17,7 +17,6 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.types import TaskMode, TerminalEvent, TerminalStatus
-from zero_agent.context.types import RuntimeContext
 
 
 def _consume_agent_run(
@@ -547,7 +546,6 @@ class AgentRunner:
         task_mode: TaskMode = TaskMode.OPEN,
         plan_path: Optional[str] = None,
         prompt_capabilities: Iterable[str] = (),
-        runtime_context: Optional[RuntimeContext] = None,
     ) -> queue.Queue:
         """提交任务到 ZeroAgent, 返回流式输出队列.
 
@@ -583,8 +581,6 @@ class AgentRunner:
                 "task_mode": task_mode,
                 "plan_path": plan_path,
             }
-            if runtime_context is not None:
-                task["runtime_context"] = runtime_context
             capabilities = tuple(dict.fromkeys(prompt_capabilities))
             if capabilities:
                 task["prompt_capabilities"] = capabilities
@@ -732,8 +728,6 @@ class AgentRunner:
                         "initial_mode": task_mode,
                         "plan_path": plan_path,
                     }
-                    if task.get("runtime_context") is not None:
-                        run_kwargs["runtime_context"] = task["runtime_context"]
                     if prompt_capabilities:
                         run_kwargs["prompt_capabilities"] = prompt_capabilities
                     gen = self._agent.run(query, **run_kwargs)

@@ -36,7 +36,7 @@ from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.channel_config import ChannelConfigError
 from zero_agent.bots.common import load_keys
-from zero_agent.bots.common import channel_is_linked, redact_private_link_code
+from zero_agent.bots.common import channel_is_linked
 from zero_agent.bots.common import (
     PROMPT_CAPABILITY_FILE_DELIVERY,
     resolve_output_files,
@@ -533,38 +533,7 @@ def on_message(bot: WxBotClient, msg):
         text = (text + "\n" if text else "") + "\n".join(
             f"[用户发送文件: {p}]" for p in media_paths
         )
-    print(f"[WX] 收到: {redact_private_link_code(text[:80])}", file=sys.__stdout__)
-
-    if text.startswith("/link"):
-        parts = text.split()
-        if len(parts) != 2:
-            return bot.send_text(uid, "用法: /link <一次性链接码>", context_token=ctx)
-        try:
-            from zero_agent.context.admin import ContextAdminService
-            from zero_agent.context.local_store import LocalContextStore
-            from zero_agent.context.errors import ContextError
-
-            if not uid or not bot.bot_id:
-                return bot.send_text(uid, "当前入口无法验证发送者或 bot 身份。", context_token=ctx)
-            result = ContextAdminService(
-                LocalContextStore(za.config.context.root)
-            ).redeem_identity_link(
-                parts[1],
-                platform="wechat",
-                bot_account_id=bot.bot_id,
-                verified_sender_id=uid,
-                verified=True,
-                is_private_chat=True,
-            )
-            return bot.send_text(
-                uid,
-                f"身份链接已完成（{result.platform}/{result.bot_account_id}）。",
-                context_token=ctx,
-            )
-        except ContextError as exc:
-            return bot.send_text(uid, f"身份链接失败 [{exc.code}]。", context_token=ctx)
-        except Exception:
-            return bot.send_text(uid, "身份链接失败。", context_token=ctx)
+    print(f"[WX] 收到: {text[:80]}", file=sys.__stdout__)
 
     if text in ("/stop", "/abort"):
         runner.abort()
@@ -589,24 +558,11 @@ def on_message(bot: WxBotClient, msg):
         return
 
     def _handle():
-        from zero_agent.context.runtime import bot_runtime_context
-
-        runtime_context = bot_runtime_context(
-            za.config,
-            platform="wechat",
-            bot_account_id=str(bot.bot_id or ""),
-            verified_sender_id=str(uid or ""),
-            host_session_key=str(uid or "wechat-session"),
-            is_private_chat=True,
-            is_group_chat=False,
-            sender_verified=bool(uid and bot.bot_id),
+        dq = runner.put_task(
+            text,
+            source="wechat",
+            prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
         )
-        task_kwargs = {
-            "source": "wechat",
-            "prompt_capabilities": (PROMPT_CAPABILITY_FILE_DELIVERY,),
-        }
-        task_kwargs["runtime_context"] = runtime_context
-        dq = runner.put_task(text, **task_kwargs)
         _typing_stop = threading.Event()
 
         def _keep_typing():

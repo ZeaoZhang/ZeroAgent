@@ -41,7 +41,6 @@ from zero_agent.bots.common import (
     terminal_notice,
     resolve_output_files,
     runner_workspace_dir,
-    redact_private_link_code,
 )
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -658,7 +657,7 @@ class FeishuApp(AgentBotMixin):
         await asyncio.to_thread(send_message, rid, text, "text", False, receive_id_type)
         await asyncio.to_thread(_send_generated_files, rid, raw_text, receive_id_type)
 
-    async def run_agent(self, chat_id, text, *, receive_id=None, receive_id_type="open_id", images=None, **ctx):
+    async def run_agent(self, chat_id, text, *, receive_id=None, receive_id_type="open_id", images=None, **_):
         if not channel_is_linked(self.source):
             return None
         if self.user_tasks:
@@ -683,15 +682,12 @@ class FeishuApp(AgentBotMixin):
             await asyncio.to_thread(card.start)
             za._turn_end_hooks[hook_key] = _make_task_hook(card, task_id)
             za._fs_active_task_id = task_id
-            runtime_context = self.runtime_context_for_message(chat_id, **ctx)
-            task_kwargs = {
-                "source": self.source,
-                "images": images or None,
-                "prompt_capabilities": (PROMPT_CAPABILITY_FILE_DELIVERY,),
-            }
-            if runtime_context is not None:
-                task_kwargs["runtime_context"] = runtime_context
-            dq = runner.put_task(text, **task_kwargs)
+            dq = runner.put_task(
+                text,
+                source=self.source,
+                images=images or None,
+                prompt_capabilities=(PROMPT_CAPABILITY_FILE_DELIVERY,),
+            )
             start = time.time()
             while state["running"]:
                 try:
@@ -782,42 +778,20 @@ def handle_message(data):
         else:
             send_message(open_id, f"⚠️ 暂不支持处理此类飞书消息：{message.message_type}")
         return
-    print(f"收到消息 [{open_id}] ({message.message_type}, {len(image_paths)} images): {redact_private_link_code(user_input[:200])}")
+    print(f"收到消息 [{open_id}] ({message.message_type}, {len(image_paths)} images): {user_input[:200]}")
     receive_id = chat_id or open_id
     receive_id_type = "chat_id" if chat_id else "open_id"
     chat_key = receive_id
-    chat_type = str(getattr(message, "chat_type", "") or "")
-    runtime_context = {
-        "bot_account_id": APP_ID,
-        "verified_sender_id": open_id,
-        "sender_verified": bool(open_id),
-        "is_private_chat": chat_type == "p2p",
-        "is_group_chat": chat_type == "group",
-        "host_session_key": chat_id or open_id,
-    }
     if message.message_type == "text" and user_input.startswith("/"):
         threading.Thread(
             target=_run_async,
-            args=(get_app().handle_command(
-                chat_key,
-                user_input,
-                receive_id=receive_id,
-                receive_id_type=receive_id_type,
-                **runtime_context,
-            ),),
+            args=(get_app().handle_command(chat_key, user_input, receive_id=receive_id, receive_id_type=receive_id_type),),
             daemon=True,
         ).start()
         return
     threading.Thread(
         target=_run_async,
-        args=(get_app().run_agent(
-            chat_key,
-            user_input,
-            receive_id=receive_id,
-            receive_id_type=receive_id_type,
-            images=image_paths,
-            **runtime_context,
-        ),),
+        args=(get_app().run_agent(chat_key, user_input, receive_id=receive_id, receive_id_type=receive_id_type, images=image_paths),),
         daemon=True,
     ).start()
 

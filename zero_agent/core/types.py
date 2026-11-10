@@ -4,8 +4,6 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from zero_agent.context.types import RuntimeContext
-
 
 class TerminalStatus(str, Enum):
     """Observable terminal states returned by every ZeroAgent run."""
@@ -65,7 +63,6 @@ class PendingTaskState:
     plan_verify_status: str
     waiting_kind: Literal["ask_user", "plan_partial_acceptance"]
     waiting_data: dict[str, Any] = field(default_factory=dict)
-    runtime_context: Optional[RuntimeContext] = None
 
 @dataclass(frozen=True)
 class CompletionCertificate:
