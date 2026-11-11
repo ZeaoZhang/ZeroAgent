@@ -140,6 +140,7 @@ class ExtensionRuntime:
         self.config = config
 
         self._loaded: Dict[str, Any] = {}
+        self._teardowns: Dict[str, Callable[[], None]] = {}
         self._notify: Dict[str, List[Tuple[str, NotifyCallback]]] = {}
         self._tool_call: List[Tuple[str, GateCallback]] = []
         self._tool_result: List[Tuple[str, TransformCallback]] = []
@@ -169,6 +170,9 @@ class ExtensionRuntime:
     def _load_one(self, name: str, path: Path, is_package: bool) -> None:
         """加载单个插件并调用其 setup.
 
+        setup 中途失败时必须撤销它已经产生的全部注册，否则会留下无法卸载的
+        工具或门控（门控还可能 fail-closed 拒绝一切调用）。
+
         Args:
             name: 插件名.
             path: 入口文件.
@@ -177,18 +181,70 @@ class ExtensionRuntime:
         Raises:
             Exception: 模块导入或 setup 抛出的任何异常，由调用方记录跳过.
         """
-        module = _import_plugin(name, path, is_package)
-        setup = getattr(module, "setup", None)
-        if not callable(setup):
-            raise TypeError(f"扩展 {name} 缺少 setup(ctx) 入口")
         context = ExtensionContext(name, self)
-        setup(context)
+        try:
+            module = _import_plugin(name, path, is_package)
+            setup = getattr(module, "setup", None)
+            if not callable(setup):
+                raise TypeError(f"扩展 {name} 缺少 setup(ctx) 入口")
+            teardown = setup(context)
+            if callable(teardown):
+                self._teardowns[name] = teardown
+        except Exception:
+            self._purge_owner(name)
+            sys.modules.pop("zero_extension_" + re.sub(r"\W", "_", name), None)
+            raise
         self._loaded[name] = module
 
+    def _purge_owner(self, owner: str) -> None:
+        """彻底清除某个归属留下的全部注册（用于加载失败与卸载）.
+
+        Args:
+            owner: 归属名.
+        """
+        self.registry.release_owner(owner)
+        self._tool_defs = [
+            item for item in self._tool_defs if item[0] != owner
+        ]
+        self._tool_call = [
+            item for item in self._tool_call if item[0] != owner
+        ]
+        self._tool_result = [
+            item for item in self._tool_result if item[0] != owner
+        ]
+        self._llm_request = [
+            item for item in self._llm_request if item[0] != owner
+        ]
+        self._prompt_blocks = [
+            item for item in self._prompt_blocks if item[0] != owner
+        ]
+        for event in list(self._notify):
+            self._notify[event] = [
+                item for item in self._notify[event] if item[0] != owner
+            ]
+            if not self._notify[event]:
+                del self._notify[event]
+
+    def register_teardown(self, owner: str, callback: Callable[[], None]) -> None:
+        """登记一个卸载回调（内置扩展用；插件可通过 setup 返回值登记）.
+
+        Args:
+            owner: 归属名.
+            callback: 卸载时调用的无参函数.
+        """
+        self._teardowns[owner] = callback
+
     def release(self) -> None:
-        """卸载全部插件，并撤销它们注册的工具."""
+        """卸载全部插件与内置扩展，撤销注册并执行清理回调."""
+        for owner, teardown in list(self._teardowns.items()):
+            try:
+                teardown()
+            except Exception as exc:  # noqa: BLE001 - 清理失败不影响卸载
+                _logger.warning("扩展 %s 的清理回调失败: %s", owner, exc)
+        self._teardowns.clear()
+
         for owner in list(self._loaded):
-            self.registry.release_owner(owner)
+            self._purge_owner(owner)
         self._loaded.clear()
         self._notify.clear()
         self._tool_call.clear()

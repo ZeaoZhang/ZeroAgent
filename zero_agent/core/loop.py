@@ -71,6 +71,8 @@ class AgentLoop:
         self.handler.loop = self
         self._agent = agent
         self.system_prompt_factory: Optional[Callable[[], str]] = None
+        # 上一轮被插件改写的 system prompt 的原值，下一轮开始时恢复
+        self._system_before_transform: Optional[str] = None
 
     def run(
         self,
@@ -157,6 +159,10 @@ class AgentLoop:
                     prompt = self.system_prompt_factory()
                     if self.client.system != prompt:
                         self.client.system = prompt
+                elif self._system_before_transform is not None:
+                    # 上一轮插件改写过的 system prompt 在此恢复，避免逐轮累积
+                    self.client.system = self._system_before_transform
+                    self._system_before_transform = None
                 self._trigger_hook("llm_before", {
                     "turn": turn,
                     "messages": messages,
@@ -165,26 +171,31 @@ class AgentLoop:
                     "system_prompt": self.client.system,
                 })
 
+                call_messages = messages
+                call_tools = self.tools_schema
                 extensions = self._extensions()
                 if extensions is not None:
                     from zero_agent.extensions.events import LlmRequest
 
+                    base_system = self.client.system
+                    # 传副本：插件只能影响本次请求，不能原地毒化跨轮历史
                     request = extensions.run_llm_request(LlmRequest(
                         model=self._model_name(),
-                        messages=messages,
-                        tools=self.tools_schema,
-                        system_prompt=self.client.system,
+                        messages=list(messages),
+                        tools=list(self.tools_schema),
+                        system_prompt=base_system,
                     ))
-                    messages = request.messages
-                    self.tools_schema = request.tools
+                    call_messages = request.messages
+                    call_tools = request.tools
                     if (
                         request.system_prompt is not None
-                        and request.system_prompt != self.client.system
+                        and request.system_prompt != base_system
                     ):
+                        self._system_before_transform = base_system
                         self.client.system = request.system_prompt
 
                 response_gen = self.client.chat(
-                    messages=messages, tools=self.tools_schema,
+                    messages=call_messages, tools=call_tools,
                 )
 
                 if self.verbose:

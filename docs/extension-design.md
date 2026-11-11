@@ -158,8 +158,8 @@ def setup(ctx):
 
     @ctx.on_llm_request
     def tag(request):
-        request.headers["X-Source"] = "zeroagent"
-        return request
+        # 只影响本次请求；system_prompt 会在下一轮自动恢复，不会累积
+        return request.replace(system_prompt=(request.system_prompt or "") + "\n[tag]")
 ```
 
 要点：
@@ -179,6 +179,11 @@ def setup(ctx):
 | 提示词块 | 运行时块列表 | 下一次 `_build_prompt_assembly()` |
 | 事件回调 | 运行时事件表 | 下一次对应事件触发 |
 
+`on_llm_request` 的改写只作用于本次请求：`messages` / `tools` 传入副本，不回写
+跨轮状态；`system_prompt` 在下一轮开始时恢复原值，避免逐轮累积。`model` 与
+`headers` 字段保留在契约中，但当前版本不会生效（切换模型与自定义请求头需要
+LLM 会话层配合，留待后续）。
+
 依据：`agent.py` 的 `run()` 每次都调用 `registry.generate_openai_schema()` 重新生成工具 schema，因此启动时注册的工具不需要额外刷新。
 
 ### 6.5 热重载边界
@@ -193,7 +198,7 @@ def setup(ctx):
 | --- | --- | --- |
 | `ctx.tool(...)` | 注册工具进 `ToolRegistry` | 插件 |
 | `ctx.on_agent_start / on_turn_start / on_turn_end / on_agent_end` | 通知型，返回值忽略 | 插件 |
-| `ctx.on_llm_request` | 变换型，可改 `model / messages / tools / headers` | 插件 |
+| `ctx.on_llm_request` | 变换型，可改 `messages / tools / system_prompt`（只作用于本次请求） | 插件 |
 | `ctx.on_tool_call` | 门控型，可放行、改参、阻断 | 插件 |
 | `ctx.on_tool_result` | 变换型，可改结果 | 插件 |
 | `ctx.prompt_block(name, factory)` | 贡献系统提示词块 | 插件 |

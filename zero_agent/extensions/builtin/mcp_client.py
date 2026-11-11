@@ -21,7 +21,7 @@ import select
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 _logger = logging.getLogger("zero_agent.extensions.mcp")
 
@@ -145,15 +145,20 @@ class StdioMcpClient:
             raise RuntimeError(f"MCP 进程启动失败: {exc}") from exc
         _live_clients.append(self)
 
-        self._request(
-            "initialize",
-            {
-                "protocolVersion": _PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": "zeroagent", "version": "0.2.0"},
-            },
-        )
-        self._notify("notifications/initialized", {})
+        try:
+            self._request(
+                "initialize",
+                {
+                    "protocolVersion": _PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "zeroagent", "version": "0.2.0"},
+                },
+            )
+            self._notify("notifications/initialized", {})
+        except Exception:
+            # 握手失败必须回收子进程，否则会留下常驻孤儿进程
+            self.close()
+            raise
 
     def close(self) -> None:
         """终止子进程."""
@@ -170,6 +175,7 @@ class StdioMcpClient:
         except Exception:  # noqa: BLE001 - 进程可能已退出
             try:
                 self._proc.kill()
+                self._proc.wait(timeout=3)
             except Exception:  # noqa: BLE001
                 pass
         self._proc = None
@@ -320,7 +326,7 @@ def _register_server(
     ctx: Any,
     server_name: str,
     config: Dict[str, Any],
-) -> int:
+) -> Tuple[int, Optional[StdioMcpClient]]:
     """连接一个 MCP server 并注册其工具.
 
     Args:
@@ -329,7 +335,7 @@ def _register_server(
         config: 该 server 的配置.
 
     Returns:
-        成功注册的工具数量.
+        ``(成功注册的工具数量, 客户端实例)``；跳过时客户端为 None.
     """
     command = config.get("command")
     if not command:
@@ -337,7 +343,7 @@ def _register_server(
             "MCP server %s 未提供 command（HTTP 传输暂未实现），已跳过",
             server_name,
         )
-        return 0
+        return 0, None
 
     client = StdioMcpClient(
         command=str(command),
@@ -346,8 +352,13 @@ def _register_server(
         cwd=config.get("cwd"),
         timeout=float(config.get("timeout", _DEFAULT_TIMEOUT)),
     )
-    client.start()
-    tools = client.list_tools()
+    try:
+        client.start()
+        tools = client.list_tools()
+    except Exception:
+        # 启动或列工具失败时回收进程
+        client.close()
+        raise
 
     registered = 0
     for tool in tools:
@@ -373,22 +384,43 @@ def _register_server(
             category="mcp",
         )(make_handler(remote_name))
         registered += 1
-    return registered
+    return registered, client
 
 
-def setup(ctx: Any) -> None:
+def setup(ctx: Any) -> Any:
     """安装 MCP 扩展.
 
     Args:
         ctx: 插件上下文（ExtensionContext）.
+
+    Returns:
+        卸载回调（关闭所有子进程）；没有可用 server 时返回 None.
     """
     servers = load_config(getattr(ctx.runtime, "home", None))
     if not servers:
-        return
+        return None
+
+    clients: List[StdioMcpClient] = []
     for server_name, config in servers.items():
         try:
-            count = _register_server(ctx, server_name, config)
+            count, client = _register_server(ctx, server_name, config)
+            if client is not None:
+                clients.append(client)
             if count:
                 _logger.info("MCP server %s 注册了 %d 个工具", server_name, count)
         except Exception as exc:  # noqa: BLE001 - 单个 server 失败不影响其他
             _logger.warning("MCP server %s 连接失败，已跳过: %s", server_name, exc)
+
+    if not clients:
+        return None
+
+    def teardown() -> None:
+        """关闭本运行时创建的全部 MCP 子进程."""
+        for client in list(clients):
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001 - 关闭失败不影响卸载
+                pass
+        clients.clear()
+
+    return teardown

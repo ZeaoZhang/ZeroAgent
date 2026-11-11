@@ -503,12 +503,7 @@ class ZeroAgent:
             self.handler.client = self.client
             if registry_changed:
                 self.handler.registry = self.registry
-                # registry 被重建时先重放插件注册，再重新生成 schema，
-                # 避免扩展工具随旧表消失
-                if getattr(self, "extensions", None) is not None:
-                    self.extensions.attach_registry(self.registry)
-                if self.loop is not None:
-                    self.loop.tools_schema = self.registry.generate_openai_schema()
+                self._replay_extension_registrations()
         except Exception as exc:
             self.config = old_config
             self._sessions = old_sessions
@@ -823,6 +818,7 @@ class ZeroAgent:
         if self._owns_registry:
             self.registry = new_registry
             self.handler.registry = self.registry
+            self._replay_extension_registrations()
         self.memory = new_memory
         self.handler.cwd = self.config.workspace_dir
         self.handler.client = self.client
@@ -883,6 +879,7 @@ class ZeroAgent:
             )
             if self.handler is not None:
                 self.handler.registry = self.registry
+            self._replay_extension_registrations()
 
         active_loop = self.loop
         if active_loop is not None:
@@ -893,6 +890,19 @@ class ZeroAgent:
                 prompt = prompt_factory()
                 if self.client.system != prompt:
                     self.client.system = prompt
+
+    def _replay_extension_registrations(self) -> None:
+        """registry 被重建后重放扩展注册，并刷新 loop 的 tool schema.
+
+        共有三条重建路径（reload_config / _apply_pending_runtime_config /
+        switch_backend），都必须经过这里，否则插件工具会随旧 registry 消失。
+        """
+        extensions = getattr(self, "extensions", None)
+        if extensions is not None:
+            extensions.attach_registry(self.registry)
+        active_loop = getattr(self, "loop", None)
+        if active_loop is not None:
+            active_loop.tools_schema = self.registry.generate_openai_schema()
 
     def _init_extensions(self) -> Any:
         """创建扩展运行时并加载插件与内置扩展.
@@ -941,7 +951,9 @@ class ZeroAgent:
                     f"zero_agent.extensions.builtin.{name}",
                     fromlist=[name],
                 )
-                module.setup(ExtensionContext(name, runtime))
+                teardown = module.setup(ExtensionContext(name, runtime))
+                if callable(teardown):
+                    runtime.register_teardown(name, teardown)
             except Exception as exc:  # noqa: BLE001 - 单个内置扩展失败可跳过
                 logger.warning("内置扩展 %s 安装失败，已跳过: %s", name, exc)
 

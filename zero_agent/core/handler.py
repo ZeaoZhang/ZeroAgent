@@ -269,18 +269,23 @@ class BaseHandler:
         args["_tool_num"] = tool_num
         if tool_name != "no_tool":
             self.completion_gate.reset()
-            self._mark_executing(tool_name)
 
         # tool_before 钩子
         self._trigger_hook("tool_before", {
             "tool_name": tool_name, "args": args, "response": response,
         })
 
-        # 扩展门控（fail-closed）：被拒绝时不执行工具，直接返回可解释的失败
+        # 扩展门控（fail-closed）：被拒绝时不执行工具，不推进任务状态，
+        # 只记录一条不可用于完成判定的 evidence，保证可观测且不卡死任务
         extensions = self._extensions()
         if extensions is not None and tool_name != "no_tool":
             blocked_reason = extensions.run_tool_call(tool_name, args)
             if blocked_reason is not None:
+                import logging
+
+                logging.getLogger("zero_agent").warning(
+                    "工具调用被安全策略拦截: %s (%s)", tool_name, blocked_reason
+                )
                 yield self._tl(
                     f"已拦截: {blocked_reason}\n",
                     f"Blocked: {blocked_reason}\n",
@@ -298,6 +303,8 @@ class BaseHandler:
                     ),
                     action=StepAction.CONTINUE,
                 )
+                # 记录为 error 证据：可观测，但不会满足完成判定要求
+                self._record_evidence(tool_name, args, ret)
                 self._trigger_hook("tool_after", {
                     "tool_name": tool_name,
                     "args": args,
@@ -305,6 +312,10 @@ class BaseHandler:
                     "result": ret.data,
                 })
                 return ret
+
+        # 门控通过后才把 OPEN 推进到 EXECUTING
+        if tool_name != "no_tool":
+            self._mark_executing(tool_name)
 
         # 1. 优先查找 do_<tool_name>() 方法
         method_name = f"do_{tool_name}"

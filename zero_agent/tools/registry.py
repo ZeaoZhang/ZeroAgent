@@ -60,12 +60,13 @@ class ToolRegistry:
     Attributes:
         _tools: 按名称索引的工具字典.
         _owners: 工具名 → 注册归属（插件名），用于整体撤销.
-        _overrides: 覆盖栈，记录 (归属, 工具名, 覆盖前的定义)，用于恢复.
+        _overrides: 覆盖栈，记录 (归属, 工具名, 覆盖前的定义, 覆盖前的归属)，
+            用于按逆序恢复.
     """
 
     _tools: Dict[str, ToolDefinition] = field(default_factory=dict)
     _owners: Dict[str, str] = field(default_factory=dict)
-    _overrides: List[Tuple[str, str, Optional[ToolDefinition]]] = field(
+    _overrides: List[Tuple[str, str, Optional[ToolDefinition], Optional[str]]] = field(
         default_factory=list,
     )
 
@@ -78,39 +79,71 @@ class ToolRegistry:
 
         Args:
             tool: 工具定义. 若名称已存在则覆盖.
-            owner: 可选注册归属（例如插件名）. 提供时记录覆盖前的定义，
+            owner: 可选注册归属（例如插件名）. 提供时记录覆盖前的定义与归属，
                 之后可以用 ``release_owner`` 整体撤销；None 表示普通注册，
-                行为与旧版本一致.
+                会清除该工具的归属并丢弃相关覆盖记录（视为接管）。
         """
-        if owner is not None:
-            self._overrides.append((owner, tool.name, self._tools.get(tool.name)))
-            self._owners[tool.name] = owner
+        if owner is None:
+            # 普通注册接管该工具：清除归属与覆盖链，避免旧归属撤销时误恢复
+            self._owners.pop(tool.name, None)
+            self._overrides = [
+                item for item in self._overrides if item[1] != tool.name
+            ]
+            self._tools[tool.name] = tool
+            return
+
+        previous = self._tools.get(tool.name)
+        previous_owner = self._owners.get(tool.name)
+        self._overrides.append((owner, tool.name, previous, previous_owner))
+        self._owners[tool.name] = owner
         self._tools[tool.name] = tool
 
     def release_owner(self, owner: str) -> int:
         """撤销某个归属注册的全部工具，并恢复被它覆盖的原定义.
 
-        按注册的逆序恢复，保证多个归属覆盖同一工具时回到正确状态.
+        按注册的逆序处理；被释放项如果已被更晚的注册覆盖，则只把更晚项的
+        “覆盖前状态”下推一位，避免打掉仍在生效的定义或复活已释放的定义。
 
         Args:
             owner: 注册归属名.
 
         Returns:
-            实际撤销的工具数量.
+            实际撤销的覆盖记录数量.
         """
         released = 0
         for index in range(len(self._overrides) - 1, -1, -1):
-            entry_owner, name, previous = self._overrides[index]
+            entry_owner, name, previous, previous_owner = self._overrides[index]
             if entry_owner != owner:
                 continue
             del self._overrides[index]
-            if previous is None:
-                self._tools.pop(name, None)
-            else:
-                self._tools[name] = previous
-            if self._owners.get(name) == owner:
-                self._owners.pop(name, None)
             released += 1
+
+            later_index = None
+            for candidate in range(index, len(self._overrides)):
+                if self._overrides[candidate][1] == name:
+                    later_index = candidate
+
+            if later_index is None:
+                # 没有更晚的同名覆盖：当前生效值回滚到 previous
+                if previous is None:
+                    self._tools.pop(name, None)
+                else:
+                    self._tools[name] = previous
+                if previous_owner is None:
+                    self._owners.pop(name, None)
+                else:
+                    self._owners[name] = previous_owner
+            else:
+                # 有更晚的同名覆盖：把它的“覆盖前状态”下推为本项的前状态
+                later_owner, later_name, _later_previous, _later_previous_owner = (
+                    self._overrides[later_index]
+                )
+                self._overrides[later_index] = (
+                    later_owner,
+                    later_name,
+                    previous,
+                    previous_owner,
+                )
         return released
 
     def owner_of(self, name: str) -> Optional[str]:
@@ -146,6 +179,10 @@ class ToolRegistry:
         if name in self._tools:
             del self._tools[name]
             self._owners.pop(name, None)
+            # 丢弃覆盖链，避免后续 release_owner 把已移除的工具恢复回来
+            self._overrides = [
+                item for item in self._overrides if item[1] != name
+            ]
             return True
         return False
 
