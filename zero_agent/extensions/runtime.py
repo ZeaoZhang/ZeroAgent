@@ -39,6 +39,9 @@ _logger = logging.getLogger("zero_agent.extensions")
 
 DEFAULT_EXTENSION_HOME = "~/.zeroagent"
 
+# dispatch 注入的内部参数键，不参与审批指纹
+_INTERNAL_ARG_KEYS = frozenset({"_index", "_tool_num"})
+
 NotifyCallback = Callable[[Dict[str, Any]], None]
 GateCallback = Callable[[ToolCall], Any]
 TransformCallback = Callable[[Any], Any]
@@ -66,7 +69,7 @@ def approval_fingerprint(tool_name: str, args: Dict[str, Any]) -> str:
     payload = {
         key: value
         for key, value in (args or {}).items()
-        if not str(key).startswith("_")
+        if key not in _INTERNAL_ARG_KEYS
     }
     blob = json.dumps(
         {"tool": tool_name, "args": payload},
@@ -376,6 +379,7 @@ class ExtensionRuntime:
         self,
         tool_name: str,
         args: Dict[str, Any],
+        task_id: str = "",
     ) -> ToolCallVerdict:
         """执行工具调用门控，返回三态判定.
 
@@ -389,6 +393,7 @@ class ExtensionRuntime:
         Args:
             tool_name: 工具名.
             args: 工具参数，可被回调原地修改.
+            task_id: 当前任务标识，用于限定审批通行证的作用域.
 
         Returns:
             ToolCallVerdict.
@@ -397,6 +402,8 @@ class ExtensionRuntime:
             return ToolCallVerdict("allow")
 
         call = ToolCall(tool_name=tool_name, args=args)
+        approval_reason = ""
+        approval_fingerprint_value = ""
         for owner, callback in self._tool_call:
             try:
                 result = callback(call)
@@ -408,19 +415,26 @@ class ExtensionRuntime:
                     "block", f"门控 {owner} 执行失败，本次调用已被拒绝",
                 )
             if isinstance(result, ApprovalRequired):
-                fingerprint = approval_fingerprint(tool_name, args)
-                if self.consume_approval(fingerprint):
-                    # 已有一次性通行证，放行并继续检查后续门控
-                    continue
-                return ToolCallVerdict(
-                    "approve",
-                    result.reason,
-                    fingerprint,
-                )
+                # 先记下审批需求，跑完全部门控再决定，避免通行证被后续 block 白烧
+                if not approval_fingerprint_value:
+                    approval_fingerprint_value = approval_fingerprint(tool_name, args)
+                    approval_reason = result.reason
+                continue
             if isinstance(result, ExtensionVeto):
                 return ToolCallVerdict("block", result.reason)
             if result is False:
                 return ToolCallVerdict("block", f"被扩展 {owner} 拒绝")
+
+        if approval_fingerprint_value:
+            if self.consume_approval(
+                approval_fingerprint_value, task_id=task_id,
+            ):
+                return ToolCallVerdict("allow")
+            return ToolCallVerdict(
+                "approve",
+                approval_reason,
+                approval_fingerprint_value,
+            )
         return ToolCallVerdict("allow")
 
     def run_tool_call(
@@ -429,6 +443,10 @@ class ExtensionRuntime:
         args: Dict[str, Any],
     ) -> Optional[str]:
         """门控的简化接口：可以直接执行时返回 None，否则返回原因.
+
+        .. note::
+           这是二态接口：``approve``（需人类批准）会被折叠成「返回原因」。
+           生产路径请使用 :meth:`evaluate_tool_call`，否则会自动跳过审批。
 
         Args:
             tool_name: 工具名.
@@ -442,30 +460,47 @@ class ExtensionRuntime:
 
     # ---- 审批通行证 -----------------------------------------------------
 
-    def grant_approval(self, fingerprint: str, ttl: float = 600.0) -> None:
+    def grant_approval(
+        self,
+        fingerprint: str,
+        ttl: float = 600.0,
+        task_id: str = "",
+    ) -> None:
         """为一次具体调用发放一次性通行证.
+
+        通行证绑定任务：只有同一 task_id 的调用才能消费它，避免批准在任务结束
+        后被后续任务复用。
 
         Args:
             fingerprint: 由 :func:`approval_fingerprint` 计算.
             ttl: 通行证有效期（秒）.
+            task_id: 任务标识；空串表示不限定任务.
         """
         if not fingerprint:
             return
-        self._approvals[fingerprint] = time.monotonic() + ttl
+        self._approvals[fingerprint] = (time.monotonic() + ttl, task_id)
 
-    def consume_approval(self, fingerprint: str) -> bool:
+    def consume_approval(self, fingerprint: str, task_id: str = "") -> bool:
         """消费一次性通行证；无论成功与否都会清除该指纹.
 
         Args:
             fingerprint: 审批指纹.
+            task_id: 当前任务标识；与发放时不一致则视为无效.
 
         Returns:
             True 表示这次调用已被批准.
         """
         if not fingerprint:
             return False
-        expiry = self._approvals.pop(fingerprint, None)
-        return expiry is not None and expiry > time.monotonic()
+        entry = self._approvals.pop(fingerprint, None)
+        if entry is None:
+            return False
+        expiry, granted_task = entry
+        if expiry <= time.monotonic():
+            return False
+        if granted_task and task_id and granted_task != task_id:
+            return False
+        return True
 
     def clear_approvals(self) -> None:
         """清除全部未使用的通行证（拒绝或任务结束时调用）."""

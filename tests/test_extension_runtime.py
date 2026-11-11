@@ -333,7 +333,7 @@ class TestBuiltins:
 
         assert runtime.run_tool_call("code_run", {"code": "ls -la"}) is None
 
-    def test_permission_gate_blocks_protected_write(self, tmp_path: Path) -> None:
+    def test_permission_gate_asks_for_protected_write(self, tmp_path: Path) -> None:
         runtime = _runtime(tmp_path)
         permission_gate.setup(ExtensionContext("permission_gate", runtime))
 

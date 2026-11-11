@@ -736,20 +736,34 @@ class ZeroAgent:
         tool_name = str(approval.get("tool_name") or "该工具")
 
         extensions = getattr(self, "extensions", None)
+
+        if not fingerprint:
+            # 指纹缺失说明暂停状态已失效，绝不能谎报批准
+            if extensions is not None:
+                extensions.clear_approvals()
+            return (
+                "[System] 审批状态已失效（缺少操作指纹），本次操作未获批准。"
+                "请重新发起该操作以获取新的审批请求。"
+            )
+
         if self._is_approval_answer(answer):
             if extensions is not None:
-                extensions.grant_approval(fingerprint)
+                extensions.grant_approval(
+                    fingerprint,
+                    task_id=pending.contract.task_id,
+                )
             return (
                 f"[System] 用户已批准对 {tool_name} 的这一次调用。"
-                "请重新执行完全相同的调用（参数必须与上次一致）；"
+                "只重新执行这一个调用，且参数必须与上次完全一致；"
+                "本轮此前已经成功的调用不要重放，避免重复副作用。"
                 "如果不再需要该操作，说明情况后继续。"
             )
 
         if extensions is not None:
             extensions.clear_approvals()
         return (
-            f"[System] 用户拒绝了 {tool_name} 的调用。"
-            "不要重试该操作；改为说明情况，或提供不需要该操作的替代方案。"
+            f"[System] 用户没有批准 {tool_name} 的这次调用。用户原话：{answer}\n"
+            "不要重试该操作；如果用户在答复里给了新的指令，按新指令处理。"
         )
 
     def _pending_continuation_content(

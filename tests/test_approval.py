@@ -42,6 +42,11 @@ def _ask_plugin(tmp_path: Path) -> ExtensionRuntime:
             "    def guard(call):\n"
             "        if call.tool_name == 'danger':\n"
             "            return ctx.confirm('确认要执行 danger 吗？')\n"
+            "    @ctx.tool(name='danger', description='d',\n"
+            "              parameters={'type': 'object', 'properties': {}},\n"
+            "              evidence_kind='execute')\n"
+            "    def danger(args):\n"
+            "        return 'executed'\n"
         ),
     )
     runtime = _runtime(tmp_path)
@@ -234,7 +239,7 @@ class TestRecovery:
 
         text = self._agent_with_pending(runtime, "拒绝")
 
-        assert "拒绝" in text
+        assert "没有批准" in text
         assert runtime.evaluate_tool_call("danger", retry).needs_approval
 
     def test_unrecognized_answer_is_treated_as_reject(self, tmp_path: Path) -> None:
@@ -242,7 +247,8 @@ class TestRecovery:
 
         text = self._agent_with_pending(runtime, "再说吧")
 
-        assert "拒绝" in text
+        assert "没有批准" in text
+        assert "再说吧" in text  # 用户答复必须回传给模型
 
     def test_approval_waiting_kind_detected(self) -> None:
         from zero_agent.core.agent import ZeroAgent
@@ -279,3 +285,117 @@ class TestRecovery:
         ZeroAgent._update_pending_task_state(stub, terminal)
 
         assert stub._pending_task_state.waiting_kind == "approval"
+
+
+class TestHardening:
+    """覆盖审阅指出的边界：任务作用域、缺指纹、否定词、内容摘要、路径口径."""
+
+    def test_approval_scoped_to_task(self, tmp_path: Path) -> None:
+        runtime = _ask_plugin(tmp_path)
+        args = {"x": 1}
+        fingerprint = runtime.evaluate_tool_call(
+            "danger", args, task_id="t1"
+        ).fingerprint
+        runtime.grant_approval(fingerprint, task_id="t1")
+
+        # 同一任务放行
+        assert runtime.evaluate_tool_call("danger", args, task_id="t1").is_allow
+        # 换任务重新审批
+        assert runtime.evaluate_tool_call("danger", args, task_id="t2").needs_approval
+
+    def test_missing_fingerprint_is_not_approved(
+        self, tmp_path: Path
+    ) -> None:
+        from zero_agent.core.agent import ZeroAgent
+
+        runtime = _ask_plugin(tmp_path)
+        pending = PendingTaskState(
+            contract=TaskContract(
+                task_id="t1", user_request="do", mode=TaskMode.OPEN
+            ),
+            ledger=EvidenceLedger(),
+            plan_verify_status="missing",
+            waiting_kind="approval",
+            waiting_data={"approval": {"tool_name": "danger"}},
+        )
+
+        class Stub:
+            extensions = runtime
+            _is_approval_answer = ZeroAgent._is_approval_answer
+
+        text = ZeroAgent._approval_continuation(Stub(), pending, "批准")
+
+        assert "失效" in text
+        assert runtime.evaluate_tool_call("danger", {"x": 1}).needs_approval
+
+    @pytest.mark.parametrize(
+        "answer",
+        ["不同意", "批准吧", "OK！", "no", "算了"],
+    )
+    def test_non_exact_answers_are_rejected(
+        self, tmp_path: Path, answer: str
+    ) -> None:
+        from zero_agent.core.agent import ZeroAgent
+
+        runtime = _ask_plugin(tmp_path)
+        pending = PendingTaskState(
+            contract=TaskContract(
+                task_id="t1", user_request="do", mode=TaskMode.OPEN
+            ),
+            ledger=EvidenceLedger(),
+            plan_verify_status="missing",
+            waiting_kind="approval",
+            waiting_data={
+                "approval": {
+                    "fingerprint": approval_fingerprint("danger", {"x": 1}),
+                    "tool_name": "danger",
+                }
+            },
+        )
+
+        class Stub:
+            extensions = runtime
+            _is_approval_answer = ZeroAgent._is_approval_answer
+
+        text = ZeroAgent._approval_continuation(Stub(), pending, answer)
+
+        assert "没有批准" in text
+        assert runtime.evaluate_tool_call("danger", {"x": 1}).needs_approval
+
+    def test_approval_prompt_shows_content_digest(self, tmp_path: Path) -> None:
+        runtime = _runtime(tmp_path)
+        permission_gate.setup(ExtensionContext("permission_gate", runtime))
+        target = str(Path(runtime.home) / "skills" / "demo" / "SKILL.md")
+
+        verdict = runtime.evaluate_tool_call(
+            "file_write", {"path": target, "content": "hello world"}
+        )
+
+        assert verdict.needs_approval
+        assert "sha256" in verdict.reason
+        assert "11 字符" in verdict.reason
+
+    def test_memory_prefixed_path_uses_file_tool_resolution(
+        self, tmp_path: Path
+    ) -> None:
+        from types import SimpleNamespace
+
+        memory_dir = tmp_path / "home" / "mem"
+        config = SimpleNamespace(
+            memory_dir=str(memory_dir),
+            workspace_dir=str(tmp_path / "ws"),
+            extensions_protected_writes=[],
+        )
+        runtime = ExtensionRuntime(
+            registry=_registry(),
+            home=tmp_path / "home",
+            config=config,
+        )
+        permission_gate.setup(ExtensionContext("permission_gate", runtime))
+
+        # 首段等于 memory_dir 目录名时，file 工具会重定向到记忆目录
+        verdict = runtime.evaluate_tool_call(
+            "file_write", {"path": "mem/SKILL.md", "content": "x"}
+        )
+
+        assert verdict.needs_approval

@@ -278,7 +278,8 @@ class BaseHandler:
         # 扩展门控（fail-closed）：三态判定——放行 / 拒绝 / 需人类批准
         extensions = self._extensions()
         if extensions is not None and tool_name != "no_tool":
-            verdict = extensions.evaluate_tool_call(tool_name, args)
+            task_id = getattr(getattr(self, "task_contract", None), "task_id", "") or ""
+            verdict = extensions.evaluate_tool_call(tool_name, args, task_id=task_id)
 
             if verdict.needs_approval:
                 yield self._tl(

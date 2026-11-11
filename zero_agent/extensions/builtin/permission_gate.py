@@ -1,7 +1,11 @@
-"""权限门禁扩展：对高危工具调用做 fail-closed 拦截.
+"""权限门禁扩展：高危操作拦截 + 受保护写入的审批.
 
-首版只做"拦截"，不做"询问后放行"——审批链路属于阶段 3（见设计文档第八节）。
-被拦截时返回明确原因，模型不应原地重试。
+行为分两类：
+
+- 明确危险的 shell（递归强制删除、格式化、关机等）→ 直接拒绝，无批准入口。
+- 受保护路径的写入 → 暂停任务请求人类批准；问句附带内容摘要，避免盲批。
+
+审批只覆盖「工具名 + 参数完全一致」的那一次调用（见设计文档第八节）。
 
 路径判断使用 ``realpath + normcase + commonpath``，与文件工具实际写入的目标
 口径一致，避免大小写不敏感文件系统、相对路径和软链接造成的绕过。
@@ -11,6 +15,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -148,6 +153,54 @@ def _protected_prefixes(runtime: Any) -> Tuple[str, ...]:
     return tuple(dict.fromkeys(prefixes))
 
 
+def _content_summary(args: Dict[str, Any]) -> str:
+    """生成待写入内容的摘要，供用户在批准前判断.
+
+    Args:
+        args: 工具参数.
+
+    Returns:
+        形如「1234 字符，sha256:ab12cd34，开头: ...」的摘要.
+    """
+    for key in ("content", "new_content"):
+        value = args.get(key)
+        if isinstance(value, str):
+            digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
+            preview = value[:200].replace("\n", "\\n")
+            if len(value) > 200:
+                preview += "…"
+            return f"{len(value)} 字符，sha256:{digest}，开头: {preview!r}"
+    if args.get("old_content") is not None or args.get("new_content") is not None:
+        return "（补丁替换，无完整内容）"
+    return "（无内容字段）"
+
+
+def _resolve_like_file_tool(path: str, runtime: Any) -> str:
+    """按文件工具的口径解析路径，避免判定与实际写入位置不一致.
+
+    ``tools/builtin/file.py`` 会把首段等于 ``memory_dir`` 目录名的相对路径
+    重定向到记忆目录；门控必须使用同一口径，否则可以绕过审批。
+
+    Args:
+        path: 原始路径.
+        runtime: ExtensionRuntime.
+
+    Returns:
+        解析后的路径.
+    """
+    if not path or os.path.isabs(os.path.expanduser(path)):
+        return path
+    try:
+        from zero_agent.tools.builtin.file import _resolve_path
+
+        config = getattr(runtime, "config", None)
+        if config is not None:
+            return _resolve_path(path, config)
+    except Exception:  # noqa: BLE001 - 解析失败时退回原路径，后续仍会做前缀判断
+        pass
+    return path
+
+
 def _workspace(runtime: Any) -> Optional[str]:
     """返回相对路径解析基准（workspace）.
 
@@ -191,14 +244,17 @@ def setup(ctx: Any) -> None:
                 )
 
         if call.tool_name in _WRITE_TOOLS:
-            path = str(args.get("path") or "")
-            if not path:
+            raw_path = str(args.get("path") or "")
+            if not raw_path:
                 return ctx.block("已拦截：写入目标为空，无法判定安全性。")
+            path = _resolve_like_file_tool(raw_path, ctx.runtime)
             prefix = _under(path, _protected_prefixes(ctx.runtime), workspace)
             if prefix is not None:
                 return ctx.confirm(
-                    f"将修改 {prefix} 下的内容：{path}。"
-                    "这会改变 skill / 插件 / MCP 配置，是否允许这一次修改？"
+                    f"将修改 {prefix} 下的内容：{path}\n"
+                    f"内容：{_content_summary(args)}\n"
+                    "skills 会进入系统提示词，extensions 会在下次启动执行，"
+                    "mcp.json 会拉起外部命令。是否允许这一次修改？"
                 )
 
         return None
