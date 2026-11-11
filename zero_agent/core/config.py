@@ -163,6 +163,9 @@ class AgentConfig:
         incremental_output: 是否增量输出流式内容到 UI.
         log_dir: LLM 调用日志目录.
         litellm_model_cost_map: LiteLLM 模型价格/上下文窗口表缓存路径.
+        extensions_enabled: 是否加载扩展（插件 / skill / MCP）.
+        extensions_home: 扩展根目录，None 时使用 ``~/.zeroagent``.
+        extensions_protected_writes: 额外的受保护写入前缀，修改前需人类同意.
     """
 
     llm_backends: dict[str, LLMBackendConfig] = field(default_factory=dict)
@@ -180,6 +183,9 @@ class AgentConfig:
     enable_worldline: bool = False
     litellm_model_cost_map: Optional[str] = None
     langfuse: Optional[dict] = None
+    extensions_enabled: bool = True
+    extensions_home: Optional[str] = None
+    extensions_protected_writes: list[str] = field(default_factory=list)
 
     @property
     def resolved_language(self) -> str:
@@ -396,6 +402,7 @@ class AgentConfig:
     def _from_dict(cls, data: dict) -> "AgentConfig":
         """Build AgentConfig from parsed YAML data."""
         data = data or {}
+        extensions_data = data.get("extensions") or {}
         backends: dict[str, LLMBackendConfig] = {}
         env_pattern = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
         for name, cfg in data.get("llm_backends", {}).items():
@@ -427,6 +434,11 @@ class AgentConfig:
             enable_worldline=data.get("enable_worldline", False),
             litellm_model_cost_map=data.get("litellm_model_cost_map"),
             langfuse=data.get("langfuse"),
+            extensions_enabled=bool(extensions_data.get("enabled", True)),
+            extensions_home=extensions_data.get("home"),
+            extensions_protected_writes=list(
+                extensions_data.get("protected_writes") or []
+            ),
         )
 
 

@@ -336,6 +336,9 @@ class ZeroAgent:
         else:
             self.registry = registry
 
+        # 1.5 扩展运行时：内置工具就位后、handler 创建前加载插件与内置扩展
+        self.extensions = self._init_extensions()
+
         session_kwargs: dict[str, Any] = {}
         if self._session_log_path is not None:
             session_kwargs["session_log_path"] = self._session_log_path
@@ -500,6 +503,10 @@ class ZeroAgent:
             self.handler.client = self.client
             if registry_changed:
                 self.handler.registry = self.registry
+                # registry 被重建时先重放插件注册，再重新生成 schema，
+                # 避免扩展工具随旧表消失
+                if getattr(self, "extensions", None) is not None:
+                    self.extensions.attach_registry(self.registry)
                 if self.loop is not None:
                     self.loop.tools_schema = self.registry.generate_openai_schema()
         except Exception as exc:
@@ -887,6 +894,57 @@ class ZeroAgent:
                 if self.client.system != prompt:
                     self.client.system = prompt
 
+    def _init_extensions(self) -> Any:
+        """创建扩展运行时并加载插件与内置扩展.
+
+        失败时返回 None：扩展体系不可用不应阻断核心功能。
+
+        Returns:
+            ExtensionRuntime 实例或 None.
+        """
+        if not getattr(self.config, "extensions_enabled", True):
+            return None
+        try:
+            from zero_agent.extensions.runtime import ExtensionRuntime
+
+            runtime = ExtensionRuntime(
+                registry=self.registry,
+                home=getattr(self.config, "extensions_home", None),
+                hooks=self.hooks,
+                config=self.config,
+            )
+            runtime.load_all()
+            self._install_builtin_extensions(runtime)
+            return runtime
+        except Exception as exc:  # noqa: BLE001 - 扩展失败不得阻断启动
+            import logging
+
+            logging.getLogger("zero_agent").warning(
+                "扩展运行时初始化失败，已跳过: %s", exc
+            )
+            return None
+
+    def _install_builtin_extensions(self, runtime: Any) -> None:
+        """安装内置扩展；单个失败只记录日志.
+
+        Args:
+            runtime: ExtensionRuntime 实例.
+        """
+        import logging
+
+        from zero_agent.extensions.context import ExtensionContext
+
+        logger = logging.getLogger("zero_agent")
+        for name in ("permission_gate", "skills_index", "mcp_client"):
+            try:
+                module = __import__(
+                    f"zero_agent.extensions.builtin.{name}",
+                    fromlist=[name],
+                )
+                module.setup(ExtensionContext(name, runtime))
+            except Exception as exc:  # noqa: BLE001 - 单个内置扩展失败可跳过
+                logger.warning("内置扩展 %s 安装失败，已跳过: %s", name, exc)
+
     def _register_builtin_plugins(self, tracer: Any = None) -> None:
         """注册内置插件；缺依赖或缺配置时静默跳过."""
         try:
@@ -1044,6 +1102,19 @@ class ZeroAgent:
                 localizer=localizer,
             ).blocks
         )
+
+        # 扩展贡献的提示词块（插件 / skill 索引 / 其他内置扩展）
+        extensions = getattr(self, "extensions", None)
+        if extensions is not None:
+            try:
+                for block in extensions.collect_prompt_blocks():
+                    blocks.append(PromptBlock(
+                        f"ext:{block.name}",
+                        f"\n{block.text}\n",
+                        dynamic=True,
+                    ))
+            except Exception:
+                pass
 
         return PromptAssembly(tuple(blocks))
 

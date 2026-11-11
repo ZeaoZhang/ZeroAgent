@@ -205,6 +205,20 @@ class BaseHandler:
         """
         return zh if self._lang() == "zh" else en
 
+    def _extensions(self) -> Any:
+        """返回扩展运行时；不可用时返回 None.
+
+        handler 通常在 ``ZeroAgent`` 装配下运行，通过 ``parent.extensions``
+        访问；单独构造（测试、脚本）时安全返回 None。
+
+        Returns:
+            ExtensionRuntime 或 None.
+        """
+        parent = getattr(self, "parent", None)
+        if parent is None:
+            return None
+        return getattr(parent, "extensions", None)
+
     def _trigger_hook(self, event: str, context: dict) -> None:
         """触发钩子事件（若 HookSystem 可用）.
 
@@ -262,6 +276,36 @@ class BaseHandler:
             "tool_name": tool_name, "args": args, "response": response,
         })
 
+        # 扩展门控（fail-closed）：被拒绝时不执行工具，直接返回可解释的失败
+        extensions = self._extensions()
+        if extensions is not None and tool_name != "no_tool":
+            blocked_reason = extensions.run_tool_call(tool_name, args)
+            if blocked_reason is not None:
+                yield self._tl(
+                    f"已拦截: {blocked_reason}\n",
+                    f"Blocked: {blocked_reason}\n",
+                )
+                ret = StepOutcome(
+                    {
+                        "status": "error",
+                        "error": blocked_reason,
+                        "blocked": True,
+                    },
+                    next_prompt=(
+                        f"[System] 工具 {tool_name} 的调用被安全策略拒绝："
+                        f"{blocked_reason}。不要重试同一操作；"
+                        "换一种方式，或向用户说明情况。"
+                    ),
+                    action=StepAction.CONTINUE,
+                )
+                self._trigger_hook("tool_after", {
+                    "tool_name": tool_name,
+                    "args": args,
+                    "outcome": ret,
+                    "result": ret.data,
+                })
+                return ret
+
         # 1. 优先查找 do_<tool_name>() 方法
         method_name = f"do_{tool_name}"
         if hasattr(self, method_name):
@@ -312,6 +356,12 @@ class BaseHandler:
     ) -> Any:
         """Apply common post-dispatch bookkeeping and hooks."""
         ret = self._apply_tool_protocol_budget(tool_name, ret)
+
+        # 扩展结果变换：只处理 StepOutcome，避免破坏内部信号对象
+        extensions = self._extensions()
+        if extensions is not None and isinstance(ret, StepOutcome):
+            ret.data = extensions.run_tool_result(tool_name, args, ret.data)
+
         if self._successful_completion_correction(tool_name, ret):
             self._completion_rejection_count = 0
         self._record_evidence(tool_name, args, ret)

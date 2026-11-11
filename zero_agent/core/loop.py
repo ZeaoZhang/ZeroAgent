@@ -164,6 +164,25 @@ class AgentLoop:
                     "model": self._model_name(),
                     "system_prompt": self.client.system,
                 })
+
+                extensions = self._extensions()
+                if extensions is not None:
+                    from zero_agent.extensions.events import LlmRequest
+
+                    request = extensions.run_llm_request(LlmRequest(
+                        model=self._model_name(),
+                        messages=messages,
+                        tools=self.tools_schema,
+                        system_prompt=self.client.system,
+                    ))
+                    messages = request.messages
+                    self.tools_schema = request.tools
+                    if (
+                        request.system_prompt is not None
+                        and request.system_prompt != self.client.system
+                    ):
+                        self.client.system = request.system_prompt
+
                 response_gen = self.client.chat(
                     messages=messages, tools=self.tools_schema,
                 )
@@ -681,6 +700,13 @@ class AgentLoop:
         return outcome
 
     # ---- hook 辅助 ----
+
+    def _extensions(self) -> Any:
+        """返回扩展运行时；未装配或扩展关闭时返回 None."""
+        agent = getattr(self, "_agent", None)
+        if agent is None:
+            return None
+        return getattr(agent, "extensions", None)
 
     def _trigger_hook(self, event: str, context: dict) -> None:
         """触发 hook 并隔离 hook 失败."""

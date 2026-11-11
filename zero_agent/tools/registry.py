@@ -12,7 +12,7 @@ ToolRegistry: 工具注册、查找、Schema 生成（支持 OpenAI 和 Claude �
 import copy
 import importlib
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Generator, List, Literal, Optional
+from typing import Any, Callable, Dict, Generator, List, Literal, Optional, Tuple
 
 from zero_agent.core.config import AgentConfig
 
@@ -59,17 +59,70 @@ class ToolRegistry:
 
     Attributes:
         _tools: 按名称索引的工具字典.
+        _owners: 工具名 → 注册归属（插件名），用于整体撤销.
+        _overrides: 覆盖栈，记录 (归属, 工具名, 覆盖前的定义)，用于恢复.
     """
 
     _tools: Dict[str, ToolDefinition] = field(default_factory=dict)
+    _owners: Dict[str, str] = field(default_factory=dict)
+    _overrides: List[Tuple[str, str, Optional[ToolDefinition]]] = field(
+        default_factory=list,
+    )
 
-    def register(self, tool: ToolDefinition) -> None:
+    def register(
+        self,
+        tool: ToolDefinition,
+        owner: Optional[str] = None,
+    ) -> None:
         """注册一个工具.
 
         Args:
             tool: 工具定义. 若名称已存在则覆盖.
+            owner: 可选注册归属（例如插件名）. 提供时记录覆盖前的定义，
+                之后可以用 ``release_owner`` 整体撤销；None 表示普通注册，
+                行为与旧版本一致.
         """
+        if owner is not None:
+            self._overrides.append((owner, tool.name, self._tools.get(tool.name)))
+            self._owners[tool.name] = owner
         self._tools[tool.name] = tool
+
+    def release_owner(self, owner: str) -> int:
+        """撤销某个归属注册的全部工具，并恢复被它覆盖的原定义.
+
+        按注册的逆序恢复，保证多个归属覆盖同一工具时回到正确状态.
+
+        Args:
+            owner: 注册归属名.
+
+        Returns:
+            实际撤销的工具数量.
+        """
+        released = 0
+        for index in range(len(self._overrides) - 1, -1, -1):
+            entry_owner, name, previous = self._overrides[index]
+            if entry_owner != owner:
+                continue
+            del self._overrides[index]
+            if previous is None:
+                self._tools.pop(name, None)
+            else:
+                self._tools[name] = previous
+            if self._owners.get(name) == owner:
+                self._owners.pop(name, None)
+            released += 1
+        return released
+
+    def owner_of(self, name: str) -> Optional[str]:
+        """返回某个工具的注册归属.
+
+        Args:
+            name: 工具名称.
+
+        Returns:
+            注册归属名，普通注册或不存在时返回 None.
+        """
+        return self._owners.get(name)
 
     def get(self, name: str) -> Optional[ToolDefinition]:
         """按名称查找工具.
@@ -92,6 +145,7 @@ class ToolRegistry:
         """
         if name in self._tools:
             del self._tools[name]
+            self._owners.pop(name, None)
             return True
         return False
 

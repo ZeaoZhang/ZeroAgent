@@ -23,6 +23,15 @@ memory_dir: ./memory
 sessions_dir: ./workspace/sessions
 log_dir: null
 
+# Extension system (plugins / skills / MCP).
+# Plugins live in <home>/extensions/, skills in <home>/skills/,
+# MCP servers in <home>/mcp.json. Default home is ~/.zeroagent.
+extensions:
+  enabled: true
+  home: ~/.zeroagent
+  # Extra paths that require human approval before the agent writes them.
+  protected_writes: []
+
 # Optional local LiteLLM model price/context-window cache.
 # litellm_model_cost_map: ./model_prices_and_context_window.json
 
