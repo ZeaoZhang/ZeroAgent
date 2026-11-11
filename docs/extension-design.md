@@ -1,6 +1,6 @@
 # 扩展体系设计（Extension Design）
 
-> 状态：**阶段 0–3 已实现；阶段 4（隔离）未实现**。
+> 状态：**阶段 0–4 已实现（阶段 4 为可选的 best-effort 沙箱）**。
 > 实现代码位于 `zero_agent/extensions/`，测试见 `tests/test_extension_runtime.py`
 > 与 `tests/test_mcp_client.py`。
 > 参考：pi（earendil-works/pi）的轻量扩展入口、DeepSeek Harness 的注册归属与生命周期。
@@ -323,7 +323,7 @@ LLM 会话层配合，留待后续）。
 | --- | --- | --- | --- |
 | 策略层 | 工具调用门控 + 审批 | 模型通过标准工具越权 | 插件在进程内直接写文件 |
 | 流程层 | 注册归属、审批指纹、日志 | 误操作与重复执行 | 恶意代码 |
-| 沙箱层（可选，后续） | 子进程/文件系统隔离 | 恶意插件与 `code_run` | 需额外部署成本 |
+| 沙箱层（可选，已提供） | `extensions.sandbox` 包装 `code_run`，写入限制在工作目录与临时目录 | 命令执行时的越界写盘 | 平台差异；Linux 需装 bwrap；可被降级绕过 |
 
 文档与提示词中描述的应是**协作规则**，不是强制隔离。需要强制隔离时，走第三层。
 
@@ -394,9 +394,13 @@ extensions:
 - 改动：`core/types.py` 的 `waiting_kind`、`core/agent.py` 的恢复路径。
 - 验收：批准后只重放被暂停的那一次操作；拒绝后模型不会原地重试。
 
-### 阶段 4（可选）：隔离（⏳ 未实现）
+### 阶段 4（可选）：隔离（✅ 已实现，best-effort）
 
-- 文件系统/进程沙箱，独立评估，不在本设计范围内。
+- 新增 `extensions/sandbox.py`：把 `code_run` 的 argv 包进平台沙箱，
+  只放行工作目录与临时目录的写入。
+- macOS 用系统自带 `sandbox-exec -p <profile>`；Linux 用 `bwrap`；
+  其他平台或工具缺失时**降级为不隔离**并返回原因，绝不让正常执行失败。
+- 默认 `extensions.sandbox = "off"`，需显式开启。
 
 ## 十二、文档与打包同步
 

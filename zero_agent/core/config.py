@@ -166,6 +166,7 @@ class AgentConfig:
         extensions_enabled: 是否加载扩展（插件 / skill / MCP）.
         extensions_home: 扩展根目录，None 时使用 ``~/.zeroagent``.
         extensions_protected_writes: 额外的受保护写入前缀，修改前需人类同意.
+        sandbox_mode: code_run 的进程沙箱模式 "off" | "auto" | "macos" | "linux".
     """
 
     llm_backends: dict[str, LLMBackendConfig] = field(default_factory=dict)
@@ -186,6 +187,7 @@ class AgentConfig:
     extensions_enabled: bool = True
     extensions_home: Optional[str] = None
     extensions_protected_writes: list[str] = field(default_factory=list)
+    sandbox_mode: str = "off"
 
     @property
     def resolved_language(self) -> str:
@@ -439,6 +441,7 @@ class AgentConfig:
             extensions_protected_writes=list(
                 extensions_data.get("protected_writes") or []
             ),
+            sandbox_mode=str(extensions_data.get("sandbox") or "off"),
         )
 
 

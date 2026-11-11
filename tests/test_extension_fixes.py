@@ -292,3 +292,54 @@ class TestMcpLifecycle:
         assert runtime.registry.get("mcp__fake__echo") is not None
         teardown()
         assert len(mcp_client._live_clients) == 0
+
+
+class TestEnabledSemantics:
+    """extensions.enabled=false 只关闭插件与能力扩展，安全门仍生效."""
+
+    def _agent(self, tmp_path: Path, enabled: bool):
+        from zero_agent.core.agent import ZeroAgent
+        from zero_agent.core.config import AgentConfig, LLMBackendConfig
+
+        home = tmp_path / "home"
+        (home / "extensions").mkdir(parents=True)
+        (home / "extensions" / "hello.py").write_text(
+            "def setup(ctx):\n"
+            "    @ctx.tool(name='hello_ext', description='d',"
+            " parameters={'type': 'object', 'properties': {}})\n"
+            "    def hello(args):\n"
+            "        return 'hi'\n",
+            encoding="utf-8",
+        )
+        config = AgentConfig(
+            llm_backends={
+                "d": LLMBackendConfig(
+                    name="d",
+                    provider="openai",
+                    api_key="k",
+                    api_base="https://api.openai.com/v1",
+                    model="gpt-4o",
+                )
+            },
+            default_backend="d",
+            workspace_dir=str(tmp_path / "ws"),
+            memory_dir=str(tmp_path / "mem"),
+            sessions_dir=str(tmp_path / "sessions"),
+            extensions_home=str(home),
+            extensions_enabled=enabled,
+        )
+        return ZeroAgent(config)
+
+    def test_disabled_skips_plugins_but_keeps_safety_gate(
+        self, tmp_path: Path
+    ) -> None:
+        agent = self._agent(tmp_path, enabled=False)
+
+        assert "hello_ext" not in [tool.name for tool in agent.registry.list_all()]
+        assert agent.extensions is not None
+        assert agent.extensions.run_tool_call("code_run", {"code": "rm -rf /"}) is not None
+
+    def test_enabled_loads_plugins(self, tmp_path: Path) -> None:
+        agent = self._agent(tmp_path, enabled=True)
+
+        assert "hello_ext" in [tool.name for tool in agent.registry.list_all()]

@@ -17,8 +17,9 @@ import json
 import logging
 import os
 import re
-import select
+import queue
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,6 +29,10 @@ _logger = logging.getLogger("zero_agent.extensions.mcp")
 _PROTOCOL_VERSION = "2024-11-05"
 _DEFAULT_TIMEOUT = 10.0
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+# 工具名只允许这些字符，超长截断，避免生成非法的 function name
+_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_-]")
+_MAX_TOOL_NAME = 64
 
 # 进程退出时统一关闭，避免残留子进程
 _live_clients: List["StdioMcpClient"] = []
@@ -97,6 +102,51 @@ def load_config(home: Optional[Path]) -> Dict[str, Any]:
     }
 
 
+class _LineReader:
+    """后台按行读取子进程输出，跨平台且不受半行影响.
+
+    之前用 select + readline：文本缓冲已经吃掉数据时 fd 可能不可读，
+    造成假超时；Windows 管道也不支持 select。用线程 + 队列规避这两个问题。
+    """
+
+    def __init__(self, stream: Any) -> None:
+        self._queue: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._thread = threading.Thread(target=self._pump, args=(stream,), daemon=True)
+        self._thread.start()
+
+    def _pump(self, stream: Any) -> None:
+        try:
+            for line in stream:
+                self._queue.put(line)
+        except Exception:  # noqa: BLE001 - 读取线程异常在取行时统一报告
+            pass
+        finally:
+            self._queue.put(None)
+
+    def read_line(self, timeout: float) -> str:
+        """读取一行，超时或进程退出时抛异常."""
+        try:
+            item = self._queue.get(timeout=timeout)
+        except queue.Empty:
+            raise TimeoutError("MCP 读取超时") from None
+        if item is None:
+            raise RuntimeError("MCP 进程已退出")
+        return item
+
+
+def sanitize_tool_name(raw: str) -> str:
+    """把远端工具名清洗成合法的 function name.
+
+    Args:
+        raw: 远端工具名.
+
+    Returns:
+        仅含字母数字下划线连字符、长度不超过 64 的名称.
+    """
+    cleaned = _NAME_PATTERN.sub("_", str(raw or "")).strip("_")
+    return (cleaned or "tool")[:_MAX_TOOL_NAME]
+
+
 class StdioMcpClient:
     """最小的同步 MCP stdio 客户端.
 
@@ -120,6 +170,7 @@ class StdioMcpClient:
         self.cwd = cwd
         self.timeout = timeout
         self._proc: Optional[subprocess.Popen[str]] = None
+        self._reader: Optional[_LineReader] = None
         self._next_id = 0
 
     # ---- 进程与协议 -----------------------------------------------------
@@ -144,6 +195,7 @@ class StdioMcpClient:
         except OSError as exc:
             raise RuntimeError(f"MCP 进程启动失败: {exc}") from exc
         _live_clients.append(self)
+        self._reader = _LineReader(self._proc.stdout)
 
         try:
             self._request(
@@ -179,6 +231,7 @@ class StdioMcpClient:
             except Exception:  # noqa: BLE001
                 pass
         self._proc = None
+        self._reader = None
         if self in _live_clients:
             _live_clients.remove(self)
 
@@ -279,14 +332,9 @@ class StdioMcpClient:
             TimeoutError: 超时.
             RuntimeError: 进程退出.
         """
-        if self._proc is None or self._proc.stdout is None:
+        if self._reader is None:
             raise RuntimeError("MCP 进程未启动")
-        ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
-        if not ready:
-            raise TimeoutError("MCP 读取超时")
-        line = self._proc.stdout.readline()
-        if not line:
-            raise RuntimeError("MCP 进程已退出")
+        line = self._reader.read_line(timeout)
         try:
             message = json.loads(line)
         except json.JSONDecodeError as exc:
@@ -361,11 +409,22 @@ def _register_server(
         raise
 
     registered = 0
+    used_names: set[str] = set()
     for tool in tools:
         remote_name = str(tool.get("name") or "").strip()
         if not remote_name:
             continue
-        exposed = f"mcp__{server_name}__{remote_name}"
+        safe_server = sanitize_tool_name(server_name)
+        safe_tool = sanitize_tool_name(remote_name)
+        exposed = f"mcp__{safe_server}__{safe_tool}"
+        if len(exposed) > _MAX_TOOL_NAME + len(safe_server) + 6:
+            exposed = exposed[: _MAX_TOOL_NAME + len(safe_server) + 6]
+        suffix = 2
+        base = exposed
+        while exposed in used_names:
+            exposed = f"{base}_{suffix}"
+            suffix += 1
+        used_names.add(exposed)
         schema = tool.get("inputSchema")
         if not isinstance(schema, dict):
             schema = {"type": "object", "properties": {}}

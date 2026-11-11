@@ -980,16 +980,23 @@ class ZeroAgent:
         if active_loop is not None:
             active_loop.tools_schema = self.registry.generate_openai_schema()
 
+    # 安全类内置扩展：extensions.enabled=false 时仍然保留，避免“关插件顺手关掉安全门”
+    _SAFETY_EXTENSIONS = ("permission_gate",)
+    # 能力类内置扩展：只在启用扩展时安装
+    _CAPABILITY_EXTENSIONS = ("skills_index", "mcp_client")
+
     def _init_extensions(self) -> Any:
         """创建扩展运行时并加载插件与内置扩展.
+
+        ``extensions_enabled=false`` 只关闭外部插件与能力类扩展，安全门仍然生效；
+        若连安全门也要关，请显式移除 ``permission_gate`` 的安装。
 
         失败时返回 None：扩展体系不可用不应阻断核心功能。
 
         Returns:
             ExtensionRuntime 实例或 None.
         """
-        if not getattr(self.config, "extensions_enabled", True):
-            return None
+        enabled = bool(getattr(self.config, "extensions_enabled", True))
         try:
             from zero_agent.extensions.runtime import ExtensionRuntime
 
@@ -999,8 +1006,9 @@ class ZeroAgent:
                 hooks=self.hooks,
                 config=self.config,
             )
-            runtime.load_all()
-            self._install_builtin_extensions(runtime)
+            if enabled:
+                runtime.load_all()
+            self._install_builtin_extensions(runtime, enabled=enabled)
             return runtime
         except Exception as exc:  # noqa: BLE001 - 扩展失败不得阻断启动
             import logging
@@ -1010,18 +1018,27 @@ class ZeroAgent:
             )
             return None
 
-    def _install_builtin_extensions(self, runtime: Any) -> None:
+    def _install_builtin_extensions(
+        self,
+        runtime: Any,
+        *,
+        enabled: bool = True,
+    ) -> None:
         """安装内置扩展；单个失败只记录日志.
 
         Args:
             runtime: ExtensionRuntime 实例.
+            enabled: 是否安装能力类扩展（安全类始终安装）.
         """
         import logging
 
         from zero_agent.extensions.context import ExtensionContext
 
         logger = logging.getLogger("zero_agent")
-        for name in ("permission_gate", "skills_index", "mcp_client"):
+        names = list(self._SAFETY_EXTENSIONS)
+        if enabled:
+            names.extend(self._CAPABILITY_EXTENSIONS)
+        for name in names:
             try:
                 module = __import__(
                     f"zero_agent.extensions.builtin.{name}",

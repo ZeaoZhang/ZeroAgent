@@ -56,6 +56,7 @@ def code_run(
     stop_signal: Optional[List[bool]] = None,
     maxlen: int = 10000,
     env: Optional[dict[str, str]] = None,
+    sandbox_mode: str = "",
 ) -> Generator[str, None, dict]:
     """在子进程中执行 Python 或 shell 代码.
 
@@ -131,6 +132,13 @@ def code_run(
                 full_stdout.append(line)
         except Exception:
             pass
+
+    if sandbox_mode and sandbox_mode != "off":
+        from zero_agent.extensions.sandbox import wrap_command
+
+        cmd, _sandboxed, _sandbox_reason = wrap_command(cmd, cwd, sandbox_mode)
+        if _sandbox_reason:
+            yield f"[Sandbox] {_sandbox_reason}\n"
 
     process = None
     try:
@@ -396,6 +404,8 @@ def _make_code_run_handler(config: AgentConfig):
                 getattr(config, "_desktop_agent_id", "") or ""
             )
 
+        from zero_agent.extensions.sandbox import resolve_mode
+
         return (yield from code_run(
             code=code,
             code_type=code_type,
@@ -404,6 +414,7 @@ def _make_code_run_handler(config: AgentConfig):
             maxlen=maxlen,
             stop_signal=stop_signal,
             env=subprocess_env,
+            sandbox_mode=resolve_mode(config),
         ))
 
     def _handler(

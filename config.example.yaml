@@ -33,6 +33,10 @@ extensions:
   # Writes under ~/.zeroagent/{skills,extensions,mcp.json} are already protected:
   # the agent pauses and asks the user, and approval covers exactly one call.
   protected_writes: []
+  # Optional process sandbox for code_run: off | auto | macos | linux.
+  # "auto" picks sandbox-exec on macOS and bwrap on Linux; unsupported
+  # platforms degrade to no isolation instead of failing the command.
+  sandbox: off
 
 # Optional local LiteLLM model price/context-window cache.
 # litellm_model_cost_map: ./model_prices_and_context_window.json
