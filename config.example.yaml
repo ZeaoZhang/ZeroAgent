@@ -30,6 +30,8 @@ extensions:
   enabled: true
   home: ~/.zeroagent
   # Extra paths that require human approval before the agent writes them.
+  # Writes under ~/.zeroagent/{skills,extensions,mcp.json} are already protected:
+  # the agent pauses and asks the user, and approval covers exactly one call.
   protected_writes: []
 
 # Optional local LiteLLM model price/context-window cache.

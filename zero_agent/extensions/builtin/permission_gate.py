@@ -196,9 +196,9 @@ def setup(ctx: Any) -> None:
                 return ctx.block("已拦截：写入目标为空，无法判定安全性。")
             prefix = _under(path, _protected_prefixes(ctx.runtime), workspace)
             if prefix is not None:
-                return ctx.block(
-                    f"已拦截：修改 {prefix} 下的内容需要人类批准，"
-                    "当前版本尚不支持自动审批，请让用户手动修改。"
+                return ctx.confirm(
+                    f"将修改 {prefix} 下的内容：{path}。"
+                    "这会改变 skill / 插件 / MCP 配置，是否允许这一次修改？"
                 )
 
         return None

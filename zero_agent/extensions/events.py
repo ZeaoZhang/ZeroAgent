@@ -114,3 +114,45 @@ class PromptBlock:
 
     name: str
     text: str
+
+
+@dataclass
+class ApprovalRequired:
+    """门控要求人类批准这次调用.
+
+    门控回调直接 ``return ctx.confirm(...)``。运行时会暂停任务、向用户提问，
+    并用「工具名 + 参数」的指纹把批准绑定到这一次具体操作上。
+    """
+
+    reason: str
+    candidates: Optional[List[str]] = None
+
+
+@dataclass
+class ToolCallVerdict:
+    """门控的最终判定.
+
+    Attributes:
+        action: ``allow`` 放行；``block`` 拒绝；``approve`` 需要人类批准.
+        reason: 拒绝或审批的原因，会展示给模型与用户.
+        fingerprint: 审批指纹；只有 ``approve`` 时有值.
+    """
+
+    action: Literal["allow", "block", "approve"]
+    reason: str = ""
+    fingerprint: str = ""
+
+    @property
+    def is_allow(self) -> bool:
+        """是否放行."""
+        return self.action == "allow"
+
+    @property
+    def is_block(self) -> bool:
+        """是否拒绝."""
+        return self.action == "block"
+
+    @property
+    def needs_approval(self) -> bool:
+        """是否需要人类批准."""
+        return self.action == "approve"

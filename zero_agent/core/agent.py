@@ -697,12 +697,70 @@ class ZeroAgent:
             "接受 PARTIAL 并完成",
         }
 
+    _APPROVAL_WORDS = frozenset({
+        "批准", "同意", "允许", "可以", "确认", "通过",
+        "approve", "allow", "yes", "y", "ok", "confirm",
+    })
+
+    @classmethod
+    def _is_approval_answer(cls, answer: str) -> bool:
+        """判断用户答复是否表示批准（默认拒绝，安全优先）.
+
+        Args:
+            answer: 用户答复文本.
+
+        Returns:
+            True 表示批准.
+        """
+        normalized = " ".join(str(answer or "").strip().lower().split())
+        return normalized in cls._APPROVAL_WORDS
+
+    def _approval_continuation(
+        self,
+        pending: PendingTaskState,
+        answer: str,
+    ) -> str:
+        """处理「等待人类批准」的恢复，返回续跑提示.
+
+        Args:
+            pending: 暂停的任务状态.
+            answer: 用户答复.
+
+        Returns:
+            交给模型的续跑说明.
+        """
+        approval = (pending.waiting_data or {}).get("approval")
+        if not isinstance(approval, dict):
+            approval = {}
+        fingerprint = str(approval.get("fingerprint") or "")
+        tool_name = str(approval.get("tool_name") or "该工具")
+
+        extensions = getattr(self, "extensions", None)
+        if self._is_approval_answer(answer):
+            if extensions is not None:
+                extensions.grant_approval(fingerprint)
+            return (
+                f"[System] 用户已批准对 {tool_name} 的这一次调用。"
+                "请重新执行完全相同的调用（参数必须与上次一致）；"
+                "如果不再需要该操作，说明情况后继续。"
+            )
+
+        if extensions is not None:
+            extensions.clear_approvals()
+        return (
+            f"[System] 用户拒绝了 {tool_name} 的调用。"
+            "不要重试该操作；改为说明情况，或提供不需要该操作的替代方案。"
+        )
+
     def _pending_continuation_content(
         self,
         pending: PendingTaskState,
         answer: str,
     ) -> str:
         """Build the continuation message without changing the original objective."""
+
+        if pending.waiting_kind == "approval":
+            return self._approval_continuation(pending, answer)
 
         if pending.waiting_kind == "plan_partial_acceptance":
             if self._is_partial_acceptance(answer):
@@ -728,12 +786,16 @@ class ZeroAgent:
         payload = waiting_data.get("data") if isinstance(waiting_data.get("data"), dict) else waiting_data
         candidates = payload.get("candidates", []) if isinstance(payload, dict) else []
         partial_candidates = {"接受 PARTIAL 并完成", "继续修复"}
-        waiting_kind = (
-            "plan_partial_acceptance"
-            if self.handler.task_contract.mode is TaskMode.PLAN
+        approval = waiting_data.get("approval") if isinstance(waiting_data, dict) else None
+        if isinstance(approval, dict) and approval.get("fingerprint"):
+            waiting_kind = "approval"
+        elif (
+            self.handler.task_contract.mode is TaskMode.PLAN
             and set(candidates or []) == partial_candidates
-            else "ask_user"
-        )
+        ):
+            waiting_kind = "plan_partial_acceptance"
+        else:
+            waiting_kind = "ask_user"
         self._pending_task_state = PendingTaskState(
             contract=copy.deepcopy(self.handler.task_contract),
             ledger=copy.deepcopy(self.handler.evidence_ledger),

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Generator, List, Optional
 
-from zero_agent.extensions.events import ExtensionVeto, PromptBlock
+from zero_agent.extensions.events import ApprovalRequired, ExtensionVeto, PromptBlock
 from zero_agent.tools.registry import ToolDefinition
 
 
@@ -172,19 +172,24 @@ class ExtensionContext:
         """
         return ExtensionVeto(reason)
 
-    def confirm(self, question: str, candidates: Optional[List[str]] = None) -> None:
-        """请求人类确认（保留接口，阶段 3 接入审批链路）.
+    def confirm(
+        self,
+        question: str,
+        candidates: Optional[List[str]] = None,
+    ) -> ApprovalRequired:
+        """请求人类批准这次工具调用.
+
+        在门控回调里直接 ``return ctx.confirm("原因")``。运行时会暂停任务、
+        向用户提问；批准后只放行与本次参数完全一致的一次调用。
 
         Args:
-            question: 向用户提出的问题.
-            candidates: 可选快捷选项.
+            question: 展示给用户的说明，讲清要做什么、影响是什么.
+            candidates: 可选快捷选项，默认由运行时提供「批准 / 拒绝」.
 
-        Raises:
-            NotImplementedError: 审批链路尚未接入.
+        Returns:
+            ApprovalRequired，交给运行时处理.
         """
-        raise NotImplementedError(
-            "ctx.confirm 需要审批链路，当前版本尚未接入（见 docs/extension-design.md 第八节）"
-        )
+        return ApprovalRequired(reason=question, candidates=candidates)
 
 
 # 供类型标注使用，避免循环导入

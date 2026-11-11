@@ -275,30 +275,62 @@ class BaseHandler:
             "tool_name": tool_name, "args": args, "response": response,
         })
 
-        # 扩展门控（fail-closed）：被拒绝时不执行工具，不推进任务状态，
-        # 只记录一条不可用于完成判定的 evidence，保证可观测且不卡死任务
+        # 扩展门控（fail-closed）：三态判定——放行 / 拒绝 / 需人类批准
         extensions = self._extensions()
         if extensions is not None and tool_name != "no_tool":
-            blocked_reason = extensions.run_tool_call(tool_name, args)
-            if blocked_reason is not None:
+            verdict = extensions.evaluate_tool_call(tool_name, args)
+
+            if verdict.needs_approval:
+                yield self._tl(
+                    f"需要批准: {verdict.reason}\n",
+                    f"Approval required: {verdict.reason}\n",
+                )
+                ret = StepOutcome(
+                    {
+                        "status": "INTERRUPT",
+                        "intent": "HUMAN_INTERVENTION",
+                        "data": {
+                            "question": (
+                                f"是否允许执行 {tool_name}？\n{verdict.reason}"
+                            ),
+                            "candidates": ["批准", "拒绝"],
+                        },
+                        "approval": {
+                            "fingerprint": verdict.fingerprint,
+                            "tool_name": tool_name,
+                            "reason": verdict.reason,
+                        },
+                    },
+                    action=StepAction.WAIT_FOR_USER,
+                    reason="extension_approval",
+                )
+                self._trigger_hook("tool_after", {
+                    "tool_name": tool_name,
+                    "args": args,
+                    "outcome": ret,
+                    "result": ret.data,
+                })
+                return ret
+
+            if verdict.is_block:
                 import logging
 
                 logging.getLogger("zero_agent").warning(
-                    "工具调用被安全策略拦截: %s (%s)", tool_name, blocked_reason
+                    "工具调用被安全策略拦截: %s (%s)", tool_name, verdict.reason
                 )
                 yield self._tl(
-                    f"已拦截: {blocked_reason}\n",
-                    f"Blocked: {blocked_reason}\n",
+                    f"已拦截: {verdict.reason}\n",
+                    f"Blocked: {verdict.reason}\n",
                 )
                 ret = StepOutcome(
                     {
                         "status": "error",
-                        "error": blocked_reason,
+                        "error": verdict.reason,
                         "blocked": True,
                     },
                     next_prompt=(
                         f"[System] 工具 {tool_name} 的调用被安全策略拒绝："
-                        f"{blocked_reason}。不要重试同一操作；"
+                        f"{verdict.reason}。不要重试同一操作；"
                         "换一种方式，或向用户说明情况。"
                     ),
                     action=StepAction.CONTINUE,

@@ -13,19 +13,24 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import logging
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from zero_agent.extensions.context import ExtensionContext
 from zero_agent.extensions.events import (
+    ApprovalRequired,
     ExtensionVeto,
     LlmRequest,
     PromptBlock,
     ToolCall,
+    ToolCallVerdict,
     ToolResult,
 )
 from zero_agent.tools.registry import ToolDefinition, ToolRegistry
@@ -43,6 +48,33 @@ PromptFactory = Callable[[], str]
 def _default_home() -> Path:
     """返回默认扩展根目录."""
     return Path(DEFAULT_EXTENSION_HOME).expanduser()
+
+
+def approval_fingerprint(tool_name: str, args: Dict[str, Any]) -> str:
+    """计算一次调用的审批指纹.
+
+    指纹绑定工具名与全部业务参数（忽略 ``_index`` 等内部键），因此模型只要
+    改了目标或内容，就需要重新请求批准。
+
+    Args:
+        tool_name: 工具名.
+        args: 工具参数.
+
+    Returns:
+        短哈希指纹.
+    """
+    payload = {
+        key: value
+        for key, value in (args or {}).items()
+        if not str(key).startswith("_")
+    }
+    blob = json.dumps(
+        {"tool": tool_name, "args": payload},
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
 def discover(home: Optional[Path | str] = None) -> List[Tuple[str, Path, bool]]:
@@ -147,6 +179,7 @@ class ExtensionRuntime:
         self._llm_request: List[Tuple[str, TransformCallback]] = []
         self._prompt_blocks: List[Tuple[str, str, PromptFactory]] = []
         self._tool_defs: List[Tuple[str, ToolDefinition]] = []
+        self._approvals: Dict[str, float] = {}
 
     # ---- 加载与卸载 -----------------------------------------------------
 
@@ -252,6 +285,7 @@ class ExtensionRuntime:
         self._llm_request.clear()
         self._prompt_blocks.clear()
         self._tool_defs.clear()
+        self._approvals.clear()
 
     def attach_registry(self, registry: ToolRegistry) -> None:
         """在 registry 被重建后重放全部插件工具注册.
@@ -338,39 +372,104 @@ class ExtensionRuntime:
             except Exception as exc:  # noqa: BLE001 - 通知失败只记录
                 _logger.warning("扩展 %s 的 %s 回调失败: %s", owner, event, exc)
 
-    def run_tool_call(
+    def evaluate_tool_call(
         self,
         tool_name: str,
         args: Dict[str, Any],
-    ) -> Optional[str]:
-        """执行工具调用门控.
+    ) -> ToolCallVerdict:
+        """执行工具调用门控，返回三态判定.
 
-        门控回调可以直接修改 ``args``（原地），也可以否决本次调用。
-        **fail-closed**：门控自身抛异常时返回拒绝原因，而不是放行。
+        门控回调可以直接修改 ``args``（原地），返回 ``ctx.block(...)`` 拒绝，
+        返回 ``ctx.confirm(...)`` 要求人类批准。**fail-closed**：门控自身异常
+        时返回拒绝，而不是放行。
+
+        审批指纹绑定「工具名 + 参数」，并用后即焚：批准只对完全相同的一次
+        调用有效。
 
         Args:
             tool_name: 工具名.
             args: 工具参数，可被回调原地修改.
 
         Returns:
-            拒绝原因；``None`` 表示全部放行.
+            ToolCallVerdict.
         """
         if not self._tool_call:
-            return None
+            return ToolCallVerdict("allow")
+
         call = ToolCall(tool_name=tool_name, args=args)
         for owner, callback in self._tool_call:
             try:
-                verdict = callback(call)
+                result = callback(call)
             except ExtensionVeto as veto:
-                return veto.reason
+                return ToolCallVerdict("block", veto.reason)
             except Exception as exc:  # noqa: BLE001 - 门控必须 fail-closed
                 _logger.warning("门控 %s 执行失败，按 fail-closed 拒绝: %s", owner, exc)
-                return f"门控 {owner} 执行失败，本次调用已被拒绝"
-            if isinstance(verdict, ExtensionVeto):
-                return verdict.reason
-            if verdict is False:
-                return f"被扩展 {owner} 拒绝"
-        return None
+                return ToolCallVerdict(
+                    "block", f"门控 {owner} 执行失败，本次调用已被拒绝",
+                )
+            if isinstance(result, ApprovalRequired):
+                fingerprint = approval_fingerprint(tool_name, args)
+                if self.consume_approval(fingerprint):
+                    # 已有一次性通行证，放行并继续检查后续门控
+                    continue
+                return ToolCallVerdict(
+                    "approve",
+                    result.reason,
+                    fingerprint,
+                )
+            if isinstance(result, ExtensionVeto):
+                return ToolCallVerdict("block", result.reason)
+            if result is False:
+                return ToolCallVerdict("block", f"被扩展 {owner} 拒绝")
+        return ToolCallVerdict("allow")
+
+    def run_tool_call(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+    ) -> Optional[str]:
+        """门控的简化接口：可以直接执行时返回 None，否则返回原因.
+
+        Args:
+            tool_name: 工具名.
+            args: 工具参数.
+
+        Returns:
+            拒绝或待批准的原因；``None`` 表示放行.
+        """
+        verdict = self.evaluate_tool_call(tool_name, args)
+        return None if verdict.is_allow else (verdict.reason or "blocked")
+
+    # ---- 审批通行证 -----------------------------------------------------
+
+    def grant_approval(self, fingerprint: str, ttl: float = 600.0) -> None:
+        """为一次具体调用发放一次性通行证.
+
+        Args:
+            fingerprint: 由 :func:`approval_fingerprint` 计算.
+            ttl: 通行证有效期（秒）.
+        """
+        if not fingerprint:
+            return
+        self._approvals[fingerprint] = time.monotonic() + ttl
+
+    def consume_approval(self, fingerprint: str) -> bool:
+        """消费一次性通行证；无论成功与否都会清除该指纹.
+
+        Args:
+            fingerprint: 审批指纹.
+
+        Returns:
+            True 表示这次调用已被批准.
+        """
+        if not fingerprint:
+            return False
+        expiry = self._approvals.pop(fingerprint, None)
+        return expiry is not None and expiry > time.monotonic()
+
+    def clear_approvals(self) -> None:
+        """清除全部未使用的通行证（拒绝或任务结束时调用）."""
+        self._approvals.clear()
 
     def run_tool_result(
         self,

@@ -6,21 +6,25 @@
 
 from zero_agent.extensions.context import ExtensionContext
 from zero_agent.extensions.events import (
+    ApprovalRequired,
     ExtensionVeto,
     LlmRequest,
     PromptBlock,
     ToolCall,
+    ToolCallVerdict,
     ToolResult,
 )
 from zero_agent.extensions.runtime import ExtensionRuntime, discover
 
 __all__ = [
+    "ApprovalRequired",
     "ExtensionContext",
     "ExtensionRuntime",
     "ExtensionVeto",
     "LlmRequest",
     "PromptBlock",
     "ToolCall",
+    "ToolCallVerdict",
     "ToolResult",
     "discover",
 ]

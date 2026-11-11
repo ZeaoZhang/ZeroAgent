@@ -1,6 +1,6 @@
 # 扩展体系设计（Extension Design）
 
-> 状态：**阶段 0–2 已实现；阶段 3（审批与恢复）与阶段 4（隔离）未实现**。
+> 状态：**阶段 0–3 已实现；阶段 4（隔离）未实现**。
 > 实现代码位于 `zero_agent/extensions/`，测试见 `tests/test_extension_runtime.py`
 > 与 `tests/test_mcp_client.py`。
 > 参考：pi（earendil-works/pi）的轻量扩展入口、DeepSeek Harness 的注册归属与生命周期。
@@ -291,6 +291,24 @@ LLM 会话层配合，留待后续）。
 
 用户启用一个插件，意味着允许它正常改变行为（提示词、请求、工具选择）。这与“agent 自行修改插件代码”是两件事，只有后者才走审批。
 
+### 8.4 实现形态（当前）
+
+- **三态门控**：`evaluate_tool_call()` 返回 `allow` / `block` / `approve`。
+  插件在门控里 `return ctx.confirm("原因")` 即要求审批。
+- **指纹绑定**：审批指纹是「工具名 + 全部业务参数（忽略 `_index` 等内部键）」的
+  SHA-256 前 16 位。模型只要改了目标或内容，指纹就变，需要重新批准。
+- **一次性通行证**：批准后写入 `runtime._approvals`（默认 600 秒），
+  下一次同指纹调用消费后立即失效；拒绝则清空全部未使用通行证。
+- **暂停与恢复**：门控要求审批时 `dispatch` 返回 `WAIT_FOR_USER`，
+  `PendingTaskState.waiting_kind = "approval"`。用户答复被判定为批准
+  （「批准/同意/允许/approve/yes/ok」等）才发放通行证，其余一律按拒绝处理
+  ——安全优先，不做模糊匹配。
+- **内置策略**：`permission_gate` 对受保护路径的写入走 `confirm`（可批准），
+  对明确危险的 shell（递归强制删除、格式化、关机等）仍直接 `block`。
+- **已知边界**：批准只放行一次具体调用；如果模型重试时改了内容，
+  会重新触发审批。审批只覆盖标准工具路径，`code_run` 内间接写文件仍受
+  第九节边界限制。
+
 ## 九、安全边界（诚实说明）
 
 上一版曾承诺“写护栏不可绕过”，这不成立，予以撤回。实际分三层：
@@ -314,26 +332,26 @@ LLM 会话层配合，留待后续）。
 | SOP | `memory/sops/`（`memory_dir` 下） | 由记忆模块管理 |
 | 运行时配置 | 项目 `config.yaml` 或 `ZA_CONFIG_PATH` | 新增扩展相关字段见下 |
 
-`config.yaml` 新增段（与现有 `config.example.yaml` 风格一致）：
+`config.yaml` 新增段（与现有 `config.example.yaml` 一致，**这是当前实际生效的字段**）：
 
 ```yaml
 extensions:
-  enabled: true
-  dir: "~/.zeroagent/extensions"     # 留空使用默认值
-  skills_dir: "~/.zeroagent/skills"
-  mcp_config: "~/.zeroagent/mcp.json"
-
-  # 需要人类同意的写入目标；未列出的路径默认 ask
-  approval:
-    default: ask                      # allow | ask | deny
-    rules:
-      "memory/sops": allow
-      "~/.zeroagent/extensions": ask
-      "~/.zeroagent/skills": ask
-      "~/.zeroagent/mcp.json": ask
+  enabled: true            # false 时不加载插件、skill 与 MCP
+  home: "~/.zeroagent"     # 扩展根目录，可指向临时目录便于测试
+  protected_writes: []     # 额外的受保护路径；写入前需人类批准
 ```
 
-解析规则：**路径最长前缀匹配**，未命中用 `default`。默认 `ask` 而非 `allow`，保证新目录不会默认开放写权限。
+**策略说明（与早期设计的差异）**：早期设计里的 `approval.default` / `approval.rules`
+三档路径策略（allow / ask / deny）**未实现**。当前形态是固定的两条内置规则：
+
+| 场景 | 行为 |
+| --- | --- |
+| 写入 `~/.zeroagent/{skills,extensions,mcp.json}` 或 `protected_writes` 中的路径 | `ask`：暂停并请求批准，批准只覆盖这一次调用 |
+| `code_run` 命中明确危险的 shell（递归强制删除、格式化、关机等） | `deny`：直接拒绝，不提供批准入口 |
+| 其余写入与命令 | `allow`：不干预 |
+
+`memory/sops/` 不在此扩展的管辖范围内，仍由记忆模块的 L0 约束管理。
+如果后续需要更细的三档策略，再引入配置化的规则表。
 
 ## 十一、分阶段落地
 
@@ -365,7 +383,7 @@ extensions:
   - 新增 `mcp.json` 后工具出现；文件损坏时只跳过该项。
   - 未配置 MCP 时进程内没有 `mcp` 模块。
 
-### 阶段 3：审批与恢复（⏳ 未实现）
+### 阶段 3：审批与恢复（✅ 已实现）
 
 - 改动：`core/types.py` 的 `waiting_kind`、`core/agent.py` 的恢复路径。
 - 验收：批准后只重放被暂停的那一次操作；拒绝后模型不会原地重试。
