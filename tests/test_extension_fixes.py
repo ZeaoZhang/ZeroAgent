@@ -285,13 +285,15 @@ class TestMcpLifecycle:
             __import__("json").dumps(config), encoding="utf-8"
         )
         runtime = _runtime(tmp_path)
+        before = len(mcp_client._live_clients)
 
         teardown = mcp_client.setup(ExtensionContext("mcp_client", runtime))
 
         assert callable(teardown)
         assert runtime.registry.get("mcp__fake__echo") is not None
         teardown()
-        assert len(mcp_client._live_clients) == 0
+        # 断言相对变化，避免被其它用例的残留状态影响
+        assert len(mcp_client._live_clients) == before
 
 
 class TestEnabledSemantics:
@@ -337,7 +339,9 @@ class TestEnabledSemantics:
 
         assert "hello_ext" not in [tool.name for tool in agent.registry.list_all()]
         assert agent.extensions is not None
-        assert agent.extensions.run_tool_call("code_run", {"code": "rm -rf /"}) is not None
+        # code_run 的真实参数是 script，历史代码也接受 code，两种都要拦
+        for args in ({"code": "rm -rf /"}, {"script": "rm -rf /"}):
+            assert agent.extensions.run_tool_call("code_run", args) is not None, args
 
     def test_enabled_loads_plugins(self, tmp_path: Path) -> None:
         agent = self._agent(tmp_path, enabled=True)

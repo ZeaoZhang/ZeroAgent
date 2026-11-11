@@ -57,6 +57,7 @@ def code_run(
     maxlen: int = 10000,
     env: Optional[dict[str, str]] = None,
     sandbox_mode: str = "",
+    sandbox_root: str = "",
 ) -> Generator[str, None, dict]:
     """在子进程中执行 Python 或 shell 代码.
 
@@ -133,17 +134,9 @@ def code_run(
         except Exception:
             pass
 
-    if sandbox_mode and sandbox_mode != "off":
-        from zero_agent.extensions.sandbox import wrap_command
-
-        cmd, _sandboxed, _sandbox_reason = wrap_command(cmd, cwd, sandbox_mode)
-        if _sandbox_reason:
-            yield f"[Sandbox] {_sandbox_reason}\n"
-
-    process = None
-    try:
-        process = subprocess.Popen(
-            cmd,
+    def _spawn(argv: List[str]) -> subprocess.Popen:
+        return subprocess.Popen(
+            argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             bufsize=0,
@@ -152,6 +145,33 @@ def code_run(
             creationflags=creationflags,
             env=env,
         )
+
+    original_cmd = cmd
+    sandbox_applied = False
+    if sandbox_mode and sandbox_mode != "off":
+        try:
+            from zero_agent.extensions.sandbox import wrap_command
+
+            # 写入根必须是 workspace，而不是模型可指定的 cwd
+            cmd, sandbox_applied, sandbox_reason = wrap_command(
+                cmd, sandbox_root or cwd, sandbox_mode,
+            )
+            if sandbox_reason:
+                yield f"[Sandbox] {sandbox_reason}\n"
+        except Exception as sandbox_exc:  # noqa: BLE001 - 沙箱问题不得阻断执行
+            sandbox_applied = False
+            yield f"[Sandbox] 包装失败，直接执行: {sandbox_exc}\n"
+
+    process = None
+    try:
+        try:
+            process = _spawn(cmd)
+        except (OSError, ValueError):
+            if not sandbox_applied:
+                raise
+            # 包装后可执行文件缺失等：回退为原始命令
+            yield "[Sandbox] 沙箱启动失败，回退为直接执行\n"
+            process = _spawn(original_cmd)
         start_t = time.time()
         reader_thread = threading.Thread(
             target=_stream_reader, args=(process,), daemon=True,
@@ -404,7 +424,12 @@ def _make_code_run_handler(config: AgentConfig):
                 getattr(config, "_desktop_agent_id", "") or ""
             )
 
-        from zero_agent.extensions.sandbox import resolve_mode
+        try:
+            from zero_agent.extensions.sandbox import resolve_mode
+
+            sandbox_mode = resolve_mode(config)
+        except Exception:  # noqa: BLE001 - 沙箱模块不可用不应影响执行
+            sandbox_mode = ""
 
         return (yield from code_run(
             code=code,
@@ -414,7 +439,8 @@ def _make_code_run_handler(config: AgentConfig):
             maxlen=maxlen,
             stop_signal=stop_signal,
             env=subprocess_env,
-            sandbox_mode=resolve_mode(config),
+            sandbox_mode=sandbox_mode,
+            sandbox_root=str(config.workspace_dir),
         ))
 
     def _handler(

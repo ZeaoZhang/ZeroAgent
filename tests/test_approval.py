@@ -191,7 +191,23 @@ class TestPermissionGateApproval:
         runtime = _runtime(tmp_path)
         permission_gate.setup(ExtensionContext("permission_gate", runtime))
 
-        verdict = runtime.evaluate_tool_call("code_run", {"code": "rm -rf /"})
+        for args in (
+            {"code": "rm -rf /"},
+            {"script": "rm -rf /"},
+        ):
+            verdict = runtime.evaluate_tool_call("code_run", args)
+            assert verdict.is_block, args
+
+    def test_script_path_content_is_inspected(self, tmp_path: Path) -> None:
+        runtime = _runtime(tmp_path)
+        permission_gate.setup(ExtensionContext("permission_gate", runtime))
+        script = tmp_path / "ws" / "danger.sh"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("rm -rf /\n", encoding="utf-8")
+
+        verdict = runtime.evaluate_tool_call(
+            "code_run", {"script_path": str(script)}
+        )
 
         assert verdict.is_block
 

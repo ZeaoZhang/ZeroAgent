@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 # 明显危险的 shell 片段：命中即拒绝，不做模糊判断
@@ -153,6 +154,39 @@ def _protected_prefixes(runtime: Any) -> Tuple[str, ...]:
     return tuple(dict.fromkeys(prefixes))
 
 
+def _collect_code_text(args: Dict[str, Any], runtime: Any) -> str:
+    """收集 code_run 真正会执行的代码文本.
+
+    ``code_run`` 支持 ``script``（短代码）与 ``script_path``（工作区脚本），
+    早期门控只看 ``code``，导致这两个参数可绕过检查。
+
+    Args:
+        args: 工具参数.
+        runtime: ExtensionRuntime，用于解析相对路径.
+
+    Returns:
+        拼接后的代码文本.
+    """
+    parts: List[str] = []
+    for key in ("code", "script"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value)
+
+    script_path = args.get("script_path")
+    if isinstance(script_path, str) and script_path.strip():
+        resolved = _resolve_like_file_tool(script_path, runtime)
+        try:
+            content = Path(os.path.expanduser(resolved)).read_text(
+                encoding="utf-8", errors="replace",
+            )
+            parts.append(content[:200_000])
+        except OSError:
+            # 读不到就不做内容判定，路径本身仍受其它规则约束
+            pass
+    return "\n".join(parts)
+
+
 def _content_summary(args: Dict[str, Any]) -> str:
     """生成待写入内容的摘要，供用户在批准前判断.
 
@@ -236,7 +270,7 @@ def setup(ctx: Any) -> None:
         workspace = _workspace(ctx.runtime)
 
         if call.tool_name == "code_run":
-            code = str(args.get("code") or "")
+            code = _collect_code_text(args, ctx.runtime)
             reason = _shell_verdict(code)
             if reason is not None:
                 return ctx.block(

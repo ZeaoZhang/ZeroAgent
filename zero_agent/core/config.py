@@ -163,7 +163,8 @@ class AgentConfig:
         incremental_output: 是否增量输出流式内容到 UI.
         log_dir: LLM 调用日志目录.
         litellm_model_cost_map: LiteLLM 模型价格/上下文窗口表缓存路径.
-        extensions_enabled: 是否加载扩展（插件 / skill / MCP）.
+        extensions_enabled: 是否加载外部插件与能力类扩展（skill / MCP）；
+            安全类扩展（permission_gate）始终生效.
         extensions_home: 扩展根目录，None 时使用 ``~/.zeroagent``.
         extensions_protected_writes: 额外的受保护写入前缀，修改前需人类同意.
         sandbox_mode: code_run 的进程沙箱模式 "off" | "auto" | "macos" | "linux".

@@ -988,8 +988,9 @@ class ZeroAgent:
     def _init_extensions(self) -> Any:
         """创建扩展运行时并加载插件与内置扩展.
 
-        ``extensions_enabled=false`` 只关闭外部插件与能力类扩展，安全门仍然生效；
-        若连安全门也要关，请显式移除 ``permission_gate`` 的安装。
+        ``extensions_enabled=false`` 只关闭外部插件与能力类扩展，安全门仍然生效。
+        当前没有配置项可以关闭安全门：要关必须改代码（移除 ``permission_gate``
+        的安装），这是刻意设计——避免一次误配置就失去全部写入保护。
 
         失败时返回 None：扩展体系不可用不应阻断核心功能。
 

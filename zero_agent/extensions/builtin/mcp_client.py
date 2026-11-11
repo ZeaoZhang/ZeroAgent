@@ -33,6 +33,8 @@ _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # 工具名只允许这些字符，超长截断，避免生成非法的 function name
 _NAME_PATTERN = re.compile(r"[^A-Za-z0-9_-]")
 _MAX_TOOL_NAME = 64
+# 暴露给模型的完整名字上限（含 mcp__<server>__ 前缀与冲突后缀）
+_MAX_EXPOSED_NAME = 64
 
 # 进程退出时统一关闭，避免残留子进程
 _live_clients: List["StdioMcpClient"] = []
@@ -109,25 +111,42 @@ class _LineReader:
     造成假超时；Windows 管道也不支持 select。用线程 + 队列规避这两个问题。
     """
 
+    _MAX_BUFFERED_LINES = 4096
+
     def __init__(self, stream: Any) -> None:
-        self._queue: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._queue: "queue.Queue[Optional[str]]" = queue.Queue(
+            maxsize=self._MAX_BUFFERED_LINES
+        )
+        self._eof = threading.Event()
         self._thread = threading.Thread(target=self._pump, args=(stream,), daemon=True)
         self._thread.start()
 
     def _pump(self, stream: Any) -> None:
         try:
             for line in stream:
-                self._queue.put(line)
+                try:
+                    self._queue.put(line, timeout=5)
+                except queue.Full:
+                    # 消费端不读时主动停止，避免内存无界增长
+                    break
         except Exception:  # noqa: BLE001 - 读取线程异常在取行时统一报告
             pass
         finally:
-            self._queue.put(None)
+            self._eof.set()
+            try:
+                self._queue.put_nowait(None)
+            except queue.Full:
+                pass
 
     def read_line(self, timeout: float) -> str:
         """读取一行，超时或进程退出时抛异常."""
+        if self._eof.is_set() and self._queue.empty():
+            raise RuntimeError("MCP 进程已退出")
         try:
             item = self._queue.get(timeout=timeout)
         except queue.Empty:
+            if self._eof.is_set():
+                raise RuntimeError("MCP 进程已退出") from None
             raise TimeoutError("MCP 读取超时") from None
         if item is None:
             raise RuntimeError("MCP 进程已退出")
@@ -268,10 +287,11 @@ class StdioMcpClient:
 
     def _write(self, payload: Dict[str, Any]) -> None:
         """写入一行 JSON-RPC 消息."""
-        if self._proc is None or self._proc.stdin is None:
+        proc = self._proc
+        if proc is None or proc.stdin is None:
             raise RuntimeError("MCP 进程未启动")
-        self._proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        self._proc.stdin.flush()
+        proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        proc.stdin.flush()
 
     def _notify(self, method: str, params: Dict[str, Any]) -> None:
         """发送无需响应的通知."""
@@ -332,9 +352,10 @@ class StdioMcpClient:
             TimeoutError: 超时.
             RuntimeError: 进程退出.
         """
-        if self._reader is None:
+        reader = self._reader
+        if reader is None:
             raise RuntimeError("MCP 进程未启动")
-        line = self._reader.read_line(timeout)
+        line = reader.read_line(timeout)
         try:
             message = json.loads(line)
         except json.JSONDecodeError as exc:
@@ -370,10 +391,26 @@ def _render_content(response: Dict[str, Any]) -> str:
     return prefix + "\n".join(parts)
 
 
+def _fit_exposed_name(base: str, suffix: int) -> str:
+    """把暴露名压到长度上限内，同时保留冲突后缀.
+
+    Args:
+        base: 基础名字（mcp__server__tool）.
+        suffix: 冲突序号，1 表示不追加后缀.
+
+    Returns:
+        长度不超过 ``_MAX_EXPOSED_NAME`` 的名字.
+    """
+    tag = "" if suffix <= 1 else f"_{suffix}"
+    limit = _MAX_EXPOSED_NAME - len(tag)
+    return base[:limit] + tag
+
+
 def _register_server(
     ctx: Any,
     server_name: str,
     config: Dict[str, Any],
+    used_names: Optional[set[str]] = None,
 ) -> Tuple[int, Optional[StdioMcpClient]]:
     """连接一个 MCP server 并注册其工具.
 
@@ -381,6 +418,9 @@ def _register_server(
         ctx: 插件上下文.
         server_name: server 名（来自 ``mcpServers`` 的键）.
         config: 该 server 的配置.
+
+    Args:
+        used_names: 跨 server 共享的已用名字集合，用于避免静默覆盖.
 
     Returns:
         ``(成功注册的工具数量, 客户端实例)``；跳过时客户端为 None.
@@ -409,21 +449,27 @@ def _register_server(
         raise
 
     registered = 0
-    used_names: set[str] = set()
+    if used_names is None:
+        used_names = set()
     for tool in tools:
         remote_name = str(tool.get("name") or "").strip()
         if not remote_name:
             continue
         safe_server = sanitize_tool_name(server_name)
         safe_tool = sanitize_tool_name(remote_name)
-        exposed = f"mcp__{safe_server}__{safe_tool}"
-        if len(exposed) > _MAX_TOOL_NAME + len(safe_server) + 6:
-            exposed = exposed[: _MAX_TOOL_NAME + len(safe_server) + 6]
-        suffix = 2
-        base = exposed
+        base = f"mcp__{safe_server}__{safe_tool}"
+        suffix = 1
+        exposed = _fit_exposed_name(base, suffix)
         while exposed in used_names:
-            exposed = f"{base}_{suffix}"
             suffix += 1
+            exposed = _fit_exposed_name(base, suffix)
+        if suffix > 1:
+            _logger.warning(
+                "MCP 工具名冲突，%s 的 %s 暴露为 %s",
+                server_name,
+                remote_name,
+                exposed,
+            )
         used_names.add(exposed)
         schema = tool.get("inputSchema")
         if not isinstance(schema, dict):
@@ -460,9 +506,12 @@ def setup(ctx: Any) -> Any:
         return None
 
     clients: List[StdioMcpClient] = []
+    used_names: set[str] = set()
     for server_name, config in servers.items():
         try:
-            count, client = _register_server(ctx, server_name, config)
+            count, client = _register_server(
+                ctx, server_name, config, used_names,
+            )
             if client is not None:
                 clients.append(client)
             if count:
