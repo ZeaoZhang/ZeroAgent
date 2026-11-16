@@ -118,10 +118,14 @@ class ToolRegistry:
             del self._overrides[index]
             released += 1
 
+            # 只找「紧邻的下一个」同名覆盖：它才是本项之上的直接一层。
+            # 若取最后一个（同名链的末端），中间层的“覆盖前状态”会保留一个
+            # 已释放的定义，后续逐层释放时会把已卸载插件的工具复活。
             later_index = None
             for candidate in range(index, len(self._overrides)):
                 if self._overrides[candidate][1] == name:
                     later_index = candidate
+                    break
 
             if later_index is None:
                 # 没有更晚的同名覆盖：当前生效值回滚到 previous

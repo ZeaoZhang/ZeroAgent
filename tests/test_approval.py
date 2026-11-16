@@ -246,7 +246,10 @@ class TestRecovery:
         text = self._agent_with_pending(runtime, "批准")
 
         assert "已批准" in text
-        assert runtime.evaluate_tool_call("danger", retry).is_allow
+        # 生产路径中 handler 会带上当前任务的 task_id，通行证绑定该任务消费
+        assert runtime.evaluate_tool_call("danger", retry, task_id="t1").is_allow
+        # 缺任务标识的调用不应消费它（避免跨任务复用）
+        assert runtime.evaluate_tool_call("danger", retry).needs_approval
 
     def test_rejected_answer_clears_tokens(self, tmp_path: Path) -> None:
         runtime = _ask_plugin(tmp_path)

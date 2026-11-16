@@ -26,8 +26,10 @@ def setup(ctx):
 
     @ctx.on_tool_call
     def guard(call):
-        # 返回 None 放行；返回 ctx.block(...) 拒绝
-        if call.tool_name == "code_run" and "rm -rf" in call.args.get("code", ""):
+        # 返回 None 放行；返回 ctx.block(...) 拒绝；返回 ctx.confirm(...) 请求人类批准
+        # 注意 code_run 的真实参数是 script / script_path，不是 code
+        script = str(call.args.get("script") or "")
+        if call.tool_name == "code_run" and "rm -rf" in script:
             return ctx.block("危险命令，已拦截")
 ```
 
@@ -51,7 +53,7 @@ def setup(ctx):
 | `ctx.on_tool_result` | 变换：改写工具结果 |
 | `ctx.on_llm_request` | 变换：改写模型请求 |
 | `ctx.prompt_block(name, factory)` | 贡献系统提示词块 |
-| `ctx.on_agent_start` / `on_turn_start` / `on_turn_end` / `on_agent_end` | 通知：只观察 |
+| `ctx.on_agent_start` / `on_turn_start` / `on_turn_end` / `on_agent_end` / `on_llm_after` | 通知：只观察 |
 
 ## 三类回调的语义
 

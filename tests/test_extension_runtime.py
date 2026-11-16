@@ -338,8 +338,11 @@ class TestBuiltins:
         permission_gate.setup(ExtensionContext("permission_gate", runtime))
 
         target = str(Path(runtime.home) / "skills" / "demo" / "SKILL.md")
-        reason = runtime.run_tool_call("file_write", {"path": target})
-        assert reason is not None
+        verdict = runtime.evaluate_tool_call("file_write", {"path": target})
+        # 受保护写入必须是“等待批准”，而不是直接拦截
+        assert verdict.needs_approval
+        assert "是否允许" in verdict.reason
+        assert verdict.fingerprint
 
     def test_permission_gate_allows_workspace_write(self, tmp_path: Path) -> None:
         runtime = _runtime(tmp_path)

@@ -203,16 +203,21 @@ class TestReplayOnRegistryRebuild:
 
         new_registry = _registry()
         new_registry.register(_tool("builtin_tool", "builtin"))
+        new_config = object()
 
         class Stub:
             extensions = runtime
             registry = new_registry
             loop = None
+            config = new_config
 
         ZeroAgent._replay_extension_registrations(Stub())
 
         assert new_registry.get("echo_tool") is not None
         assert runtime.registry is new_registry
+        # 热重载换了配置对象后，运行时必须跟着换：
+        # permission_gate 用 runtime.config 解析 workspace 基准
+        assert runtime.config is new_config
 
 
 class TestPermissionGateHardening:
@@ -235,7 +240,9 @@ class TestPermissionGateHardening:
         runtime = self._runtime(tmp_path)
         assert runtime.run_tool_call("code_run", {"code": "rm -f a.txt"}) is None
 
-    def test_symlink_into_protected_dir_is_blocked(self, tmp_path: Path) -> None:
+    def test_symlink_into_protected_dir_requires_approval(
+        self, tmp_path: Path,
+    ) -> None:
         runtime = self._runtime(tmp_path)
         protected = Path(runtime.home) / "skills"
         protected.mkdir(parents=True, exist_ok=True)
@@ -245,10 +252,11 @@ class TestPermissionGateHardening:
         except OSError:
             pytest.skip("当前环境不支持符号链接")
 
-        reason = runtime.run_tool_call(
+        verdict = runtime.evaluate_tool_call(
             "file_write", {"path": str(link / "demo" / "SKILL.md")}
         )
-        assert reason is not None
+        # 软链解析后落在受保护目录：应是“等待批准”，不是静默放行
+        assert verdict.needs_approval
 
     def test_empty_path_is_blocked(self, tmp_path: Path) -> None:
         runtime = self._runtime(tmp_path)
@@ -347,3 +355,196 @@ class TestEnabledSemantics:
         agent = self._agent(tmp_path, enabled=True)
 
         assert "hello_ext" in [tool.name for tool in agent.registry.list_all()]
+
+
+class TestNotifyDispatch:
+    """通知型事件必须由 hook 生命周期真正触发（此前 notify() 无调用者）."""
+
+    def test_hook_events_map_to_notify(self, tmp_path: Path) -> None:
+        runtime = _runtime(tmp_path)
+        seen: list = []
+        runtime.subscribe_notify("agent_start", "p", lambda payload: seen.append(payload))
+        runtime.subscribe_notify("turn_end", "p", lambda payload: seen.append(payload))
+
+        runtime.dispatch_hook_notify("agent_before", {"turn": 1})
+        runtime.dispatch_hook_notify("turn_after", {"turn": 2})
+        runtime.dispatch_hook_notify("tool_before", {"ignored": True})
+
+        assert seen == [{"turn": 1}, {"turn": 2}]
+
+    def test_payload_is_copied_per_callback(self, tmp_path: Path) -> None:
+        runtime = _runtime(tmp_path)
+        seen: list = []
+        runtime.subscribe_notify(
+            "turn_start", "a", lambda payload: payload.update({"polluted": True}),
+        )
+        runtime.subscribe_notify(
+            "turn_start", "b", lambda payload: seen.append(dict(payload)),
+        )
+
+        runtime.dispatch_hook_notify("turn_before", {"turn": 1})
+
+        assert seen == [{"turn": 1}]
+
+    def test_ctx_llm_after_receives_event(self, tmp_path: Path) -> None:
+        runtime = _runtime(tmp_path)
+        seen: list = []
+        ExtensionContext("p", runtime).on_llm_after(
+            lambda payload: seen.append(payload),
+        )
+
+        runtime.dispatch_hook_notify("llm_after", {"turn": 1})
+
+        assert seen == [{"turn": 1}]
+
+
+class TestGateFailClosed:
+    """门控无法识别的返回值必须按 fail-closed 拒绝."""
+
+    def test_unknown_return_value_blocks(self, tmp_path: Path) -> None:
+        runtime = _runtime(tmp_path)
+        runtime.subscribe_tool_call("g", lambda call: "deny")
+
+        assert runtime.evaluate_tool_call("t", {}).is_block
+
+    def test_none_still_allows(self, tmp_path: Path) -> None:
+        runtime = _runtime(tmp_path)
+        runtime.subscribe_tool_call("g", lambda call: None)
+
+        assert runtime.evaluate_tool_call("t", {}).is_allow
+
+    def test_false_still_blocks(self, tmp_path: Path) -> None:
+        runtime = _runtime(tmp_path)
+        runtime.subscribe_tool_call("g", lambda call: False)
+
+        assert runtime.evaluate_tool_call("t", {}).is_block
+
+
+class TestApprovalTaskScope:
+    def _fingerprint(self, tmp_path: Path) -> str:
+        from zero_agent.extensions.runtime import approval_fingerprint
+
+        return approval_fingerprint("t", {"path": "x"})
+
+    def test_granted_for_task_not_consumed_by_empty_task(
+        self, tmp_path: Path,
+    ) -> None:
+        runtime = _runtime(tmp_path)
+        fingerprint = self._fingerprint(tmp_path)
+        runtime.grant_approval(fingerprint, task_id="task-A")
+
+        assert runtime.consume_approval(fingerprint, task_id="") is False
+
+    def test_granted_for_task_consumed_by_same_task(self, tmp_path: Path) -> None:
+        runtime = _runtime(tmp_path)
+        fingerprint = self._fingerprint(tmp_path)
+        runtime.grant_approval(fingerprint, task_id="task-A")
+
+        assert runtime.consume_approval(fingerprint, task_id="task-A") is True
+
+    def test_global_grant_still_consumed_by_any_task(self, tmp_path: Path) -> None:
+        runtime = _runtime(tmp_path)
+        fingerprint = self._fingerprint(tmp_path)
+        runtime.grant_approval(fingerprint, task_id="")
+
+        assert runtime.consume_approval(fingerprint, task_id="task-A") is True
+
+
+class TestReleaseCleansBuiltinOwners:
+    def test_release_removes_tracked_builtin_registrations(
+        self, tmp_path: Path,
+    ) -> None:
+        runtime = _runtime(tmp_path)
+        context = ExtensionContext("permission_gate", runtime)
+
+        @context.tool(
+            name="inner_tool",
+            description="d",
+            parameters={"type": "object", "properties": {}},
+        )
+        def inner(args):  # noqa: ANN001 - 测试用最小 handler
+            return "x"
+
+        runtime.track_owner("permission_gate")
+        runtime.release()
+
+        assert runtime.registry.get("inner_tool") is None
+        assert runtime.registry.owner_of("inner_tool") is None
+
+    def test_unregister_owner_cleans_half_installed_extension(
+        self, tmp_path: Path,
+    ) -> None:
+        runtime = _runtime(tmp_path)
+        runtime.register_tool("partial", _tool("partial_tool", "partial"))
+        runtime.track_owner("partial")
+
+        runtime.unregister_owner("partial")
+
+        assert runtime.registry.get("partial_tool") is None
+        assert "partial" not in runtime._builtin_owners
+
+
+class TestPromptBlockCap:
+    def test_oversized_block_is_truncated(self, tmp_path: Path) -> None:
+        from zero_agent.extensions import runtime as runtime_mod
+
+        runtime = _runtime(tmp_path)
+        ExtensionContext("p", runtime).prompt_block("huge", lambda: "x" * 100_000)
+
+        blocks = runtime.collect_prompt_blocks()
+
+        assert blocks
+        assert len(blocks[0].text) <= runtime_mod._MAX_PROMPT_BLOCK_CHARS + 10
+        assert blocks[0].text.endswith("…（已截断）")
+
+    def test_normal_block_is_untouched(self, tmp_path: Path) -> None:
+        runtime = _runtime(tmp_path)
+        ExtensionContext("p", runtime).prompt_block("small", lambda: "hello")
+
+        blocks = runtime.collect_prompt_blocks()
+
+        assert blocks[0].text == "hello"
+
+
+class TestDiscoverFailureIsolation:
+    def test_discover_failure_does_not_block_startup(
+        self, monkeypatch, tmp_path: Path,
+    ) -> None:
+        from zero_agent.extensions import runtime as runtime_mod
+
+        def boom(home):  # noqa: ANN001 - 模拟不可读的扩展目录
+            raise PermissionError("unreadable")
+
+        monkeypatch.setattr(runtime_mod, "discover", boom)
+        runtime = _runtime(tmp_path)
+
+        assert runtime.load_all() == 0
+
+
+class TestRegistryDeepOverride:
+    def test_three_layer_release_restores_baseline(self) -> None:
+        registry = _registry()
+        registry.register(_tool("t", "builtin"))
+        for owner in ("A", "B", "C"):
+            registry.register(_tool("t", owner), owner=owner)
+
+        for owner in ("A", "B", "C"):
+            registry.release_owner(owner)
+
+        assert registry.get("t").description == "builtin"
+        assert registry.owner_of("t") is None
+
+    def test_releasing_middle_layer_keeps_top_definition(self) -> None:
+        registry = _registry()
+        registry.register(_tool("t", "builtin"))
+        for owner in ("A", "B", "C"):
+            registry.register(_tool("t", owner), owner=owner)
+
+        registry.release_owner("B")
+        assert registry.get("t").description == "C"
+
+        registry.release_owner("A")
+        assert registry.get("t").description == "C"
+
+        registry.release_owner("C")
+        assert registry.get("t").description == "builtin"

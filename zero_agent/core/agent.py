@@ -972,9 +972,15 @@ class ZeroAgent:
 
         共有三条重建路径（reload_config / _apply_pending_runtime_config /
         switch_backend），都必须经过这里，否则插件工具会随旧 registry 消失。
+
+        同时把运行时持有的 config 换成新对象：``permission_gate`` 等内置扩展
+        通过 ``runtime.config`` 解析相对路径的基准目录，若仍指向旧对象，
+        路径判定会与实际写入位置（handler.cwd）分叉。插件与扩展目录本身
+        （``extensions_home``）变更仍需重启，这里不重新加载。
         """
         extensions = getattr(self, "extensions", None)
         if extensions is not None:
+            extensions.config = self.config
             extensions.attach_registry(self.registry)
         active_loop = getattr(self, "loop", None)
         if active_loop is not None:
@@ -1048,7 +1054,15 @@ class ZeroAgent:
                 teardown = module.setup(ExtensionContext(name, runtime))
                 if callable(teardown):
                     runtime.register_teardown(name, teardown)
+                # 内置扩展不经 load_all，必须显式登记归属，
+                # 否则 runtime.release() 不会撤销它们注册的工具与回调
+                runtime.track_owner(name)
             except Exception as exc:  # noqa: BLE001 - 单个内置扩展失败可跳过
+                # 安装到一半失败时清掉半成品注册（例如门控只注册了一半）
+                try:
+                    runtime.unregister_owner(name)
+                except Exception:  # noqa: BLE001 - 清理失败不影响启动
+                    pass
                 logger.warning("内置扩展 %s 安装失败，已跳过: %s", name, exc)
 
     def _register_builtin_plugins(self, tracer: Any = None) -> None:

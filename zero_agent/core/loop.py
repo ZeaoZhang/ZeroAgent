@@ -720,9 +720,12 @@ class AgentLoop:
         return getattr(agent, "extensions", None)
 
     def _trigger_hook(self, event: str, context: dict) -> None:
-        """触发 hook 并隔离 hook 失败."""
+        """触发 hook 并隔离 hook 失败；同时把生命周期事件转给扩展运行时."""
         if self.hooks:
             self.hooks.trigger(event, context)
+        extensions = self._extensions()
+        if extensions is not None:
+            extensions.dispatch_hook_notify(event, context)
 
     def _model_name(self) -> str:
         """获取当前 LLM model 名称."""

@@ -122,6 +122,11 @@ class ExtensionContext:
         self.runtime.subscribe_notify("turn_end", self.name, callback)
         return callback
 
+    def on_llm_after(self, callback: Callable[..., None]) -> Callable[..., None]:
+        """订阅模型响应完成事件（通知型，只观察，不能改写响应）."""
+        self.runtime.subscribe_notify("llm_after", self.name, callback)
+        return callback
+
     # ---- 变换型扩展点 ---------------------------------------------------
 
     def on_llm_request(self, callback: Callable[[Any], Any]) -> Callable[[Any], Any]:
