@@ -288,7 +288,10 @@ def setup(ctx: Any) -> None:
                     f"将修改 {prefix} 下的内容：{path}\n"
                     f"内容：{_content_summary(args)}\n"
                     "skills 会进入系统提示词，extensions 会在下次启动执行，"
-                    "mcp.json 会拉起外部命令。是否允许这一次修改？"
+                    "mcp.json 会拉起外部命令。是否允许这一次修改？",
+                    # 批量授权键：同任务内对同一路径的后续改写不再重复询问，
+                    # 避免模型把内容改一个换行就再弹一次审批
+                    scope=f"{call.tool_name}:{path}",
                 )
 
         return None

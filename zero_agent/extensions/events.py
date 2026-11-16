@@ -122,10 +122,20 @@ class ApprovalRequired:
 
     门控回调直接 ``return ctx.confirm(...)``。运行时会暂停任务、向用户提问，
     并用「工具名 + 参数」的指纹把批准绑定到这一次具体操作上。
+
+    ``scope`` 是可选的「批量授权键」：同一任务内、同一 scope 的后续调用在
+    通行证有效期内不再重复询问。适合「写同一个文件的不同版本」这类会被模型
+    反复改写的场景；不填则严格按单次批准处理。
+
+    Attributes:
+        reason: 展示给用户的原因.
+        candidates: 可选快捷选项.
+        scope: 批量授权键；空串表示只批准单次调用.
     """
 
     reason: str
     candidates: Optional[List[str]] = None
+    scope: str = ""
 
 
 @dataclass
@@ -136,11 +146,13 @@ class ToolCallVerdict:
         action: ``allow`` 放行；``block`` 拒绝；``approve`` 需要人类批准.
         reason: 拒绝或审批的原因，会展示给模型与用户.
         fingerprint: 审批指纹；只有 ``approve`` 时有值.
+        scope: 批量授权键；只有 ``approve`` 时可能非空.
     """
 
     action: Literal["allow", "block", "approve"]
     reason: str = ""
     fingerprint: str = ""
+    scope: str = ""
 
     @property
     def is_allow(self) -> bool:

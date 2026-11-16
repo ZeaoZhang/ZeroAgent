@@ -181,20 +181,26 @@ class ExtensionContext:
         self,
         question: str,
         candidates: Optional[List[str]] = None,
+        scope: str = "",
     ) -> ApprovalRequired:
         """请求人类批准这次工具调用.
 
         在门控回调里直接 ``return ctx.confirm("原因")``。运行时会暂停任务、
         向用户提问；批准后只放行与本次参数完全一致的一次调用。
 
+        传 ``scope`` 时额外登记一个「批量授权键」：同一任务内、同一 scope 的
+        后续调用在通行证有效期内不再重复询问。用来避免模型把同一个文件反复
+        改写（例如内容只差一个换行）时不断弹审批。
+
         Args:
             question: 展示给用户的说明，讲清要做什么、影响是什么.
             candidates: 可选快捷选项，默认由运行时提供「批准 / 拒绝」.
+            scope: 批量授权键，例如「工具名 + 目标路径」；空串表示仅单次.
 
         Returns:
             ApprovalRequired，交给运行时处理.
         """
-        return ApprovalRequired(reason=question, candidates=candidates)
+        return ApprovalRequired(reason=question, candidates=candidates, scope=scope)
 
 
 # 供类型标注使用，避免循环导入

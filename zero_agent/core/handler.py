@@ -298,6 +298,7 @@ class BaseHandler:
                         },
                         "approval": {
                             "fingerprint": verdict.fingerprint,
+                            "scope": verdict.scope,
                             "tool_name": tool_name,
                             "reason": verdict.reason,
                         },

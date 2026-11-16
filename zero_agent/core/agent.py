@@ -733,6 +733,7 @@ class ZeroAgent:
         if not isinstance(approval, dict):
             approval = {}
         fingerprint = str(approval.get("fingerprint") or "")
+        scope = str(approval.get("scope") or "")
         tool_name = str(approval.get("tool_name") or "该工具")
 
         extensions = getattr(self, "extensions", None)
@@ -751,6 +752,7 @@ class ZeroAgent:
                 extensions.grant_approval(
                     fingerprint,
                     task_id=pending.contract.task_id,
+                    scope=scope,
                 )
             return (
                 f"[System] 用户已批准对 {tool_name} 的这一次调用。"

@@ -251,6 +251,40 @@ class TestRecovery:
         # 缺任务标识的调用不应消费它（避免跨任务复用）
         assert runtime.evaluate_tool_call("danger", retry).needs_approval
 
+    def test_scope_from_pending_is_granted(self, tmp_path: Path) -> None:
+        from zero_agent.core.agent import ZeroAgent
+
+        runtime = _runtime(tmp_path)
+        pending = PendingTaskState(
+            contract=TaskContract(
+                task_id="t1", user_request="do", mode=TaskMode.OPEN
+            ),
+            ledger=EvidenceLedger(),
+            plan_verify_status="missing",
+            waiting_kind="approval",
+            waiting_data={
+                "approval": {
+                    "fingerprint": approval_fingerprint("danger", {"x": 1}),
+                    "scope": "danger:/tmp/x",
+                    "tool_name": "danger",
+                    "reason": "sure?",
+                }
+            },
+        )
+
+        class Stub:
+            extensions = runtime
+            _is_approval_answer = ZeroAgent._is_approval_answer
+
+        ZeroAgent._approval_continuation(Stub(), pending, "批准")
+
+        # 批量授权按 scope 生效：不同参数、同任务、同 scope 也应放行
+        assert runtime.consume_approval(
+            approval_fingerprint("danger", {"x": 2}),
+            task_id="t1",
+            scope="danger:/tmp/x",
+        )
+
     def test_rejected_answer_clears_tokens(self, tmp_path: Path) -> None:
         runtime = _ask_plugin(tmp_path)
         retry = {"x": 1}
@@ -418,3 +452,159 @@ class TestHardening:
         )
 
         assert verdict.needs_approval
+
+
+class TestScopeApproval:
+    """批量授权：同任务 + 同 scope 的重复审批合并（治理审批疲劳）."""
+
+    def _gate_runtime(self, tmp_path: Path) -> ExtensionRuntime:
+        runtime = _runtime(tmp_path)
+        permission_gate.setup(ExtensionContext("permission_gate", runtime))
+        return runtime
+
+    def _protected_target(self, runtime: ExtensionRuntime) -> str:
+        return str(Path(runtime.home) / "skills" / "demo" / "SKILL.md")
+
+    def test_same_path_changed_content_is_merged(self, tmp_path: Path) -> None:
+        runtime = self._gate_runtime(tmp_path)
+        target = self._protected_target(runtime)
+
+        first = runtime.evaluate_tool_call(
+            "file_write", {"path": target, "content": "demo\n"},
+        )
+        assert first.needs_approval
+        assert first.scope, "受保护写入必须给出批量授权键"
+
+        runtime.grant_approval(first.fingerprint, task_id="t1", scope=first.scope)
+
+        # 内容只差一个换行：模型重发时不该再弹一次审批
+        second = runtime.evaluate_tool_call(
+            "file_write", {"path": target, "content": "demo"},
+            task_id="t1",
+        )
+        assert second.is_allow
+
+    def test_other_path_still_asks(self, tmp_path: Path) -> None:
+        runtime = self._gate_runtime(tmp_path)
+        target = self._protected_target(runtime)
+
+        first = runtime.evaluate_tool_call(
+            "file_write", {"path": target, "content": "a"},
+        )
+        runtime.grant_approval(first.fingerprint, task_id="t1", scope=first.scope)
+
+        other = str(Path(runtime.home) / "skills" / "other" / "SKILL.md")
+        verdict = runtime.evaluate_tool_call(
+            "file_write", {"path": other, "content": "a"}, task_id="t1",
+        )
+        assert verdict.needs_approval
+
+    def test_scope_grant_is_task_bound(self, tmp_path: Path) -> None:
+        runtime = self._gate_runtime(tmp_path)
+        target = self._protected_target(runtime)
+
+        first = runtime.evaluate_tool_call(
+            "file_write", {"path": target, "content": "a"},
+        )
+        runtime.grant_approval(first.fingerprint, task_id="t1", scope=first.scope)
+
+        verdict = runtime.evaluate_tool_call(
+            "file_write", {"path": target, "content": "b"}, task_id="t2",
+        )
+        assert verdict.needs_approval
+
+    def test_scope_grant_expires(self, tmp_path: Path) -> None:
+        runtime = self._gate_runtime(tmp_path)
+        target = self._protected_target(runtime)
+
+        first = runtime.evaluate_tool_call(
+            "file_write", {"path": target, "content": "a"},
+        )
+        runtime.grant_approval(
+            first.fingerprint, ttl=0.0, task_id="t1", scope=first.scope,
+        )
+
+        verdict = runtime.evaluate_tool_call(
+            "file_write", {"path": target, "content": "b"}, task_id="t1",
+        )
+        assert verdict.needs_approval
+
+    def test_clear_approvals_drops_scope(self, tmp_path: Path) -> None:
+        runtime = self._gate_runtime(tmp_path)
+        target = self._protected_target(runtime)
+
+        first = runtime.evaluate_tool_call(
+            "file_write", {"path": target, "content": "a"},
+        )
+        runtime.grant_approval(first.fingerprint, task_id="t1", scope=first.scope)
+        runtime.clear_approvals()
+
+        verdict = runtime.evaluate_tool_call(
+            "file_write", {"path": target, "content": "b"}, task_id="t1",
+        )
+        assert verdict.needs_approval
+
+    def test_no_scope_keeps_single_approval(self, tmp_path: Path) -> None:
+        runtime = _ask_plugin(tmp_path)
+        first = runtime.evaluate_tool_call("danger", {"x": 1})
+        assert first.needs_approval
+        assert first.scope == ""
+        runtime.grant_approval(first.fingerprint, task_id="t1")
+
+        # 没有批量授权键：参数一变就必须重新批准
+        assert runtime.evaluate_tool_call("danger", {"x": 2}).needs_approval
+
+
+class TestScopeFlowThroughHandler:
+    def _handler(self, runtime: ExtensionRuntime):
+        from zero_agent.core.handler import BaseHandler
+
+        class Parent:
+            def __init__(self) -> None:
+                self.extensions = runtime
+                self.loop = None
+                self.config = None
+
+        handler = BaseHandler(registry=runtime.registry, cwd=".")
+        handler.parent = Parent()
+        handler.task_contract = TaskContract(
+            task_id="t1", user_request="do", mode=TaskMode.OPEN
+        )
+        return handler
+
+    def _dispatch(self, handler, tool_name: str, args: dict):
+        generator = handler.dispatch(tool_name, args, None)
+        try:
+            while True:
+                next(generator)
+        except StopIteration as stop:
+            return stop.value
+
+    def test_waiting_payload_carries_scope(self, tmp_path: Path) -> None:
+        runtime = _runtime(tmp_path)
+        permission_gate.setup(ExtensionContext("permission_gate", runtime))
+        handler = self._handler(runtime)
+        target = str(Path(runtime.home) / "skills" / "demo" / "SKILL.md")
+
+        paused = self._dispatch(handler, "file_write", {"path": target, "content": "a"})
+
+        assert paused.action is StepAction.WAIT_FOR_USER
+        assert paused.data["approval"]["scope"] == f"file_write:{target}"
+
+    def test_granted_scope_covers_changed_args(self, tmp_path: Path) -> None:
+        runtime = _runtime(tmp_path)
+        permission_gate.setup(ExtensionContext("permission_gate", runtime))
+        handler = self._handler(runtime)
+        target = str(Path(runtime.home) / "skills" / "demo" / "SKILL.md")
+
+        paused = self._dispatch(handler, "file_write", {"path": target, "content": "a"})
+        runtime.grant_approval(
+            paused.data["approval"]["fingerprint"],
+            task_id="t1",
+            scope=paused.data["approval"]["scope"],
+        )
+
+        outcome = self._dispatch(
+            handler, "file_write", {"path": target, "content": "a\n"},
+        )
+        assert outcome.action is not StepAction.WAIT_FOR_USER

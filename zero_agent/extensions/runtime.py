@@ -199,6 +199,9 @@ class ExtensionRuntime:
         # 单独记录才能在 release() 时一并撤销
         self._builtin_owners: List[str] = []
         self._approvals: Dict[str, Tuple[float, str]] = {}
+        # 批量授权：键为 (task_id, scope)，值为过期时间。
+        # 用于「同一任务内反复写同一个文件」时不重复弹审批。
+        self._scope_grants: Dict[Tuple[str, str], float] = {}
 
     # ---- 加载与卸载 -----------------------------------------------------
 
@@ -335,6 +338,7 @@ class ExtensionRuntime:
         self._prompt_blocks.clear()
         self._tool_defs.clear()
         self._approvals.clear()
+        self._scope_grants.clear()
 
     def attach_registry(self, registry: ToolRegistry) -> None:
         """在 registry 被重建后重放全部插件工具注册.
@@ -468,6 +472,7 @@ class ExtensionRuntime:
         call = ToolCall(tool_name=tool_name, args=args)
         approval_reason = ""
         approval_fingerprint_value = ""
+        approval_scope_value = ""
         for owner, callback in self._tool_call:
             try:
                 result = callback(call)
@@ -483,6 +488,7 @@ class ExtensionRuntime:
                 if not approval_fingerprint_value:
                     approval_fingerprint_value = approval_fingerprint(tool_name, args)
                     approval_reason = result.reason
+                    approval_scope_value = result.scope or ""
                 continue
             if isinstance(result, ExtensionVeto):
                 return ToolCallVerdict("block", result.reason)
@@ -504,13 +510,16 @@ class ExtensionRuntime:
 
         if approval_fingerprint_value:
             if self.consume_approval(
-                approval_fingerprint_value, task_id=task_id,
+                approval_fingerprint_value,
+                task_id=task_id,
+                scope=approval_scope_value,
             ):
                 return ToolCallVerdict("allow")
             return ToolCallVerdict(
                 "approve",
                 approval_reason,
                 approval_fingerprint_value,
+                approval_scope_value,
             )
         return ToolCallVerdict("allow")
 
@@ -542,27 +551,44 @@ class ExtensionRuntime:
         fingerprint: str,
         ttl: float = 600.0,
         task_id: str = "",
+        scope: str = "",
     ) -> None:
-        """为一次具体调用发放一次性通行证.
+        """为一次具体调用发放一次性通行证，并可选登记批量授权.
 
         通行证绑定任务：只有同一 task_id 的调用才能消费它，避免批准在任务结束
         后被后续任务复用。
+
+        ``scope`` 非空时额外登记一个批量授权：同一任务内、同一 scope 的后续
+        调用在有效期内不再重复询问。用于「模型把同一个文件反复改写」的审批
+        疲劳场景（例如内容只差一个换行）。批量授权按 ``scope`` 生效，与指纹
+        无关，因此内容变化也会被放行——这是刻意的取舍，靠 TTL + 任务绑定 +
+        路径级 scope 把窗口限制到最小。
 
         Args:
             fingerprint: 由 :func:`approval_fingerprint` 计算.
             ttl: 通行证有效期（秒）.
             task_id: 任务标识；空串表示不限定任务.
+            scope: 批量授权键（例如「工具名 + 目标绝对路径」）；空串表示不登记.
         """
         if not fingerprint:
             return
-        self._approvals[fingerprint] = (time.monotonic() + ttl, task_id)
+        expiry = time.monotonic() + ttl
+        self._approvals[fingerprint] = (expiry, task_id)
+        if scope:
+            self._scope_grants[(task_id, scope)] = expiry
 
-    def consume_approval(self, fingerprint: str, task_id: str = "") -> bool:
-        """消费一次性通行证；无论成功与否都会清除该指纹.
+    def consume_approval(
+        self,
+        fingerprint: str,
+        task_id: str = "",
+        scope: str = "",
+    ) -> bool:
+        """消费通行证；无论成功与否都会清除该指纹对应的一次性通行证.
 
         Args:
             fingerprint: 审批指纹.
             task_id: 当前任务标识；与发放时不一致则视为无效.
+            scope: 批量授权键；一次性通行证不可用时按它命中残留授权.
 
         Returns:
             True 表示这次调用已被批准.
@@ -570,19 +596,27 @@ class ExtensionRuntime:
         if not fingerprint:
             return False
         entry = self._approvals.pop(fingerprint, None)
-        if entry is None:
+        if entry is not None:
+            expiry, granted_task = entry
+            if expiry > time.monotonic() and not (
+                granted_task and granted_task != task_id
+            ):
+                return True
+        # 回溯批量授权：同任务、同 scope、未过期则放行（不消耗，窗口内可重复）
+        if not scope:
             return False
-        expiry, granted_task = entry
-        if expiry <= time.monotonic():
+        scope_expiry = self._scope_grants.get((task_id, scope))
+        if scope_expiry is None:
             return False
-        # 绑定了任务的通行证只能被同一任务消费；空 task_id 不再视为“任意任务”
-        if granted_task and granted_task != task_id:
+        if scope_expiry <= time.monotonic():
+            self._scope_grants.pop((task_id, scope), None)
             return False
         return True
 
     def clear_approvals(self) -> None:
-        """清除全部未使用的通行证（拒绝或任务结束时调用）."""
+        """清除全部未使用的通行证与批量授权（拒绝或任务结束时调用）."""
         self._approvals.clear()
+        self._scope_grants.clear()
 
     def run_tool_result(
         self,
