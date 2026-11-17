@@ -18,6 +18,10 @@ _MAX_DESCRIPTION_CHARS = 160
 _MAX_INDEX_ENTRIES = 60
 _MAX_BODY_CHARS = 20000
 
+# 元信息缓存：键为 SKILL.md 路径，值为 (mtime_ns, size, (名称, 描述, 正文))。
+# 提示词每轮都会重新渲染索引，缓存避免反复读盘；文件变化后签名失效即重读。
+_META_CACHE: Dict[str, Tuple[int, int, Tuple[str, str, str]]] = {}
+
 
 def _skills_root(runtime: Any) -> Optional[Path]:
     """返回 skill 根目录；未配置时返回 None."""
@@ -92,6 +96,33 @@ def _read_meta(name: str, path: Path) -> Tuple[str, str, str]:
     return skill_name, description, body.strip()
 
 
+def _read_meta_cached(name: str, path: Path) -> Tuple[str, str, str]:
+    """按文件签名缓存读取 skill 元信息与正文.
+
+    Args:
+        name: 目录名（兜底技能名）.
+        path: SKILL.md 路径.
+
+    Returns:
+        ``(技能名, 描述, 正文)``.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return _read_meta(name, path)
+    key = str(path)
+    cached = _META_CACHE.get(key)
+    if (
+        cached is not None
+        and cached[0] == stat.st_mtime_ns
+        and cached[1] == stat.st_size
+    ):
+        return cached[2]
+    meta = _read_meta(name, path)
+    _META_CACHE[key] = (stat.st_mtime_ns, stat.st_size, meta)
+    return meta
+
+
 def setup(ctx: Any) -> None:
     """安装 skill 索引扩展.
 
@@ -137,7 +168,7 @@ def setup(ctx: Any) -> None:
         if root is None:
             return "未配置 skill 目录。"
         for dir_name, skill_md in iter_skills(root):
-            skill_name, _description, body = _read_meta(dir_name, skill_md)
+            skill_name, _description, body = _read_meta_cached(dir_name, skill_md)
             if requested in (skill_name, dir_name):
                 if len(body) > _MAX_BODY_CHARS:
                     body = body[:_MAX_BODY_CHARS] + "\n\n…（已截断）"
@@ -163,7 +194,7 @@ def _render_index(root: Optional[Path]) -> str:
     entries: List[str] = []
     for dir_name, skill_md in iter_skills(root):
         try:
-            skill_name, description, _body = _read_meta(dir_name, skill_md)
+            skill_name, description, _body = _read_meta_cached(dir_name, skill_md)
         except Exception:  # noqa: BLE001 - 单个条目失败不影响索引
             continue
         if len(description) > _MAX_DESCRIPTION_CHARS:

@@ -1040,6 +1040,10 @@ class AgentManager:
             if sess.agent and hasattr(sess.agent, "abort"):
                 with contextlib.suppress(Exception):
                     sess.agent.abort()
+            # 会话被删除/重置后不再复用该 agent：释放 MCP 子进程与扩展注册
+            if sess.agent and hasattr(sess.agent, "close"):
+                with contextlib.suppress(Exception):
+                    sess.agent.close()
             previous_active = self.active_session_id
             was_active = previous_active == sid
             self.sessions.pop(sid)
@@ -1090,6 +1094,10 @@ class AgentManager:
             if sess.agent and hasattr(sess.agent, "abort"):
                 with contextlib.suppress(Exception):
                     sess.agent.abort()
+            # 会话被删除/重置后不再复用该 agent：释放 MCP 子进程与扩展注册
+            if sess.agent and hasattr(sess.agent, "close"):
+                with contextlib.suppress(Exception):
+                    sess.agent.close()
             previous_active = self.active_session_id
             replacement_id = "sess-" + uuid.uuid4().hex[:12]
             replacement = Session(

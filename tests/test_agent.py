@@ -845,6 +845,52 @@ class TestZeroAgentConfigReload:
         )
         assert "执行" in code_run["function"]["description"]
 
+    def test_reload_rebuilds_registry_when_sandbox_mode_changes(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        config_path = tmp_path / "config.yaml"
+        workspace = tmp_path / "workspace"
+
+        def write(sandbox: str) -> None:
+            config_path.write_text(
+                f"""
+default_backend: primary
+workspace_dir: {workspace}
+memory_dir: {workspace}/memory
+extensions:
+  sandbox: {sandbox}
+llm_backends:
+  primary:
+    provider: openai
+    api_key: sk-primary
+    api_base: https://primary.invalid/v1
+    model: gpt-4o
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+        write("off")
+        config = AgentConfig.from_yaml(config_path)
+        monkeypatch.setattr(
+            "zero_agent.core.agent.LLMFactory.create_all_sessions",
+            lambda current: {
+                "primary": _ReloadClient(current.llm_backends["primary"]),
+            },
+        )
+        agent = ZeroAgent(config=config)
+        old_registry = agent.registry
+        baseline = _config_mtime[str(config_path)]
+
+        write("macos")
+        _bump_mtime(config_path, baseline)
+
+        assert agent.reload_config() is True
+        assert agent.config.sandbox_mode == "macos"
+        # code_run 的沙箱模式由 registry 构建时的 config 决定，必须重建才生效
+        assert agent.registry is not old_registry
+
     def test_apply_pending_runtime_config_is_noop_without_pending(
         self,
         tmp_path,

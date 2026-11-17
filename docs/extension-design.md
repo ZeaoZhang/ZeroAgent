@@ -192,6 +192,18 @@ LLM 会话层配合，留待后续）。
 
 运行时必须在 registry 重建后重新应用插件注册，否则表现为“改了配置，插件工具突然不见了”。这是实现阶段必须覆盖的边界，验收要有对应用例。
 
+`extensions` 字段的生效边界：
+
+| 字段 | 生效方式 |
+| --- | --- |
+| `sandbox` | 热重载时随 registry 重建立即生效 |
+| `enabled` / `home` | 需要重启进程 |
+
+生命周期与卸载：`ZeroAgent.close()` 调用 `ExtensionRuntime.release()`，
+撤销插件工具、门控与提示词块，并执行卸载回调（关闭 MCP 子进程）；可重复调用。
+CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有 `atexit` 兜底。
+不提供插件的运行时热加载/热卸载（改插件代码仍需重启）。
+
 ### 6.6 `ctx` 接口（对外唯一契约）
 
 | 方法 | 语义 | 注册归属 |
@@ -202,10 +214,10 @@ LLM 会话层配合，留待后续）。
 | `ctx.on_tool_call` | 门控型，可放行、改参、阻断 | 插件 |
 | `ctx.on_tool_result` | 变换型，可改结果 | 插件 |
 | `ctx.prompt_block(name, factory)` | 贡献系统提示词块 | 插件 |
-| `ctx.skill_paths(...)` | 追加 skill 搜索路径 | 插件 |
-| `ctx.ui.confirm(...)` | 请求人类确认（异步，走审批通道） | — |
+| `ctx.block(reason)` / `ctx.confirm(question, candidates=..., scope=...)` | 门控回调的返回值：拒绝 / 请求人类批准 | — |
 
 接口刻意保持小：**工具、提示词、请求、工具调用、工具结果，五类**。其余能力通过这五类组合实现。
+`ctx.confirm` 不是独立通道，而是 `on_tool_call` 门控的返回值；批准后由任务等待/恢复链路续跑。
 
 ### 6.7 三类扩展点语义
 
@@ -215,7 +227,7 @@ LLM 会话层配合，留待后续）。
 | --- | --- | --- | --- | --- |
 | 通知 | `agent_start`、`turn_start`、`turn_end`、`agent_end`、`llm_after` | 忽略 | 否，全部执行 | 记录后继续 |
 | 变换 | `llm_request`、`tool_result`、`prompt_block` | 返回新值 | 是，后一个收到前一个的结果 | 视为不干预，继续链 |
-| 门控 | `tool_call` | `allow` / `modify(args)` / `block(reason)` | 否，按优先级求值 | **fail-closed：异常即 block** |
+| 门控 | `tool_call` | `None`（放行，可原地改 `call.args`）/ `ctx.block(...)` / `ctx.confirm(...)` / `False` | 否，按顺序求值 | **fail-closed：异常或无法识别的返回值即 block** |
 
 门控与变换的区别是硬性的：
 
@@ -273,7 +285,7 @@ LLM 会话层配合，留待后续）。
 
 - agent 修改 skill / 插件代码 / `mcp.json`。
 - agent 执行被策略判为高危的工具调用（如越界写入、危险命令）。
-- 插件主动请求确认（`ctx.ui.confirm`）。
+- 插件在门控里返回 `ctx.confirm(...)` 主动请求确认。
 
 ### 8.2 机制
 
@@ -283,11 +295,12 @@ LLM 会话层配合，留待后续）。
    对「同一个文件反复改写」这类高频场景，可由插件给出 `scope`（批量授权键），
    批准后在同任务、同 scope、通行证有效期内不再重复询问（详见 8.4）。
 
-需要扩展的地方：
+落地位置（阶段 3 已实现）：
 
 - `core/types.py` 的 `waiting_kind` 增加 `"approval"` 取值。
-- `core/agent.py` 的恢复路径能识别批准/拒绝，并重放被暂停的操作。
-- 审批必须绑定具体变更，不能仅凭“模型收到了同意的文本”放行。
+- `core/agent.py` 的恢复路径识别批准/拒绝，并按指纹放行被暂停的那一次操作。
+- 审批绑定具体变更（指纹），不能仅凭“模型收到了同意的文本”放行；答复只认
+  整串命中的批准词（允许句末标点），其余一律按拒绝处理。
 
 ### 8.3 与“受信任插件”的区分
 
@@ -312,13 +325,17 @@ LLM 会话层配合，留待后续）。
   `block` 白烧。
 - **暂停与恢复**：门控要求审批时 `dispatch` 返回 `WAIT_FOR_USER`，
   `PendingTaskState.waiting_kind = "approval"`。用户答复被判定为批准
-  （「批准/同意/允许/approve/yes/ok」等）才发放通行证，其余一律按拒绝处理
-  ——安全优先，不做模糊匹配。指纹缺失（暂停状态失效）时按拒绝处理，
-  不会谎报「已批准」。
+  （「批准/同意/允许/approve/yes/ok」等，允许句末标点）才发放通行证，
+  其余一律按拒绝处理——安全优先，不做前缀或模糊匹配（"批准吧"也算拒绝）。
+  指纹缺失（暂停状态失效）时按拒绝处理，不会谎报「已批准」。
 - **内置策略**：`permission_gate` 对受保护路径的写入走 `confirm`（可批准），
   问句附带将写入内容的长度与 sha256 摘要，避免盲批；对明确危险的 shell
   （递归强制删除、格式化、关机等）仍直接 `block`。路径判定复用文件工具的
   解析口径（含 `memory_dir` 前缀重定向），避免判定与实际写入位置不一致。
+- **路径规范化**：`scope` 使用解析后的绝对路径（realpath + normcase），因此同一
+  文件经软链、相对路径两种写法命中同一个批量授权，不会重复弹审批。
+- **拒绝的清理范围**：用户拒绝时只清除「当前任务 + 未绑定任务」的通行证，
+  其他任务已发放的通行证不受影响。
 - **已知边界**：没有 `scope` 的门控仍然「一次批准只放行一次具体调用」，模型
   重试时改了内容会重新触发审批；`permission_gate` 有 `scope`，因此在 TTL 内
   同一任务对同一路径的改写不再询问——若需要逐次确认内容，应把 TTL 调小或
@@ -348,7 +365,7 @@ LLM 会话层配合，留待后续）。
 
 | 配置项 | 位置 | 说明 |
 | --- | --- | --- |
-| 扩展根目录 | `~/.zeroagent/` | 可用 `ZA_HOME` 覆盖，便于测试 |
+| 扩展根目录 | `~/.zeroagent/` | 由 `extensions.home` 配置（无环境变量覆盖）；测试用临时目录 |
 | skill | `~/.zeroagent/skills/` | 与 `~/.dsh/skills` 同构 |
 | MCP | `~/.zeroagent/mcp.json` | 单文件，`mcpServers` 键 |
 | 插件 | `~/.zeroagent/extensions/` | 单文件或目录 |
@@ -359,19 +376,31 @@ LLM 会话层配合，留待后续）。
 
 ```yaml
 extensions:
-  enabled: true            # false 时不加载插件、skill 与 MCP
+  enabled: true            # false 时不加载插件、skill 与 MCP（安全门仍生效）
   home: "~/.zeroagent"     # 扩展根目录，可指向临时目录便于测试
   protected_writes: []     # 额外的受保护路径；写入前需人类批准
+  sandbox: off             # code_run 沙箱：off | auto | macos | linux
 ```
+
+生效时机：`sandbox` 随 registry 重建即时生效（配置热重载会触发）；
+`enabled` 与 `home` 变更需要重启进程。
 
 **策略说明（与早期设计的差异）**：早期设计里的 `approval.default` / `approval.rules`
 三档路径策略（allow / ask / deny）**未实现**。当前形态是固定的两条内置规则：
 
 | 场景 | 行为 |
 | --- | --- |
-| 写入 `~/.zeroagent/{skills,extensions,mcp.json}` 或 `protected_writes` 中的路径 | `ask`：暂停并请求批准，批准只覆盖这一次调用 |
-| `code_run` 命中明确危险的 shell（递归强制删除、格式化、关机等） | `deny`：直接拒绝，不提供批准入口 |
+| 写入 `~/.zeroagent/{skills,extensions,mcp.json}`、扩展根目录或 `protected_writes` 中的路径 | `ask`：暂停并请求批准；`permission_gate` 带路径级 `scope`，同任务同路径在 TTL 内不重复询问 |
+| 写入 workspace 内（即使 workspace 位于扩展根目录之下） | `allow`：不干预（否则 workspace 落在 `~/.zeroagent` 下时每次写文件都要审批） |
+| `code_run` 命中格式化/写块设备/关机/fork 炸弹等固定危险模式 | `deny`：直接拒绝，不提供批准入口 |
+| `code_run` 的递归强制 `rm`、`find -delete`：目标全部在 workspace 内 | `allow`：常规清理 |
+| 同上，但目标越出 workspace、含 shell 展开、或范围无法静态确认 | `deny` |
 | 其余写入与命令 | `allow`：不干预 |
+
+`rm` 判定会先剥掉 `sudo`/`env`/`xargs`/`timeout` 等 wrapper 与 `VAR=value` 前缀，
+并沿 `cd` 解析相对路径，因此 `sudo rm -rf /`、`cd /tmp && rm -rf build` 都会被拒绝。
+已知边界不变：`code_run` 内用其它程序（例如 `python -c shutil.rmtree`）间接删除
+仍不受策略层约束，需要沙箱层（第九节）。
 
 `memory/sops/` 不在此扩展的管辖范围内，仍由记忆模块的 L0 约束管理。
 如果后续需要更细的三档策略，再引入配置化的规则表。
@@ -460,7 +489,7 @@ extensions:
 | 提示词膨胀 | 插件都能贡献提示词块 | 每块有名字与长度上限，超限截断并告警 |
 | 门控误伤 | 门控过严会阻断正常任务 | 门控结果可观测（日志 + 事件），先宽后紧 |
 | 审批疲劳 | 过多确认会让用户点“同意”成习惯 | 按路径策略批量授权（`scope` + TTL + 任务绑定），只对高风险单次确认 |
-| MCP 工具过多 | tools schema 爆炸 | 提示词只列 server 摘要，工具按需展开 |
+| MCP 工具过多 | `tools/list` 的结果全部注册进 registry，tools schema 会随 server 工具数线性膨胀（**当前未缓解**） | 仅配置实际需要的 server；后续可做按需展开 |
 
 未决问题：
 

@@ -377,3 +377,30 @@ class TestRelease:
         assert runtime.loaded_names == []
         assert runtime.run_tool_call("code_run", {}) is None
         assert runtime.collect_prompt_blocks() == []
+
+
+class TestSkillsIndexCache:
+    """索引渲染必须反映 SKILL.md 的改动，而不是命中过期缓存."""
+
+    def test_rewritten_skill_updates_index_and_body(self, tmp_path: Path) -> None:
+        import os
+
+        root = tmp_path / "skills"
+        skill_md = _write(
+            root / "alpha" / "SKILL.md",
+            "---\nname: alpha\ndescription: first\n---\nbody-one\n",
+        )
+        assert "first" in skills_index._render_index(root)
+
+        _write(
+            skill_md,
+            "---\nname: alpha\ndescription: second\n---\nbody-two\n",
+        )
+        # 保证文件签名只在预期维度上变化（避免同纳秒写入导致的偶发命中）
+        stat = skill_md.stat()
+        os.utime(skill_md, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
+        index = skills_index._render_index(root)
+        assert "second" in index
+        assert "first" not in index
+        assert skills_index._read_meta_cached("alpha", skill_md)[2].strip() == "body-two"

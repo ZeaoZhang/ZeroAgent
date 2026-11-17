@@ -383,7 +383,7 @@ class TestHardening:
 
     @pytest.mark.parametrize(
         "answer",
-        ["不同意", "批准吧", "OK！", "no", "算了"],
+        ["不同意", "批准吧", "不行！", "no", "算了"],
     )
     def test_non_exact_answers_are_rejected(
         self, tmp_path: Path, answer: str
@@ -414,6 +414,87 @@ class TestHardening:
 
         assert "没有批准" in text
         assert runtime.evaluate_tool_call("danger", {"x": 1}).needs_approval
+
+    @pytest.mark.parametrize(
+        "answer",
+        ["批准。", "批准！", " OK！ ", "确认。", "yes!"],
+    )
+    def test_trailing_punctuation_still_approves(
+        self, tmp_path: Path, answer: str
+    ) -> None:
+        from zero_agent.core.agent import ZeroAgent
+
+        runtime = _ask_plugin(tmp_path)
+        pending = PendingTaskState(
+            contract=TaskContract(
+                task_id="t1", user_request="do", mode=TaskMode.OPEN
+            ),
+            ledger=EvidenceLedger(),
+            plan_verify_status="missing",
+            waiting_kind="approval",
+            waiting_data={
+                "approval": {
+                    "fingerprint": approval_fingerprint("danger", {"x": 1}),
+                    "tool_name": "danger",
+                }
+            },
+        )
+
+        class Stub:
+            extensions = runtime
+            _is_approval_answer = ZeroAgent._is_approval_answer
+
+        text = ZeroAgent._approval_continuation(Stub(), pending, answer)
+
+        assert "已批准" in text
+        assert runtime.evaluate_tool_call(
+            "danger", {"x": 1}, task_id="t1",
+        ).is_allow
+
+    def test_rejection_only_clears_current_task(self, tmp_path: Path) -> None:
+        from zero_agent.core.agent import ZeroAgent
+
+        runtime = _ask_plugin(tmp_path)
+        runtime.grant_approval(
+            approval_fingerprint("danger", {"x": 2}),
+            task_id="t2",
+            scope="danger:/tmp/other",
+        )
+        pending = PendingTaskState(
+            contract=TaskContract(
+                task_id="t1", user_request="do", mode=TaskMode.OPEN
+            ),
+            ledger=EvidenceLedger(),
+            plan_verify_status="missing",
+            waiting_kind="approval",
+            waiting_data={
+                "approval": {
+                    "fingerprint": approval_fingerprint("danger", {"x": 1}),
+                    "scope": "danger:/tmp/x",
+                    "tool_name": "danger",
+                }
+            },
+        )
+
+        class Stub:
+            extensions = runtime
+            _is_approval_answer = ZeroAgent._is_approval_answer
+
+        text = ZeroAgent._approval_continuation(Stub(), pending, "拒绝")
+
+        assert "没有批准" in text
+        # 当前任务的批量授权被清掉
+        assert not runtime.consume_approval(
+            approval_fingerprint("danger", {"x": 3}),
+            task_id="t1",
+            scope="danger:/tmp/x",
+        )
+        # 其他任务的通行证不受影响
+        assert runtime.consume_approval(
+            approval_fingerprint("danger", {"x": 2}),
+            task_id="t2",
+            scope="danger:/tmp/other",
+        )
 
     def test_approval_prompt_shows_content_digest(self, tmp_path: Path) -> None:
         runtime = _runtime(tmp_path)

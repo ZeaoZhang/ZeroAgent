@@ -97,3 +97,19 @@ def _make_add_handler():
         yield f"Adding: {a} + {b} = {result}\n"
         return {"result": result}
     return _handler
+
+
+@pytest.fixture(autouse=True)
+def isolated_extension_home(tmp_path, monkeypatch):
+    """测试不触碰真实 ~/.zeroagent.
+
+    扩展默认启用且默认 home 是 ``~/.zeroagent``；若开发者本机存在插件或损坏的
+    ``mcp.json``，测试结果会随环境漂移。这里把默认 home 固定到临时目录，
+    显式传 ``extensions_home`` 的测试不受影响。
+    """
+    home = tmp_path / "extension-home"
+    monkeypatch.setattr(
+        "zero_agent.extensions.runtime._default_home",
+        lambda: home,
+    )
+    return home

@@ -189,25 +189,29 @@ def main(argv: Optional[list[str]] = None) -> None:
     # 记录配置路径以支持热重载
     agent.set_config_path(getattr(config, "_source_path", None))
 
-    if args.reflect:
-        # Reflect 反射模式
-        if args.llm_no is not None:
-            agent.next_llm(args.llm_no)
-        _run_reflect(agent, args.reflect, _parse_reflect_args(args.reflect_arg))
-    elif args.func:
-        if args.llm_no is not None:
-            agent.next_llm(args.llm_no)
-        _run_func_mode(agent, args.func, args.history)
-    elif args.task:
-        if args.llm_no is not None:
-            agent.next_llm(args.llm_no)
-        _run_task_mode(agent, args.task, args.history)
-    elif args.input:
-        # 一次性任务模式
-        _run_oneshot(agent, args.input)
-    else:
-        # 交互 REPL 模式
-        _run_repl(agent)
+    try:
+        if args.reflect:
+            # Reflect 反射模式
+            if args.llm_no is not None:
+                agent.next_llm(args.llm_no)
+            _run_reflect(agent, args.reflect, _parse_reflect_args(args.reflect_arg))
+        elif args.func:
+            if args.llm_no is not None:
+                agent.next_llm(args.llm_no)
+            _run_func_mode(agent, args.func, args.history)
+        elif args.task:
+            if args.llm_no is not None:
+                agent.next_llm(args.llm_no)
+            _run_task_mode(agent, args.task, args.history)
+        elif args.input:
+            # 一次性任务模式
+            _run_oneshot(agent, args.input)
+        else:
+            # 交互 REPL 模式
+            _run_repl(agent)
+    finally:
+        # 退出前释放扩展（MCP 子进程）；幂等，atexit 还会兜底一次
+        agent.close()
 
 
 def _build_parser() -> argparse.ArgumentParser:

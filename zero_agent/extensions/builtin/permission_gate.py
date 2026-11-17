@@ -82,11 +82,183 @@ def _under(path: str, prefixes: Tuple[str, ...], cwd: Optional[str]) -> Optional
     return None
 
 
-def _shell_verdict(code: str) -> Optional[str]:
+def _inside(path: str, root: str) -> bool:
+    """判断路径是否位于根目录之下（已规范化的绝对路径）.
+
+    Args:
+        path: 已规范化的目标路径.
+        root: 已规范化的根路径.
+
+    Returns:
+        True 表示位于根下.
+    """
+    if not root:
+        return False
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:
+        # 不同盘符等无法比较的情况，保守视为不在根下
+        return False
+
+
+# 可能包在真实命令外的前缀；剥掉后才能看清真正要执行的命令
+_WRAPPERS = frozenset({
+    "sudo", "doas", "env", "command", "exec", "nohup", "setsid",
+    "nice", "ionice", "time", "stdbuf", "timeout", "xargs",
+})
+
+_ASSIGNMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _unwrap_tokens(tokens: List[str]) -> List[str]:
+    """剥掉前导的环境变量赋值与 wrapper（sudo/env/xargs/timeout 等）.
+
+    只剥名字，不解析 wrapper 选项：调用方随后按「第一个看到的真实命令」扫描，
+    因此 ``sudo -u root rm -rf x`` 这种带选项的形态同样能被看清。
+
+    Args:
+        tokens: 单个 shell 段的 token 列表.
+
+    Returns:
+        从第一个非 wrapper 位置开始的 token 列表.
+    """
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if _ASSIGNMENT_PATTERN.match(token):
+            index += 1
+            continue
+        if os.path.basename(token) in _WRAPPERS:
+            index += 1
+            continue
+        break
+    return tokens[index:]
+
+
+def _find_command(tokens: List[str], name: str) -> Optional[int]:
+    """在段内查找某个命令名的位置.
+
+    Args:
+        tokens: 段内 token.
+        name: 命令名（比较 basename，因此 ``/bin/rm`` 也命中）.
+
+    Returns:
+        下标；未找到返回 None.
+    """
+    for index, token in enumerate(tokens):
+        if os.path.basename(token) == name:
+            return index
+    return None
+
+
+def _split_rm_tokens(tokens: List[str]) -> Tuple[bool, bool, List[str]]:
+    """解析 rm 的 flag 与目标.
+
+    Args:
+        tokens: ``rm`` 之后的 token.
+
+    Returns:
+        ``(是否递归, 是否强制, 目标列表)``.
+    """
+    recursive = False
+    force = False
+    targets: List[str] = []
+    for token in tokens:
+        if token == "--":
+            continue
+        if token.startswith("--"):
+            if token == "--recursive":
+                recursive = True
+            elif token == "--force":
+                force = True
+        elif token.startswith("-") and len(token) > 1:
+            flags = token[1:]
+            if "r" in flags or "R" in flags:
+                recursive = True
+            if "f" in flags or "F" in flags:
+                force = True
+        else:
+            targets.append(token)
+    return recursive, force, targets
+
+
+def _unsafe_targets_reason(
+    targets: List[str],
+    base: Optional[str],
+    workspace: Optional[str],
+    action: str,
+) -> Optional[str]:
+    """判断删除目标是否越出 workspace.
+
+    目标无法静态确认（含 shell 展开、没有显式目标）时同样拒绝：宁可让用户手动
+    执行，也不放行一次范围不明的删除。
+
+    Args:
+        targets: 删除目标（原始 shell 文本）.
+        base: 相对路径基准（workspace 或此前 cd 到的目录）.
+        workspace: workspace 绝对路径；删除目标必须落在它之内.
+        action: 操作描述，用于拒绝原因.
+
+    Returns:
+        拒绝原因；安全时返回 None.
+    """
+    if not targets:
+        return f"已拦截：{action}，但目标无法静态确认（可能在 workspace 之外）"
+    root = _normalize(workspace, None) if workspace else ""
+    for target in targets:
+        if any(char in target for char in "$`"):
+            return (
+                f"已拦截：{action} 的目标含 shell 展开 {target!r}，"
+                "无法确认删除范围"
+            )
+        if target in {"*", "/*", "~", "/", "~/*"}:
+            return f"已拦截：{action} {target} 会移除 workspace 之外的内容"
+        resolved = _normalize(target, base)
+        if not _inside(resolved, root):
+            return (
+                f"已拦截：{action} {target}（解析为 {resolved}）不在 workspace 内"
+            )
+    return None
+
+
+def _find_delete_reason(
+    tokens: List[str],
+    base: Optional[str],
+    workspace: Optional[str],
+) -> Optional[str]:
+    """判断 ``find ... -delete`` 的起始路径是否越出 workspace.
+
+    Args:
+        tokens: ``find`` 之后的 token.
+        base: 相对路径基准.
+        workspace: workspace 绝对路径.
+
+    Returns:
+        拒绝原因；安全时返回 None.
+    """
+    targets: List[str] = []
+    for token in tokens:
+        if token.startswith("-") or token.startswith(("(", "!", ")")):
+            break
+        targets.append(token)
+    if not targets:
+        targets = ["."]
+    return _unsafe_targets_reason(targets, base, workspace, "find -delete 删除")
+
+
+def _shell_verdict(code: str, workspace: Optional[str]) -> Optional[str]:
     """检查 shell 片段，命中危险模式时返回原因.
+
+    判定分两层：
+
+    - 固定危险模式（格式化、写块设备、关机等）无条件拒绝.
+    - 递归强制 ``rm`` 与 ``find -delete`` 按作用域判定：目标全部在 workspace 内
+      放行（常规清理），任何越界或范围不明拒绝。相对路径按沿段的 ``cd`` 解析，
+      避免 ``cd /tmp && rm -rf build`` 这类借 cd 越界的写法.
 
     Args:
         code: 待执行的 shell 代码.
+        workspace: workspace 绝对路径；None 表示无法判定作用域，删除类一律拒绝.
 
     Returns:
         危险原因；安全时返回 None.
@@ -94,48 +266,50 @@ def _shell_verdict(code: str) -> Optional[str]:
     for pattern, reason in _DANGEROUS_SHELL:
         if re.search(pattern, code):
             return reason
-    if _is_force_recursive_rm(code):
-        return "递归强制删除"
+
+    base = workspace
+    for segment in re.split(r"[;&|]+", code.replace("\n", ";")):
+        tokens = [
+            token.strip("()")
+            for token in segment.split()
+            if token.strip("()")
+        ]
+        if not tokens:
+            continue
+        unwrapped = _unwrap_tokens(tokens)
+
+        cd_index = _find_command(unwrapped, "cd")
+        if cd_index is not None:
+            directory = [
+                token for token in unwrapped[cd_index + 1:]
+                if not token.startswith("-")
+            ]
+            if len(directory) == 1:
+                base = _normalize(directory[0], base)
+            continue
+
+        rm_index = _find_command(unwrapped, "rm")
+        if rm_index is not None:
+            recursive, force, targets = _split_rm_tokens(unwrapped[rm_index + 1:])
+            if recursive and force:
+                reason = _unsafe_targets_reason(
+                    targets, base, workspace, "递归强制删除",
+                )
+                if reason is not None:
+                    return reason
+
+        find_index = _find_command(unwrapped, "find")
+        if find_index is not None:
+            find_tokens = unwrapped[find_index + 1:]
+            if "-delete" in find_tokens:
+                reason = _find_delete_reason(find_tokens, base, workspace)
+                if reason is not None:
+                    return reason
     return None
 
 
-def _is_force_recursive_rm(code: str) -> bool:
-    """判断命令里是否存在「递归 + 强制」的 rm（flag 顺序无关）.
-
-    覆盖 ``rm -rf``、``rm -r -f``、``rm -R -F``、``rm --recursive --force``
-    等形式。
-
-    Args:
-        code: shell 代码.
-
-    Returns:
-        True 表示命中.
-    """
-    for segment in re.split(r"[;&|]+", code):
-        tokens = segment.replace("\n", " ").split()
-        if not tokens or os.path.basename(tokens[0]) != "rm":
-            continue
-        recursive = False
-        force = False
-        for token in tokens[1:]:
-            if token.startswith("--"):
-                if token == "--recursive":
-                    recursive = True
-                elif token == "--force":
-                    force = True
-            elif token.startswith("-") and len(token) > 1:
-                flags = token[1:]
-                if "r" in flags or "R" in flags:
-                    recursive = True
-                if "f" in flags or "F" in flags:
-                    force = True
-        if recursive and force:
-            return True
-    return False
-
-
-def _protected_prefixes(runtime: Any) -> Tuple[str, ...]:
-    """结合配置返回受保护的写入前缀.
+def _specific_prefixes(runtime: Any) -> Tuple[str, ...]:
+    """返回显式受保护的写入前缀（不含 broad 的扩展根目录）.
 
     Args:
         runtime: ExtensionRuntime.
@@ -148,10 +322,38 @@ def _protected_prefixes(runtime: Any) -> Tuple[str, ...]:
     extra = getattr(config, "extensions_protected_writes", None) if config else None
     if isinstance(extra, (list, tuple)):
         prefixes.extend(str(item) for item in extra)
-    home = getattr(runtime, "home", None)
-    if home is not None:
-        prefixes.append(str(home))
     return tuple(dict.fromkeys(prefixes))
+
+
+def _broad_prefix_hit(
+    path: str,
+    runtime: Any,
+    workspace: Optional[str],
+) -> Optional[str]:
+    """检查是否落在扩展根目录下（broad 保护）.
+
+    workspace 落在扩展根目录下时（例如 ``workspace_dir`` 配到
+    ``~/.zeroagent/workspace``），workspace 内的写入不应触发审批——否则每个
+    文件写入都要问一次。显式保护前缀（skills/extensions/mcp.json 及用户
+    ``protected_writes``）由 :func:`_specific_prefixes` 先行判定，不受此豁免影响。
+
+    Args:
+        path: 待检查路径.
+        runtime: ExtensionRuntime.
+        workspace: workspace 绝对路径或 None.
+
+    Returns:
+        命中的前缀；未命中或属于 workspace 豁免时返回 None.
+    """
+    home = getattr(runtime, "home", None)
+    if home is None:
+        return None
+    prefix = _under(path, (str(home),), workspace)
+    if prefix is None:
+        return None
+    if workspace and _under(path, (workspace,), workspace) is not None:
+        return None
+    return prefix
 
 
 def _collect_code_text(args: Dict[str, Any], runtime: Any) -> str:
@@ -271,10 +473,10 @@ def setup(ctx: Any) -> None:
 
         if call.tool_name == "code_run":
             code = _collect_code_text(args, ctx.runtime)
-            reason = _shell_verdict(code)
+            reason = _shell_verdict(code, workspace)
             if reason is not None:
                 return ctx.block(
-                    f"已拦截：{reason}。这是不可逆的高危操作，如需执行请由用户手动完成。"
+                    f"{reason}。这是不可逆的高危操作，如需执行请由用户手动完成。"
                 )
 
         if call.tool_name in _WRITE_TOOLS:
@@ -282,16 +484,21 @@ def setup(ctx: Any) -> None:
             if not raw_path:
                 return ctx.block("已拦截：写入目标为空，无法判定安全性。")
             path = _resolve_like_file_tool(raw_path, ctx.runtime)
-            prefix = _under(path, _protected_prefixes(ctx.runtime), workspace)
+            prefix = _under(path, _specific_prefixes(ctx.runtime), workspace)
+            if prefix is None:
+                prefix = _broad_prefix_hit(path, ctx.runtime, workspace)
             if prefix is not None:
+                # scope 用规范化后的绝对路径：同一文件的软链/相对写法不会
+                # 被当成两个不同目标而重复审批
+                resolved = _normalize(path, workspace)
                 return ctx.confirm(
-                    f"将修改 {prefix} 下的内容：{path}\n"
+                    f"将修改 {prefix} 下的内容：{resolved}\n"
                     f"内容：{_content_summary(args)}\n"
                     "skills 会进入系统提示词，extensions 会在下次启动执行，"
                     "mcp.json 会拉起外部命令。是否允许这一次修改？",
                     # 批量授权键：同任务内对同一路径的后续改写不再重复询问，
                     # 避免模型把内容改一个换行就再弹一次审批
-                    scope=f"{call.tool_name}:{path}",
+                    scope=f"{call.tool_name}:{resolved}",
                 )
 
         return None

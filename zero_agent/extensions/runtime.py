@@ -363,7 +363,7 @@ class ExtensionRuntime:
             definition: 工具定义.
         """
         existing_owner = self.registry.owner_of(definition.name)
-        if definition.name in self.registry._tools and existing_owner != owner:
+        if self.registry.get(definition.name) is not None and existing_owner != owner:
             _logger.warning(
                 "扩展 %s 覆盖工具 %s（原归属: %s）",
                 owner,
@@ -613,10 +613,28 @@ class ExtensionRuntime:
             return False
         return True
 
-    def clear_approvals(self) -> None:
-        """清除全部未使用的通行证与批量授权（拒绝或任务结束时调用）."""
-        self._approvals.clear()
-        self._scope_grants.clear()
+    def clear_approvals(self, task_id: Optional[str] = None) -> None:
+        """清除未使用的通行证与批量授权（拒绝或任务结束时调用）.
+
+        Args:
+            task_id: 给定时只保留「登记在其他任务名下」的通行证与批量授权；
+                当前任务与未绑定任务的通行证都会被清除（拒绝必须失效到本次
+                被拒绝的操作上）。None 表示清空全部.
+        """
+        if task_id is None:
+            self._approvals.clear()
+            self._scope_grants.clear()
+            return
+        self._approvals = {
+            key: value
+            for key, value in self._approvals.items()
+            if value[1] and value[1] != task_id
+        }
+        self._scope_grants = {
+            key: expiry
+            for key, expiry in self._scope_grants.items()
+            if key[0] and key[0] != task_id
+        }
 
     def run_tool_result(
         self,

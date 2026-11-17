@@ -306,18 +306,11 @@ class BaseHandler:
                     action=StepAction.WAIT_FOR_USER,
                     reason="extension_approval",
                 )
-                self._trigger_hook("tool_after", {
-                    "tool_name": tool_name,
-                    "args": args,
-                    "outcome": ret,
-                    "result": ret.data,
-                })
+                self._emit_tool_after(tool_name, args, ret)
                 return ret
 
             if verdict.is_block:
-                import logging
-
-                logging.getLogger("zero_agent").warning(
+                _logger.warning(
                     "工具调用被安全策略拦截: %s (%s)", tool_name, verdict.reason
                 )
                 yield self._tl(
@@ -339,12 +332,7 @@ class BaseHandler:
                 )
                 # 记录为 error 证据：可观测，但不会满足完成判定要求
                 self._record_evidence(tool_name, args, ret)
-                self._trigger_hook("tool_after", {
-                    "tool_name": tool_name,
-                    "args": args,
-                    "outcome": ret,
-                    "result": ret.data,
-                })
+                self._emit_tool_after(tool_name, args, ret)
                 return ret
 
         # 门控通过后才把 OPEN 推进到 EXECUTING
@@ -388,13 +376,19 @@ class BaseHandler:
             next_prompt=self._unknown_tool_retry_prompt(tool_name),
             action=StepAction.CONTINUE,
         )
+        self._emit_tool_after(tool_name, args, ret)
+        return ret
+
+    def _emit_tool_after(
+        self, tool_name: str, args: Dict[str, Any], ret: Any,
+    ) -> None:
+        """触发 tool_after 钩子（统一 result 取值口径）."""
         self._trigger_hook("tool_after", {
             "tool_name": tool_name,
             "args": args,
             "outcome": ret,
-            "result": ret.data,
+            "result": ret.data if isinstance(ret, StepOutcome) else ret,
         })
-        return ret
 
     def _finalize_tool_dispatch(
         self, tool_name: str, args: Dict[str, Any], ret: Any,
@@ -412,12 +406,7 @@ class BaseHandler:
         self._record_evidence(tool_name, args, ret)
         if isinstance(ret, StepOutcome):
             self._refresh_next_prompt(tool_name, ret, args)
-        self._trigger_hook("tool_after", {
-            "tool_name": tool_name,
-            "args": args,
-            "outcome": ret,
-            "result": ret.data if isinstance(ret, StepOutcome) else ret,
-        })
+        self._emit_tool_after(tool_name, args, ret)
         return ret
 
     def _mark_executing(self, tool_name: str) -> None:

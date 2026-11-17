@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -263,6 +264,141 @@ class TestPermissionGateHardening:
         assert runtime.run_tool_call("file_write", {"path": ""}) is not None
 
 
+class TestShellScope:
+    """递归删除按 workspace 作用域判定：内放行、越界或范围不明拒绝."""
+
+    def _runtime(self, tmp_path: Path) -> ExtensionRuntime:
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        home = tmp_path / "home"
+        home.mkdir()
+        config = SimpleNamespace(
+            memory_dir=str(tmp_path / "mem"),
+            workspace_dir=str(workspace),
+            extensions_protected_writes=[],
+        )
+        runtime = ExtensionRuntime(registry=_registry(), home=home, config=config)
+        permission_gate.setup(ExtensionContext("permission_gate", runtime))
+        return runtime
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "rm -rf build/",
+            "rm -rf node_modules",
+            "rm -r -f build",
+            "rm -rf ./a ./b",
+            "cd build && rm -rf node_modules",
+            "find . -name '*.pyc' -delete",
+            "rm -f a.txt",
+        ],
+    )
+    def test_workspace_scoped_removal_is_allowed(
+        self, tmp_path: Path, code: str
+    ) -> None:
+        runtime = self._runtime(tmp_path)
+
+        verdict = runtime.evaluate_tool_call("code_run", {"script": code})
+
+        assert verdict.is_allow, (code, verdict.reason)
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "rm -rf /",
+            "sudo rm -rf /",
+            "sudo -u root rm -rf /",
+            "env FOO=1 rm -rf ../x",
+            "rm -rf build /etc",
+            'rm -rf "$DIR"',
+            "xargs rm -rf",
+            "cd /tmp && rm -rf build",
+            "find / -delete",
+            "mkfs.ext4 /dev/sda",
+        ],
+    )
+    def test_out_of_workspace_removal_is_blocked(
+        self, tmp_path: Path, code: str
+    ) -> None:
+        runtime = self._runtime(tmp_path)
+
+        verdict = runtime.evaluate_tool_call("code_run", {"script": code})
+
+        assert verdict.is_block, (code, verdict)
+
+
+class TestProtectedPrefixScope:
+    """workspace 落在扩展根目录下时，workspace 内写入不应触发审批."""
+
+    def _setup(
+        self,
+        tmp_path: Path,
+        extra: tuple[str, ...] = (),
+    ) -> tuple[ExtensionRuntime, Path, Path]:
+        home = tmp_path / "home"
+        home.mkdir()
+        workspace = home / "workspace"
+        workspace.mkdir()
+        config = SimpleNamespace(
+            memory_dir=str(tmp_path / "mem"),
+            workspace_dir=str(workspace),
+            extensions_protected_writes=list(extra),
+        )
+        runtime = ExtensionRuntime(registry=_registry(), home=home, config=config)
+        permission_gate.setup(ExtensionContext("permission_gate", runtime))
+        return runtime, home, workspace
+
+    def test_workspace_inside_home_is_not_protected(self, tmp_path: Path) -> None:
+        runtime, home, workspace = self._setup(tmp_path)
+
+        inside = runtime.evaluate_tool_call(
+            "file_write", {"path": str(workspace / "a.txt"), "content": "x"},
+        )
+        assert inside.is_allow
+
+        specific = runtime.evaluate_tool_call(
+            "file_write",
+            {"path": str(home / "skills" / "x" / "SKILL.md"), "content": "x"},
+        )
+        assert specific.needs_approval
+
+        other = runtime.evaluate_tool_call(
+            "file_write", {"path": str(home / "notes.txt"), "content": "x"},
+        )
+        assert other.needs_approval
+
+    def test_explicit_protected_path_inside_workspace_still_asks(
+        self, tmp_path: Path
+    ) -> None:
+        protected = tmp_path / "home" / "workspace" / "protected"
+        runtime, _home, _workspace = self._setup(tmp_path, extra=(str(protected),))
+
+        verdict = runtime.evaluate_tool_call(
+            "file_write", {"path": str(protected / "c.txt"), "content": "x"},
+        )
+
+        assert verdict.needs_approval
+
+    def test_scope_uses_normalized_path(self, tmp_path: Path) -> None:
+        runtime, home, workspace = self._setup(tmp_path)
+        link = workspace / "skills-link"
+        try:
+            os.symlink(home / "skills", link)
+        except OSError:
+            pytest.skip("当前环境不支持符号链接")
+
+        via_link = runtime.evaluate_tool_call(
+            "file_write", {"path": str(link / "demo" / "SKILL.md"), "content": "x"},
+        )
+        direct = runtime.evaluate_tool_call(
+            "file_write",
+            {"path": str(home / "skills" / "demo" / "SKILL.md"), "content": "x"},
+        )
+
+        assert via_link.needs_approval and direct.needs_approval
+        assert via_link.scope == direct.scope
+
+
 class TestMcpLifecycle:
     def test_handshake_failure_does_not_leak_process(self, tmp_path: Path) -> None:
         silent = tmp_path / "silent.py"
@@ -355,6 +491,51 @@ class TestEnabledSemantics:
         agent = self._agent(tmp_path, enabled=True)
 
         assert "hello_ext" in [tool.name for tool in agent.registry.list_all()]
+
+
+class TestCustomHandlerRegistry:
+    """自定义 handler 自带 registry 时，扩展必须注册进最终生效的那个 registry."""
+
+    def test_extension_tools_follow_handler_registry(self, tmp_path: Path) -> None:
+        from zero_agent.core.agent import ZeroAgent
+        from zero_agent.core.config import AgentConfig, LLMBackendConfig
+        from zero_agent.core.handler import BaseHandler
+
+        home = tmp_path / "home"
+        (home / "extensions").mkdir(parents=True)
+        (home / "extensions" / "hello.py").write_text(
+            "def setup(ctx):\n"
+            "    @ctx.tool(name='hello_ext', description='d',"
+            " parameters={'type': 'object', 'properties': {}})\n"
+            "    def hello(args):\n"
+            "        return 'hi'\n",
+            encoding="utf-8",
+        )
+        config = AgentConfig(
+            llm_backends={
+                "d": LLMBackendConfig(
+                    name="d",
+                    provider="openai",
+                    api_key="k",
+                    api_base="https://api.openai.com/v1",
+                    model="gpt-4o",
+                )
+            },
+            default_backend="d",
+            workspace_dir=str(tmp_path / "ws"),
+            memory_dir=str(tmp_path / "mem"),
+            sessions_dir=str(tmp_path / "sessions"),
+            extensions_home=str(home),
+        )
+        own_registry = ToolRegistry()
+        own_registry.register(_tool("only_tool"))
+        handler = BaseHandler(registry=own_registry, cwd=str(tmp_path / "ws"))
+
+        agent = ZeroAgent(config=config, handler=handler)
+
+        assert agent.registry is own_registry
+        assert own_registry.get("hello_ext") is not None
+        assert own_registry.get("skill_load") is not None
 
 
 class TestNotifyDispatch:
@@ -548,3 +729,59 @@ class TestRegistryDeepOverride:
 
         registry.release_owner("C")
         assert registry.get("t").description == "builtin"
+
+
+class TestAgentClose:
+    """ZeroAgent.close() 必须真正撤销扩展注册，且可重复调用."""
+
+    def _agent(self, tmp_path: Path):
+        from zero_agent.core.agent import ZeroAgent
+        from zero_agent.core.config import AgentConfig, LLMBackendConfig
+
+        home = tmp_path / "home"
+        (home / "extensions").mkdir(parents=True)
+        (home / "extensions" / "hello.py").write_text(
+            "def setup(ctx):\n"
+            "    @ctx.tool(name='hello_ext', description='d',"
+            " parameters={'type': 'object', 'properties': {}})\n"
+            "    def hello(args):\n"
+            "        return 'hi'\n",
+            encoding="utf-8",
+        )
+        config = AgentConfig(
+            llm_backends={
+                "d": LLMBackendConfig(
+                    name="d",
+                    provider="openai",
+                    api_key="k",
+                    api_base="https://api.openai.com/v1",
+                    model="gpt-4o",
+                )
+            },
+            default_backend="d",
+            workspace_dir=str(tmp_path / "ws"),
+            memory_dir=str(tmp_path / "mem"),
+            sessions_dir=str(tmp_path / "sessions"),
+            extensions_home=str(home),
+        )
+        return ZeroAgent(config)
+
+    def test_close_releases_registrations_and_is_idempotent(
+        self, tmp_path: Path
+    ) -> None:
+        agent = self._agent(tmp_path)
+        runtime = agent.extensions
+        assert runtime is not None
+        assert agent.registry.get("hello_ext") is not None
+        assert agent.registry.get("skill_load") is not None
+
+        agent.close()
+
+        assert agent.extensions is None
+        assert agent.registry.get("hello_ext") is None
+        assert agent.registry.get("skill_load") is None
+        assert runtime.loaded_names == []
+        assert runtime._tool_call == []
+
+        agent.close()
+        assert agent.extensions is None
