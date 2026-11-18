@@ -11,7 +11,6 @@ core/agent.py           ←── ZeroAgent: 组装所有组件
         ├── core/config.py     ←── AgentConfig: YAML/ENV/程序化
         ├── core/loop.py       ←── AgentLoop: generator-based 事件循环
         ├── core/handler.py    ←── BaseHandler: 工具执行 + 计划模式 + 轮次管理
-        ├── core/hooks.py      ←── HookSystem: 8 事件钩子 + 插件发现
         ├── core/types.py      ←── StepOutcome, TurnResult
         ├── core/exceptions.py ←── ZeroAgentError 层次
         │
@@ -97,7 +96,7 @@ LLM 返回 tool_calls → ToolRegistry.dispatch()
 
 | 类别 | 事件 | 失败时 |
 | --- | --- | --- |
-| 通知 | `agent_start / turn_start / turn_end / agent_end` | 记录后继续 |
+| 通知 | `agent_start / turn_start / llm_before / llm_after / tool_before / tool_after / turn_end / agent_end` | 记录后继续 |
 | 变换 | `llm_request / tool_result / prompt_block` | 退回原值 |
 | 门控 | `tool_call` | **fail-closed：判定失败即拒绝** |
 

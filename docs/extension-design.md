@@ -1,8 +1,9 @@
 # 扩展体系设计（Extension Design）
 
-> 状态：**阶段 0–4 已实现（阶段 4 为可选的 best-effort 沙箱）**。
+> 状态：**阶段 0–5 已实现（阶段 4 为可选的 best-effort 沙箱）**。
 > 实现代码位于 `zero_agent/extensions/`，测试见 `tests/test_extension_runtime.py`
-> 与 `tests/test_mcp_client.py`。
+> 与 `tests/test_mcp_client.py`。`core/hooks.py` 已删除，生命周期事件统一走
+> `ExtensionRuntime.notify()`。
 > 参考：pi（earendil-works/pi）的轻量扩展入口、DeepSeek Harness 的注册归属与生命周期。
 > 原则：本方案只描述“要建成什么样”，落地时以本文的验收项为准，不以估算代码量作为承诺。
 
@@ -29,22 +30,21 @@
 
 | 组件 | 现状 | 影响 |
 | --- | --- | --- |
-| `core/hooks.py` | 8 个事件；`trigger()` 丢弃返回值并在异常处 `pass` | 只能“通知”，无法可靠阻断 |
-| `core/handler.py` `_trigger_hook` | 外层再包一次 `try/except` | 插件异常不会中断工具执行 |
-| `core/handler.py` `dispatch` | `tool_before` 在调用前触发；`tool_after` 有两个触发点（主路径在 `_finalize_tool_dispatch`，未知工具分支在 `dispatch` 内直接触发） | 有介入位置，但参数是共享可变对象 |
-| `core/loop.py` | `agent_before` 与 `llm_before` 传入 `messages`、`tools`、`system_prompt`；`turn_before` 不传 `system_prompt` | 原地修改可能生效，但语义未定义 |
-| `core/agent.py` `_register_builtin_plugins` | 硬编码 import 三个插件 | 没有真正的第三方插件入口 |
-| `core/agent.py` `_build_prompt_assembly` | 块序列 base / reply_language / date / memory / task_control / backend_extra / peer_hint / capabilities；其中 `backend_extra` 依赖后端额外提示词非空、`peer_hint` 依赖配置开关，均为条件块 | 外部无法贡献提示词块 |
-| `tools/registry.py` `register` | 同名直接覆盖；已有 `remove()`，但没有覆盖前快照与回滚 | 插件替换内置工具后无法恢复原定义 |
-| `core/types.py` `PendingTaskState` | `waiting_kind` 仅 `ask_user` / `plan_partial_acceptance` | 没有“待批准操作”的语义 |
-| `memory/manager.py` | SOP 是 L3；提示词只注入结构说明与 L1 索引（SOP 名单来自 L1 文件内容），正文按需 `file_read` | SOP 已经是渐进式加载 |
-| `zero_agent/skills/` | 无源文件，仅存 `__pycache__` 残留 | skill 体系尚未存在 |
-| MCP | 可核查范围内仅在 `frontends/acp_bridge.py` 声明能力为 false | 完全未实现 |
+| `core/hooks.py` | **已删除**；生命周期事件统一由 `ExtensionRuntime.notify()` 分发 | 不再存在两套事件体系 |
+| `core/handler.py` `_notify` | 直接调用运行时；通知回调失败由运行时记录并继续 | 插件异常不会中断工具执行 |
+| `core/handler.py` `dispatch` | `tool_before` 在门控前通知；`tool_after` 统一由 `_emit_tool_after` 触发 | 通知只读；修改只能走门控/结果变换 |
+| `core/loop.py` | 触发 `agent_start / turn_start / llm_before / llm_after / turn_end / agent_end`；负载含 handler | 内部插件通过同一运行时订阅 |
+| `core/agent.py` | 内部插件（langfuse / project_mode / worldline）与外部插件都经 `setup(ctx)` 安装 | 唯一扩展入口 |
+| `core/agent.py` `_build_prompt_assembly` | 块序列 base / reply_language / date / memory / task_control / backend_extra / peer_hint / capabilities；外部块追加在末尾 | 插件可贡献提示词块 |
+| `tools/registry.py` `register` | 同名覆盖前记录快照，支持按归属回滚 | 插件替换内置工具后可恢复 |
+| `core/types.py` `PendingTaskState` | `waiting_kind` 增加 `approval` | 支持待批准操作 |
+| `memory/manager.py` | SOP 是 L3；提示词只注入结构说明与 L1 索引，正文按需 `file_read` | SOP 已经是渐进式加载 |
+| MCP | `extensions/builtin/mcp_client.py` 已实现 stdio | HTTP 传输未实现 |
 
 ### 已具备的基础
 
-- `ToolRegistry` + `ToolDefinition` 已经是统一的工具声明格式（含 `evidence_kind`）。
-- `HookSystem` 已有注册、卸载、`discover_and_load`，是插件系统的雏形。
+- `ToolRegistry` + `ToolDefinition` 是统一工具声明格式（含 `evidence_kind` 与 `effects`）。
+- `ExtensionRuntime` 提供通知、变换、门控三类扩展点，以及注册归属与卸载。
 - `StepOutcome` / `StepAction` / `TerminalEvent` 已能表达“等待用户”。
 - 记忆系统已经区分“可写经验（SOP）”与“只读上下文”。
 
@@ -77,8 +77,8 @@ zero_agent/
 ├── core/                       # 执行内核：本方案不重写
 │   ├── loop.py                 # 循环（新增：消费变换后的请求/工具调用）
 │   ├── handler.py              # 分发（新增：门控与结果变换）
-│   ├── agent.py                # 组装（新增：引导插件运行时；提示词补充块）
-│   └── hooks.py                # 保留 8 事件；新增语义化的扩展接口
+│   ├── agent.py                # 组装（引导插件运行时；提示词补充块）
+│   └── interfaces.py           # LLM/Tool 协议
 │
 ├── extensions/                 # 新增：插件运行时（深模块，唯一扩展入口）
 │   ├── runtime.py              # 加载、注册归属、顺序、卸载、异常隔离
@@ -179,10 +179,11 @@ def setup(ctx):
 | 提示词块 | 运行时块列表 | 下一次 `_build_prompt_assembly()` |
 | 事件回调 | 运行时事件表 | 下一次对应事件触发 |
 
-`on_llm_request` 的改写只作用于本次请求：`messages` / `tools` 传入副本，不回写
-跨轮状态；`system_prompt` 在下一轮开始时恢复原值，避免逐轮累积。`model` 与
-`headers` 字段保留在契约中，但当前版本不会生效（切换模型与自定义请求头需要
-LLM 会话层配合，留待后续）。
+`on_llm_request` 在 LLM session 组装完整请求后执行，但只接收**当前轮**的
+消息副本：前缀历史保持原对象，本次变换不回写 `history`。`system_prompt` 的
+改写只作用于本次 wire 请求，下一轮自动恢复原值。`model` 与 `headers` 字段
+保留在契约中，但当前版本不会生效（切换模型与自定义请求头需要 LLM 会话层配合，
+留待后续）。
 
 依据：`agent.py` 的 `run()` 每次都调用 `registry.generate_openai_schema()` 重新生成工具 schema，因此启动时注册的工具不需要额外刷新。
 
@@ -208,9 +209,11 @@ CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有
 
 | 方法 | 语义 | 注册归属 |
 | --- | --- | --- |
-| `ctx.tool(...)` | 注册工具进 `ToolRegistry` | 插件 |
+| `ctx.tool(...)` | 注册工具进 `ToolRegistry`；可声明 `effects / write_path_keys / execute_code_keys` | 插件 |
 | `ctx.on_agent_start / on_turn_start / on_turn_end / on_agent_end` | 通知型，返回值忽略 | 插件 |
-| `ctx.on_llm_request` | 变换型，可改 `messages / tools / system_prompt`（只作用于本次请求） | 插件 |
+| `ctx.on_llm_before / on_llm_after` | 通知型，只观察请求/响应 | 插件 |
+| `ctx.on_tool_before / on_tool_after` | 通知型，只观察工具生命周期 | 插件 |
+| `ctx.on_llm_request` | 变换型，可改当前轮 `messages / tools / system_prompt`（只作用于本次请求） | 插件 |
 | `ctx.on_tool_call` | 门控型，可放行、改参、阻断 | 插件 |
 | `ctx.on_tool_result` | 变换型，可改结果 | 插件 |
 | `ctx.prompt_block(name, factory)` | 贡献系统提示词块 | 插件 |
@@ -219,13 +222,15 @@ CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有
 接口刻意保持小：**工具、提示词、请求、工具调用、工具结果，五类**。其余能力通过这五类组合实现。
 `ctx.confirm` 不是独立通道，而是 `on_tool_call` 门控的返回值；批准后由任务等待/恢复链路续跑。
 
+通知型回调是**只读契约**：运行时只保证把负载交给回调，不承诺回写。需要修改行为时使用变换或门控。
+
 ### 6.7 三类扩展点语义
 
 这是本方案的核心契约，替代“所有事件都走 waterfall”的错误做法。
 
 | 类别 | 事件 | 返回值 | 链式 | 异常处理 |
 | --- | --- | --- | --- | --- |
-| 通知 | `agent_start`、`turn_start`、`turn_end`、`agent_end`、`llm_after` | 忽略 | 否，全部执行 | 记录后继续 |
+| 通知 | `agent_start`、`turn_start`、`llm_before`、`llm_after`、`tool_before`、`tool_after`、`turn_end`、`agent_end` | 忽略 | 否，全部执行 | 记录后继续 |
 | 变换 | `llm_request`、`tool_result`、`prompt_block` | 返回新值 | 是，后一个收到前一个的结果 | 视为不干预，继续链 |
 | 门控 | `tool_call` | `None`（放行，可原地改 `call.args`）/ `ctx.block(...)` / `ctx.confirm(...)` / `False` | 否，按顺序求值 | **fail-closed：异常或无法识别的返回值即 block** |
 
@@ -385,22 +390,30 @@ extensions:
 生效时机：`sandbox` 随 registry 重建即时生效（配置热重载会触发）；
 `enabled` 与 `home` 变更需要重启进程。
 
-**策略说明（与早期设计的差异）**：早期设计里的 `approval.default` / `approval.rules`
-三档路径策略（allow / ask / deny）**未实现**。当前形态是固定的两条内置规则：
+**策略说明（与早期设计的差异）**：策略层不再按工具名判断，而是读取
+`ToolDefinition.effects`。早期设计里的 `approval.default` / `approval.rules`
+三档路径策略仍未实现；当前是固定的能力规则：
 
-| 场景 | 行为 |
+| 声明 | 行为 |
 | --- | --- |
-| 写入 `~/.zeroagent/{skills,extensions,mcp.json}`、扩展根目录或 `protected_writes` 中的路径 | `ask`：暂停并请求批准；`permission_gate` 带路径级 `scope`，同任务同路径在 TTL 内不重复询问 |
-| 写入 workspace 内（即使 workspace 位于扩展根目录之下） | `allow`：不干预（否则 workspace 落在 `~/.zeroagent` 下时每次写文件都要审批） |
-| `code_run` 命中格式化/写块设备/关机/fork 炸弹等固定危险模式 | `deny`：直接拒绝，不提供批准入口 |
-| `code_run` 的递归强制 `rm`、`find -delete`：目标全部在 workspace 内 | `allow`：常规清理 |
+| `effects` 含 `write`，目标命中 `~/.zeroagent/{skills,extensions,mcp.json}`、扩展根目录或 `protected_writes` | `ask`：暂停并请求批准；路径级 `scope`，同任务同路径在 TTL 内不重复询问 |
+| `effects` 含 `write`，目标在 workspace 内（即使 workspace 位于扩展根目录之下） | `allow`：不干预 |
+| `effects` 含 `write` 但未声明 `write_path_keys` | `deny`：注册错误，无法判定目标 |
+| `effects` 含 `execute`，`execute_code_keys` 收集到格式化/写块设备/关机/fork 炸弹 | `deny`：直接拒绝 |
+| `effects` 含 `execute`，递归强制 `rm` / `find -delete` 目标全部在 workspace 内 | `allow`：常规清理 |
 | 同上，但目标越出 workspace、含 shell 展开、或范围无法静态确认 | `deny` |
-| 其余写入与命令 | `allow`：不干预 |
+| `effects` 含 `unknown`（扩展工具未声明） | `ask`：同任务同工具批量授权 |
+| 其余（read / network / memory / user / control） | `allow`：不干预 |
+
+内置工具在注册时声明副作用：`file_write/file_patch` 为 `write`，`code_run` 为
+`execute`，`file_read/vision/skill_load` 为 `read`，等等。MCP 工具默认
+`unknown`，可在 `mcp.json` 的 server 配置里声明 `effects` /
+`write_path_keys` / `execute_code_keys`。
 
 `rm` 判定会先剥掉 `sudo`/`env`/`xargs`/`timeout` 等 wrapper 与 `VAR=value` 前缀，
 并沿 `cd` 解析相对路径，因此 `sudo rm -rf /`、`cd /tmp && rm -rf build` 都会被拒绝。
-已知边界不变：`code_run` 内用其它程序（例如 `python -c shutil.rmtree`）间接删除
-仍不受策略层约束，需要沙箱层（第九节）。
+已知边界不变：带 `execute` 的工具内用其它程序（例如 `python -c shutil.rmtree`）
+间接删除仍不受策略层约束，需要沙箱层（第九节）。
 
 `memory/sops/` 不在此扩展的管辖范围内，仍由记忆模块的 L0 约束管理。
 如果后续需要更细的三档策略，再引入配置化的规则表。
@@ -451,6 +464,19 @@ extensions:
   Linux 上 unprivileged userns 被禁时 bwrap 会失败。
 - 包装后启动失败时回退为直接执行，绝不让正常命令失败。
 - 默认 `extensions.sandbox = "off"`，需显式开启。
+
+### 阶段 5：生产硬化（✅ 已实现）
+
+- 安全门安装失败：`ZeroAgent` 构造抛 `ExtensionBootstrapError`，不再静默降级。
+- 扩展工具异常：`_wrap_tool` 捕获后返回 `status=error`，任务继续，证据记为 error。
+- `on_llm_request` 隔离：在 LLM session 组装请求后执行，只深拷贝当前轮消息，
+  不写回 `history`；system prompt 只作用于本次 wire 请求。
+- 策略去工具名耦合：`ToolDefinition.effects / write_path_keys /
+  execute_code_keys`，`permission_gate` 只按声明判定。
+- 事件体系统一：内部插件（langfuse / project_mode / worldline）全部改为
+  `setup(ctx)`；删除 `HookSystem` 与 `_trigger_hook`。
+- 验收：安全门失败启动失败；扩展工具异常不终止任务；插件改写不污染历史；
+  重命名写/执行工具仍受策略保护；全仓无 `HookSystem`。
 
 ## 十二、文档与打包同步
 
