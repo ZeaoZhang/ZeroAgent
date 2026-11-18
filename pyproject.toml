@@ -71,6 +71,8 @@ packages = [
     "zero_agent.utils",
     "zero_agent.utils.skill_search",
     "zero_agent.reflect",
+    "zero_agent.extensions",
+    "zero_agent.extensions.builtin",
     "zero_agent.plugins",
     "zero_agent.frontends",
     "zero_agent.frontends.commands",

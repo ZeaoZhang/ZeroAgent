@@ -1,0 +1,524 @@
+# 扩展体系设计（Extension Design）
+
+> 状态：**阶段 0–5 已实现（阶段 4 为可选的 best-effort 沙箱）**。
+> 实现代码位于 `zero_agent/extensions/`，测试见 `tests/test_extension_runtime.py`
+> 与 `tests/test_mcp_client.py`。`core/hooks.py` 已删除，生命周期事件统一走
+> `ExtensionRuntime.notify()`。
+> 参考：pi（earendil-works/pi）的轻量扩展入口、DeepSeek Harness 的注册归属与生命周期。
+> 原则：本方案只描述“要建成什么样”，落地时以本文的验收项为准，不以估算代码量作为承诺。
+
+## 一、目的与范围
+
+### 目标
+
+1. 用户能把外部 skill 目录原样放进来使用，不改写格式、不新增清单文件。
+2. 插件能改变 agent 的整体行为与方式（提示词、模型请求、工具调用与结果）。
+3. SOP 保持“agent 可修订的经验”，skill / MCP 保持“只读来源”，两者不混为一谈。
+4. agent 修改插件、skill、MCP 配置时必须获得人类同意。
+5. 核心执行链路（循环、工具分发、完成判定）保持现有形态，不重写。
+
+### 非目标
+
+- 不把 ZeroAgent 改造成 DSH 那样的全面服务化/Cordis 插件树。
+- 不引入 `CAPABILITY.toml` 一类的自造清单文件。
+- 不在首版支持插件热重载与多租户隔离。
+- 不承诺“某个护栏绝对不可绕过”（原因见第九节）。
+
+## 二、现状与约束
+
+以下是本设计必须尊重的既有事实，均可在代码中核对。
+
+| 组件 | 现状 | 影响 |
+| --- | --- | --- |
+| `core/hooks.py` | **已删除**；生命周期事件统一由 `ExtensionRuntime.notify()` 分发 | 不再存在两套事件体系 |
+| `core/handler.py` `_notify` | 直接调用运行时；通知回调失败由运行时记录并继续 | 插件异常不会中断工具执行 |
+| `core/handler.py` `dispatch` | `tool_before` 在门控前通知；`tool_after` 统一由 `_emit_tool_after` 触发 | 通知只读；修改只能走门控/结果变换 |
+| `core/loop.py` | 触发 `agent_start / turn_start / llm_before / llm_after / turn_end / agent_end`；负载含 handler | 内部插件通过同一运行时订阅 |
+| `core/agent.py` | 内部插件（langfuse / project_mode / worldline）与外部插件都经 `setup(ctx)` 安装 | 唯一扩展入口 |
+| `core/agent.py` `_build_prompt_assembly` | 块序列 base / reply_language / date / memory / task_control / backend_extra / peer_hint / capabilities；外部块追加在末尾 | 插件可贡献提示词块 |
+| `tools/registry.py` `register` | 同名覆盖前记录快照，支持按归属回滚 | 插件替换内置工具后可恢复 |
+| `core/types.py` `PendingTaskState` | `waiting_kind` 增加 `approval` | 支持待批准操作 |
+| `memory/manager.py` | SOP 是 L3；提示词只注入结构说明与 L1 索引，正文按需 `file_read` | SOP 已经是渐进式加载 |
+| MCP | `extensions/builtin/mcp_client.py` 已实现 stdio | HTTP 传输未实现 |
+
+### 已具备的基础
+
+- `ToolRegistry` + `ToolDefinition` 是统一工具声明格式（含 `evidence_kind` 与 `effects`）。
+- `ExtensionRuntime` 提供通知、变换、门控三类扩展点，以及注册归属与卸载。
+- `StepOutcome` / `StepAction` / `TerminalEvent` 已能表达“等待用户”。
+- 记忆系统已经区分“可写经验（SOP）”与“只读上下文”。
+
+## 三、评审结论摘要
+
+设计过程中经历多轮修正，以下结论已并入本方案：
+
+| 结论 | 处理 |
+| --- | --- |
+| 插件统一入口、外部 skill 原样复用 | 采纳 |
+| “只升级 `trigger()` 就能获得全部扩展能力” | 驳回。调用方必须消费改写结果，并处理阻断与等待 |
+| 所有事件统一成 waterfall | 驳回。通知、变换、门控的返回值与失败语义不同，不能合并 |
+| 权限做成内置插件 | 采纳，但前提是运行时提供审批与恢复能力 |
+| “旧插件零改动、零回归” | 驳回。共享可变对象与注册顺序仍可能带来行为差异，需逐项验证 |
+| 照搬 DSH 的一切皆插件 | 首阶段不采用，仅借用注册归属与生命周期思路 |
+| 文件写护栏不可绕过 | 驳回，改为分层说明（第九节） |
+
+## 四、设计原则
+
+1. **一个执行内核，一个插件运行时。** 扩展能力集中在一个模块里，不散落到各调用方。
+2. **接口要深。** 插件作者只学一个 `setup(ctx)`；加载、顺序、冲突、卸载、清理都藏在运行时内部。
+3. **语义显式。** 每类扩展点的返回值、异常与失败处理都写进接口契约，不依赖共享字典的副作用。
+4. **可撤销。** 每次注册都有归属，插件卸载时注册随之撤销（来自 DSH 的 reversible effects）。
+5. **失效不扩大。** 插件出错只影响它自己注册的能力，不能拖垮循环。
+
+## 五、目标架构
+
+```text
+zero_agent/
+├── core/                       # 执行内核：本方案不重写
+│   ├── loop.py                 # 循环（新增：消费变换后的请求/工具调用）
+│   ├── handler.py              # 分发（新增：门控与结果变换）
+│   ├── agent.py                # 组装（引导插件运行时；提示词补充块）
+│   └── interfaces.py           # LLM/Tool 协议
+│
+├── extensions/                 # 新增：插件运行时（深模块，唯一扩展入口）
+│   ├── runtime.py              # 加载、注册归属、顺序、卸载、异常隔离
+│   ├── context.py              # 面向插件的稳定 API 对象
+│   ├── events.py               # 三类扩展点的契约定义
+│   └── builtin/                # 内置扩展（它们和第三方用同一套接口）
+│       ├── permission_gate.py  # 写入需人类同意的策略
+│       ├── skills_index.py     # skill 发现与描述注入
+│       └── mcp_client.py       # MCP 工具来源
+│
+└── tools/                      # 工具仍注册进现有 ToolRegistry
+```
+
+外部扩展位置：
+
+```text
+~/.zeroagent/
+├── skills/                     # 目录 + SKILL.md，与 ~/.dsh/skills 同构，可软链
+├── mcp.json                    # 单个文件，mcpServers 键
+└── extensions/                 # 单文件 <name>.py 或目录 <name>/__init__.py
+```
+
+`memory/sops/` 保持现状，仍由记忆模块管理。
+
+## 六、插件运行时
+
+### 6.1 目录组织
+
+注意区分两个同名目录：`zero_agent/extensions/` 是运行时的源码实现（见第五节），`~/.zeroagent/extensions/` 才是外部插件的存放处，两者互不重叠。
+
+```text
+~/.zeroagent/extensions/
+├── my_guard.py              # 单文件插件
+├── daily_stock/             # 目录插件
+│   ├── __init__.py          # 入口，必须存在
+│   ├── tools.py             # 目录内可自由拆分
+│   └── prompts.py
+└── _shared/                 # 下划线开头：不加载，仅作共享库
+```
+
+发现规则：
+
+- **只扫描一层**，不递归；更深的模块由插件自己 `import`。
+- `*.py` 且不以 `_` 或 `.` 开头 → 单文件插件，入口是模块本身。
+- `*/__init__.py` 存在 → 目录插件，入口是 `__init__.py`。
+- `_` 开头的目录、`__pycache__` 一律跳过，可用来放公共代码。
+- 插件名 = 文件名或目录名（去掉 `.py`），用于日志、冲突裁决与卸载。
+
+### 6.2 加载时机与顺序
+
+| 项目 | 规则 |
+| --- | --- |
+| 时机 | `ZeroAgent.__init__` 中，`ToolRegistry.with_builtins()` 之后、`BaseHandler` 创建之前 |
+| 理由 | 内置工具先就位，插件才能覆盖或补充；handler 依赖最终的 registry |
+| 顺序 | 按插件名字典序，稳定可预期 |
+| 次数 | 每个插件 `setup(ctx)` 只调用一次，进程内常驻 |
+| 失败 | 导入或 `setup` 抛异常 → 记录日志并跳过该插件，不阻断启动 |
+
+### 6.3 插件形态
+
+单文件或目录，内部导出唯一入口函数 `setup(ctx)`：
+
+```python
+# ~/.zeroagent/extensions/my_guard.py
+NAME = "my-guard"          # 可选，仅用于日志
+VERSION = "0.1.0"          # 可选
+
+def setup(ctx):
+    @ctx.tool(name="deploy", description="部署到目标环境", parameters={...})
+    def deploy(args):
+        return run_deploy(args["target"])
+
+    @ctx.on_tool_call
+    def guard(call):
+        if call.tool_name == "code_run" and "rm -rf" in call.args.get("code", ""):
+            return ctx.block("危险命令已拦截")
+
+    @ctx.on_llm_request
+    def tag(request):
+        # 只影响本次请求；system_prompt 会在下一轮自动恢复，不会累积
+        return request.replace(system_prompt=(request.system_prompt or "") + "\n[tag]")
+```
+
+要点：
+
+- **没有 manifest、没有清单文件**。存在即加载，`setup` 返回后运行时接管。
+- 模块级常量 `NAME` / `VERSION` / `DESCRIPTION` 可选，不参与发现。
+- 插件自行 `import` 依赖；框架不代为安装，缺依赖按加载失败处理。
+- 一个插件拥有的全部注册归属于它，可整体撤销。
+
+### 6.4 生效机制
+
+三类注册对应三种生效时机：
+
+| 注册 | 存在哪里 | 何时生效 |
+| --- | --- | --- |
+| 工具 | `ToolRegistry` | 下一次 `agent.run()` 生成 schema 时 |
+| 提示词块 | 运行时块列表 | 下一次 `_build_prompt_assembly()` |
+| 事件回调 | 运行时事件表 | 下一次对应事件触发 |
+
+`on_llm_request` 在 LLM session 组装完整请求后执行，但只接收**当前轮**的
+消息副本：前缀历史保持原对象，本次变换不回写 `history`。`system_prompt` 的
+改写只作用于本次 wire 请求，下一轮自动恢复原值。`model` 与 `headers` 字段
+保留在契约中，但当前版本不会生效（切换模型与自定义请求头需要 LLM 会话层配合，
+留待后续）。
+
+依据：`agent.py` 的 `run()` 每次都调用 `registry.generate_openai_schema()` 重新生成工具 schema，因此启动时注册的工具不需要额外刷新。
+
+### 6.5 热重载边界
+
+`reload_config()` 在工具语言变化时会重建 `ToolRegistry`（见 `core/agent.py`）。此时插件注册的工具会随旧 registry 一起消失。
+
+运行时必须在 registry 重建后重新应用插件注册，否则表现为“改了配置，插件工具突然不见了”。这是实现阶段必须覆盖的边界，验收要有对应用例。
+
+`extensions` 字段的生效边界：
+
+| 字段 | 生效方式 |
+| --- | --- |
+| `sandbox` | 热重载时随 registry 重建立即生效 |
+| `enabled` / `home` | 需要重启进程 |
+
+生命周期与卸载：`ZeroAgent.close()` 调用 `ExtensionRuntime.release()`，
+撤销插件工具、门控与提示词块，并执行卸载回调（关闭 MCP 子进程）；可重复调用。
+CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有 `atexit` 兜底。
+不提供插件的运行时热加载/热卸载（改插件代码仍需重启）。
+
+### 6.6 `ctx` 接口（对外唯一契约）
+
+| 方法 | 语义 | 注册归属 |
+| --- | --- | --- |
+| `ctx.tool(...)` | 注册工具进 `ToolRegistry`；可声明 `effects / write_path_keys / execute_code_keys` | 插件 |
+| `ctx.on_agent_start / on_turn_start / on_turn_end / on_agent_end` | 通知型，返回值忽略 | 插件 |
+| `ctx.on_llm_before / on_llm_after` | 通知型，只观察请求/响应 | 插件 |
+| `ctx.on_tool_before / on_tool_after` | 通知型，只观察工具生命周期 | 插件 |
+| `ctx.on_llm_request` | 变换型，可改当前轮 `messages / tools / system_prompt`（只作用于本次请求） | 插件 |
+| `ctx.on_tool_call` | 门控型，可放行、改参、阻断 | 插件 |
+| `ctx.on_tool_result` | 变换型，可改结果 | 插件 |
+| `ctx.prompt_block(name, factory)` | 贡献系统提示词块 | 插件 |
+| `ctx.block(reason)` / `ctx.confirm(question, candidates=..., scope=...)` | 门控回调的返回值：拒绝 / 请求人类批准 | — |
+
+接口刻意保持小：**工具、提示词、请求、工具调用、工具结果，五类**。其余能力通过这五类组合实现。
+`ctx.confirm` 不是独立通道，而是 `on_tool_call` 门控的返回值；批准后由任务等待/恢复链路续跑。
+
+通知型回调是**只读契约**：运行时只保证把负载交给回调，不承诺回写。需要修改行为时使用变换或门控。
+
+### 6.7 三类扩展点语义
+
+这是本方案的核心契约，替代“所有事件都走 waterfall”的错误做法。
+
+| 类别 | 事件 | 返回值 | 链式 | 异常处理 |
+| --- | --- | --- | --- | --- |
+| 通知 | `agent_start`、`turn_start`、`llm_before`、`llm_after`、`tool_before`、`tool_after`、`turn_end`、`agent_end` | 忽略 | 否，全部执行 | 记录后继续 |
+| 变换 | `llm_request`、`tool_result`、`prompt_block` | 返回新值 | 是，后一个收到前一个的结果 | 视为不干预，继续链 |
+| 门控 | `tool_call` | `None`（放行，可原地改 `call.args`）/ `ctx.block(...)` / `ctx.confirm(...)` / `False` | 否，按顺序求值 | **fail-closed：异常或无法识别的返回值即 block** |
+
+门控与变换的区别是硬性的：
+
+- 门控用于安全决策，**判断不了就必须阻止**，不能用“异常忽略”的方式放行。
+- 变换用于增强，出错时退回原值，不能让插件错误毒化请求。
+
+### 6.8 注册归属与卸载
+
+`ToolRegistry.register` 目前同名直接覆盖，虽然有 `remove()` 但不能恢复被覆盖的原定义（`tools/registry.py`）。运行时在其上增加一层：
+
+1. 注册前记录被覆盖的原始 `ToolDefinition`。
+2. 卸载插件时按逆序恢复。
+3. 插件之间同名冲突时按加载顺序裁决，冲突写入日志。
+
+这是采纳 DSH “注册即效应、卸载即回滚”的最小实现，也是后续支持热重载的前提。
+
+## 七、四类扩展来源
+
+| 来源 | 位置 | 可写性 | 是否参与优先级 | 加载方式 |
+| --- | --- | --- | --- | --- |
+| SOP | `memory/sops/*.md` | agent 可修订，受 L0 约束 | **最高** | 已有机制，正文按需 |
+| Skill | `~/.zeroagent/skills/<name>/SKILL.md` | 需人类同意 | 低于 SOP | 只读，索引注入 + 正文按需 |
+| MCP | `~/.zeroagent/mcp.json` | 需人类同意 | 不参与仲裁 | 内置扩展注册为工具 |
+| Plugin | `~/.zeroagent/extensions/` | 需人类同意 | 不参与仲裁 | 运行时加载 |
+
+### 7.1 SOP
+
+保持现状，不做迁移。它是唯一“agent 可以自己改并沉淀”的知识载体，写入仍需遵循 L0 的 `memory_management_sop`。SOP 优先级最高，但仍低于用户当轮指令与运行时的安全策略。
+
+### 7.2 Skill
+
+- 目录结构完全对齐 `~/.dsh/skills`：一个目录一个 `SKILL.md`，YAML frontmatter 带 `name` 与 `description`。
+- 外部 skill 可以直接软链进来，无需改写。
+- 提示词中只注入“名字 + 一句话描述”，正文由模型按需读取（与 pi 的按需加载一致）。
+- skill 是只读来源，运行时不为它提供写入口。
+
+### 7.3 MCP
+
+- 单个 `mcp.json`，使用社区标准的 `mcpServers` 键，靠字段形状判断传输方式（`command` → stdio，`url` → HTTP）。
+- 支持 `${ENV}` 替换，凭据只存在环境变量里。
+- 工具名统一加前缀 `mcp__<server>__<tool>`，避免与内置工具重名。
+- MCP SDK 在首次使用时才导入；未配置时零依赖。
+- 由 `extensions/builtin/mcp_client.py` 实现，核心代码不出现 MCP 概念。
+
+**实现说明（当前状态）**：
+
+- 首版只实现 **stdio** 传输，且**不依赖 MCP SDK**——按 newline-delimited JSON-RPC 手写，
+  因此未配置 MCP 时进程内不出现 `mcp` 模块（满足零依赖要求）。
+- 配置里只有 `url`（HTTP 传输）的 server 会被记录一条警告后跳过；HTTP 传输待后续实现。
+- 子进程在进程退出时由 `atexit` 统一关闭。
+
+## 八、审批与恢复
+
+### 8.1 触发场景
+
+- agent 修改 skill / 插件代码 / `mcp.json`。
+- agent 执行被策略判为高危的工具调用（如越界写入、危险命令）。
+- 插件在门控里返回 `ctx.confirm(...)` 主动请求确认。
+
+### 8.2 机制
+
+1. 运行时生成一个待批准操作描述（工具、目标、参数摘要、内容指纹）。
+2. 复用现有等待链路：返回 `StepAction.WAIT_FOR_USER`，在 `PendingTaskState` 中记录。
+3. 用户答复后，只有**与指纹匹配**的那一次操作被放行，随后作废；拒绝则返回“禁止重试”提示。
+   对「同一个文件反复改写」这类高频场景，可由插件给出 `scope`（批量授权键），
+   批准后在同任务、同 scope、通行证有效期内不再重复询问（详见 8.4）。
+
+落地位置（阶段 3 已实现）：
+
+- `core/types.py` 的 `waiting_kind` 增加 `"approval"` 取值。
+- `core/agent.py` 的恢复路径识别批准/拒绝，并按指纹放行被暂停的那一次操作。
+- 审批绑定具体变更（指纹），不能仅凭“模型收到了同意的文本”放行；答复只认
+  整串命中的批准词（允许句末标点），其余一律按拒绝处理。
+
+### 8.3 与“受信任插件”的区分
+
+用户启用一个插件，意味着允许它正常改变行为（提示词、请求、工具选择）。这与“agent 自行修改插件代码”是两件事，只有后者才走审批。
+
+### 8.4 实现形态（当前）
+
+- **三态门控**：`evaluate_tool_call()` 返回 `allow` / `block` / `approve`。
+  插件在门控里 `return ctx.confirm("原因")` 即要求审批。
+- **指纹绑定**：审批指纹是「工具名 + 全部业务参数（忽略 `_index` 等内部键）」的
+  SHA-256 前 16 位。模型只要改了目标或内容，指纹就变，需要重新批准。
+- **一次性通行证**：批准后写入 `runtime._approvals`，绑定 `task_id` 且默认
+  600 秒有效；下一次同指纹调用消费后立即失效，跨任务无法复用。
+  拒绝则清空全部未使用通行证。
+- **批量授权（scope）**：`ctx.confirm(..., scope="...")` 在批准时额外登记一个
+  路径级的批量授权，键为 `(task_id, scope)`，与一次性通行证同寿命。之后满足
+  「同任务 + 同 scope」的调用直接放行，不再弹审批——内容改一个换行也会被覆盖，
+  这是刻意的取舍：模型反复改写同一个文件时，逐字节审批只会把用户训练成
+  「闭眼点同意」。窗口由 TTL、任务绑定和路径级 scope 三重收窄；`permission_gate`
+  的 scope 形如 `file_write:<解析后的绝对路径>`，只覆盖该文件，不覆盖同目录其他文件。
+- **求值顺序**：门控全部跑完才决定是否消费通行证，避免通行证被后续门控的
+  `block` 白烧。
+- **暂停与恢复**：门控要求审批时 `dispatch` 返回 `WAIT_FOR_USER`，
+  `PendingTaskState.waiting_kind = "approval"`。用户答复被判定为批准
+  （「批准/同意/允许/approve/yes/ok」等，允许句末标点）才发放通行证，
+  其余一律按拒绝处理——安全优先，不做前缀或模糊匹配（"批准吧"也算拒绝）。
+  指纹缺失（暂停状态失效）时按拒绝处理，不会谎报「已批准」。
+- **内置策略**：`permission_gate` 对受保护路径的写入走 `confirm`（可批准），
+  问句附带将写入内容的长度与 sha256 摘要，避免盲批；对明确危险的 shell
+  （递归强制删除、格式化、关机等）仍直接 `block`。路径判定复用文件工具的
+  解析口径（含 `memory_dir` 前缀重定向），避免判定与实际写入位置不一致。
+- **路径规范化**：`scope` 使用解析后的绝对路径（realpath + normcase），因此同一
+  文件经软链、相对路径两种写法命中同一个批量授权，不会重复弹审批。
+- **拒绝的清理范围**：用户拒绝时只清除「当前任务 + 未绑定任务」的通行证，
+  其他任务已发放的通行证不受影响。
+- **已知边界**：没有 `scope` 的门控仍然「一次批准只放行一次具体调用」，模型
+  重试时改了内容会重新触发审批；`permission_gate` 有 `scope`，因此在 TTL 内
+  同一任务对同一路径的改写不再询问——若需要逐次确认内容，应把 TTL 调小或
+  不使用 `scope`。审批只覆盖标准工具路径，`code_run` 内间接写文件仍受
+  第九节边界限制。
+
+## 九、安全边界（诚实说明）
+
+上一版曾承诺“写护栏不可绕过”，这不成立，予以撤回。实际分三层：
+
+| 层 | 手段 | 能挡住什么 | 挡不住什么 |
+| --- | --- | --- | --- |
+| 策略层 | 工具调用门控 + 审批 | 模型通过标准工具越权 | 插件在进程内直接写文件 |
+| 流程层 | 注册归属、审批指纹、日志 | 误操作与重复执行 | 恶意代码 |
+| 沙箱层（可选，已提供） | `extensions.sandbox` 包装 `code_run`，写入限制在 workspace 与临时目录 | 命令执行时的越界写盘 | 平台差异；Linux 需可用 bwrap；硬链接与白名单外的可写目录仍可绕；降级即失去保护 |
+
+文档与提示词中描述的应是**协作规则**，不是强制隔离。需要强制隔离时，走第三层。
+
+**沙箱层的已知局限**（务必写进威胁模型，不要当成强隔离）：
+
+- 路径型沙箱无法阻止**硬链接**：白名单外的文件被硬链进 workspace 后仍可写。
+- 白名单内的临时目录、以及任何同权限的可写目录，都能被用作落脚点。
+- Linux 依赖可用的 `bwrap` 与 unprivileged userns；不可用时整体降级为不隔离。
+- 降级是静默的（只在执行日志里提示），因此不能把"开了 sandbox"当作安全保证。
+
+## 十、配置位置
+
+| 配置项 | 位置 | 说明 |
+| --- | --- | --- |
+| 扩展根目录 | `~/.zeroagent/` | 由 `extensions.home` 配置（无环境变量覆盖）；测试用临时目录 |
+| skill | `~/.zeroagent/skills/` | 与 `~/.dsh/skills` 同构 |
+| MCP | `~/.zeroagent/mcp.json` | 单文件，`mcpServers` 键 |
+| 插件 | `~/.zeroagent/extensions/` | 单文件或目录 |
+| SOP | `memory/sops/`（`memory_dir` 下） | 由记忆模块管理 |
+| 运行时配置 | 项目 `config.yaml` 或 `ZA_CONFIG_PATH` | 新增扩展相关字段见下 |
+
+`config.yaml` 新增段（与现有 `config.example.yaml` 一致，**这是当前实际生效的字段**）：
+
+```yaml
+extensions:
+  enabled: true            # false 时不加载插件、skill 与 MCP（安全门仍生效）
+  home: "~/.zeroagent"     # 扩展根目录，可指向临时目录便于测试
+  protected_writes: []     # 额外的受保护路径；写入前需人类批准
+  sandbox: off             # code_run 沙箱：off | auto | macos | linux
+```
+
+生效时机：`sandbox` 随 registry 重建即时生效（配置热重载会触发）；
+`enabled` 与 `home` 变更需要重启进程。
+
+**策略说明（与早期设计的差异）**：策略层不再按工具名判断，而是读取
+`ToolDefinition.effects`。早期设计里的 `approval.default` / `approval.rules`
+三档路径策略仍未实现；当前是固定的能力规则：
+
+| 声明 | 行为 |
+| --- | --- |
+| `effects` 含 `write`，目标命中 `~/.zeroagent/{skills,extensions,mcp.json}`、扩展根目录或 `protected_writes` | `ask`：暂停并请求批准；路径级 `scope`，同任务同路径在 TTL 内不重复询问 |
+| `effects` 含 `write`，目标在 workspace 内（即使 workspace 位于扩展根目录之下） | `allow`：不干预 |
+| `effects` 含 `write` 但未声明 `write_path_keys` | `deny`：注册错误，无法判定目标 |
+| `effects` 含 `execute`，`execute_code_keys` 收集到格式化/写块设备/关机/fork 炸弹 | `deny`：直接拒绝 |
+| `effects` 含 `execute`，递归强制 `rm` / `find -delete` 目标全部在 workspace 内 | `allow`：常规清理 |
+| 同上，但目标越出 workspace、含 shell 展开、或范围无法静态确认 | `deny` |
+| `effects` 含 `unknown`（扩展工具未声明） | `ask`：同任务同工具批量授权 |
+| 其余（read / network / memory / user / control） | `allow`：不干预 |
+
+内置工具在注册时声明副作用：`file_write/file_patch` 为 `write`，`code_run` 为
+`execute`，`file_read/vision/skill_load` 为 `read`，等等。MCP 工具默认
+`unknown`，可在 `mcp.json` 的 server 配置里声明 `effects` /
+`write_path_keys` / `execute_code_keys`。
+
+`rm` 判定会先剥掉 `sudo`/`env`/`xargs`/`timeout` 等 wrapper 与 `VAR=value` 前缀，
+并沿 `cd` 解析相对路径，因此 `sudo rm -rf /`、`cd /tmp && rm -rf build` 都会被拒绝。
+已知边界不变：带 `execute` 的工具内用其它程序（例如 `python -c shutil.rmtree`）
+间接删除仍不受策略层约束，需要沙箱层（第九节）。
+
+`memory/sops/` 不在此扩展的管辖范围内，仍由记忆模块的 L0 约束管理。
+如果后续需要更细的三档策略，再引入配置化的规则表。
+
+## 十一、分阶段落地
+
+每个阶段都可独立合并、独立验收。
+
+### 阶段 0：工具注册可撤销（✅ 已实现）
+
+- 改动：`tools/registry.py` 在现有 `remove()` 之外增加“覆盖前快照 + 恢复”（不改变现有调用方式）。
+- 原因：这是插件运行时与 MCP 卸载的地基，先做不会返工。
+- 验收：注册同名工具 → 撤销 → 原工具恢复，现有测试全绿。
+
+### 阶段 1：插件运行时与门控（✅ 已实现）
+
+- 新增：`extensions/runtime.py`、`context.py`、`events.py`。
+- 改动：`core/agent.py` 启动时引导运行时；`core/handler.py` 与 `core/loop.py` 消费三类扩展点。
+- 内置 `permission_gate.py` 作为第一个使用者，验证门控在异常时 fail-closed。
+- 同步：`pyproject.toml` 的 `[tool.setuptools] packages` 增加 `zero_agent.extensions` 与 `zero_agent.extensions.builtin`；补 `zero_agent/extensions/README.md` 作为插件作者的上手文档。
+- 验收：
+  - 一个外部单文件插件能注册工具并被模型调用。
+  - 门控能阻断危险调用，且插件抛异常时仍然是阻断。
+  - `on_llm_request` 能修改请求且不破坏流式。
+
+### 阶段 2：skill 与 MCP（✅ 已实现；MCP 暂只支持 stdio）
+
+- 内置 `skills_index.py`：扫描目录、注入描述、支持 `~/.dsh/skills` 软链。
+- 内置 `mcp_client.py`：读取 `mcp.json`，按需导入 SDK，注册带前缀的工具。
+- 验收：
+  - 软链 `~/.dsh/skills` 后 skill 可见，未改一行代码。
+  - 新增 `mcp.json` 后工具出现；文件损坏时只跳过该项。
+  - 未配置 MCP 时进程内没有 `mcp` 模块。
+
+### 阶段 3：审批与恢复（✅ 已实现）
+
+- 改动：`core/types.py` 的 `waiting_kind`、`core/agent.py` 的恢复路径。
+- 验收：批准后只重放被暂停的那一次操作；拒绝后模型不会原地重试。
+
+### 阶段 4（可选）：隔离（✅ 已实现，best-effort）
+
+- 新增 `extensions/sandbox.py`：把 `code_run` 的 argv 包进平台沙箱。
+- **写入根固定为 workspace**，不读取工具参数里的 `cwd` —— 否则模型传一个
+  `cwd="/"` 就能把隔离变成 `(subpath "/")`，等于关掉沙箱。
+- 进入 profile 的路径先做校验：必须是绝对路径、不含引号与换行，否则降级。
+- macOS 用系统自带 `sandbox-exec -p <profile>`；Linux 用 `bwrap`。
+  两者都要先做**功能探测**（真跑一次最小命令），仅 `which` 命中不算可用：
+  Linux 上 unprivileged userns 被禁时 bwrap 会失败。
+- 包装后启动失败时回退为直接执行，绝不让正常命令失败。
+- 默认 `extensions.sandbox = "off"`，需显式开启。
+
+### 阶段 5：生产硬化（✅ 已实现）
+
+- 安全门安装失败：`ZeroAgent` 构造抛 `ExtensionBootstrapError`，不再静默降级。
+- 扩展工具异常：`_wrap_tool` 捕获后返回 `status=error`，任务继续，证据记为 error。
+- `on_llm_request` 隔离：在 LLM session 组装请求后执行，只深拷贝当前轮消息，
+  不写回 `history`；system prompt 只作用于本次 wire 请求。
+- 策略去工具名耦合：`ToolDefinition.effects / write_path_keys /
+  execute_code_keys`，`permission_gate` 只按声明判定。
+- 事件体系统一：内部插件（langfuse / project_mode / worldline）全部改为
+  `setup(ctx)`；删除 `HookSystem` 与 `_trigger_hook`。
+- 验收：安全门失败启动失败；扩展工具异常不终止任务；插件改写不污染历史；
+  重命名写/执行工具仍受策略保护；全仓无 `HookSystem`。
+
+## 十二、文档与打包同步
+
+本设计要真正进入项目，不只是新增一个 `extensions/` 目录。以下文件必须同步更新，否则该模块会在打包、文档索引和后来者的认知里“不存在”。
+
+| 文件 | 改什么 | 时机 |
+| --- | --- | --- |
+| `pyproject.toml` | `[tool.setuptools] packages` 增加 `zero_agent.extensions` 与 `zero_agent.extensions.builtin` | 阶段 1 |
+| `zero_agent/extensions/README.md` | 插件作者最小上手：目录约定、`setup(ctx)` 签名、一个可直接运行的完整示例 | 阶段 1 |
+| `docs/architecture.md` | 项目结构图与核心包表格加入 `extensions/`，并加一条指向本文的说明 | 阶段 1 完成时 |
+| `README.md` | 特性列表增加“插件 / skill / MCP 扩展”；项目结构注释补 `extensions/`；文档索引加入本文 | 阶段 2 完成时 |
+| 本文 | 状态从“设计稿，未实现”改为“已实现（阶段 N）”，未落地部分保持标注 | 每个阶段完成时 |
+
+`pyproject.toml` 这一项最容易漏且后果隐蔽：editable 安装在开发机上能跑，但构建 sdist 或正式安装时新模块不会被打包，用户安装后 import 失败。验收时应以“从零安装后能 import”为准，而不是只看本地能跑。
+
+## 十三、验收清单
+
+| 编号 | 验收项 | 判定 |
+| --- | --- | --- |
+| V1 | 新增一个外部 skill 目录 | 无需改代码即出现在提示词索引中 |
+| V2 | 删除 `~/.zeroagent/` 全部内容 | 核心工具集与循环照常工作 |
+| V3 | 插件在 `setup` 中抛异常 | 仅该插件跳过，启动成功 |
+| V4 | 门控插件自身异常 | 对应工具调用被阻断（fail-closed） |
+| V5 | 插件注册同名工具后卸载 | 内置工具恢复 |
+| V6 | `mcp.json` 中单个 server 配置错误 | 其余 server 正常，启动成功 |
+| V7 | 未配置 MCP | 不导入 MCP SDK |
+| V8 | 修改 skill 文件 | 需人类同意；默认只对当次变更有效，`permission_gate` 另有路径级批量授权（同任务 + 同路径 + TTL 内不重复询问） |
+| V9 | SOP 与 skill 同名同主题冲突 | 以 SOP 为准，skill 作为参考 |
+| V10 | 切换工具语言触发 registry 重建 | 插件注册被重新应用，工具不消失 |
+
+## 十四、风险与未决问题
+
+| 风险 | 说明 | 缓解 |
+| --- | --- | --- |
+| 插件与共享可变对象 | 现有 hook 传入的是共享列表/字典，原地修改可能产生难以追踪的行为 | 阶段 1 明确“变换通过返回值”，逐步收敛为显式契约 |
+| 提示词膨胀 | 插件都能贡献提示词块 | 每块有名字与长度上限，超限截断并告警 |
+| 门控误伤 | 门控过严会阻断正常任务 | 门控结果可观测（日志 + 事件），先宽后紧 |
+| 审批疲劳 | 过多确认会让用户点“同意”成习惯 | 按路径策略批量授权（`scope` + TTL + 任务绑定），只对高风险单次确认 |
+| MCP 工具过多 | `tools/list` 的结果全部注册进 registry，tools schema 会随 server 工具数线性膨胀（**当前未缓解**） | 仅配置实际需要的 server；后续可做按需展开 |
+
+未决问题：
+
+- 是否需要 `/ext` 之类的 REPL 命令查看已加载插件与冲突？（倾向需要，但不在首版）
+- 插件是否需要版本约束与依赖声明？（首版按纯 Python 处理，不做额外约定）
+- 是否支持项目级扩展（`.zeroagent/`）：目前先只做用户级 `~/.zeroagent/`，避免概念分裂。

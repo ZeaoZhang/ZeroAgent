@@ -43,7 +43,7 @@ class FakeBackend:
     def system(self, value):
         self._system = value
 
-    def chat(self, messages, tools=None):
+    def chat(self, messages, tools=None, **kwargs):
         self.messages.append(messages)
         yield self._response
         if self._backend_response is not None:

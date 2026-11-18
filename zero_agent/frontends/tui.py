@@ -1040,6 +1040,12 @@ if _TEXTUAL_AVAILABLE:
                     self.agent.abort()
                 except Exception:
                     pass
+                close = getattr(self.agent, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
             self.exit()
 
 

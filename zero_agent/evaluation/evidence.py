@@ -76,7 +76,7 @@ def observed_tool_results(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Select observed read/execute outputs, excluding write arguments and LLM text."""
     results: list[dict[str, Any]] = []
     for event in trace:
-        if event.get("event") != "turn_after":
+        if event.get("event") != "turn_end":
             continue
         calls = {call.get("id"): call for call in event.get("tool_calls", [])}
         for result in event.get("tool_results", []):

@@ -18,7 +18,7 @@ from typing import Optional
 
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import AgentConfig, default_config_path, load_default_config
-from zero_agent.core.exceptions import LLMError
+from zero_agent.core.exceptions import ExtensionBootstrapError, LLMError
 from zero_agent.core.types import TaskMode, TerminalEvent, TerminalStatus
 from zero_agent.runners.agent_runner import _consume_agent_run
 from zero_agent.utils.subagent_registry import (
@@ -178,7 +178,15 @@ def main(argv: Optional[list[str]] = None) -> None:
         config.log_dir = None
 
     # 创建 agent
-    agent = ZeroAgent(config=config)
+    try:
+        agent = ZeroAgent(config=config)
+    except ExtensionBootstrapError as exc:
+        print(
+            f"ZeroAgent 启动失败：{exc}\n"
+            "为避免在无写入保护的情况下运行，进程已终止。",
+            file=sys.stderr,
+        )
+        raise SystemExit(2) from exc
     agent.handler.max_turns = agent.config.max_turns
 
     # --no-user-tools: 从运行时注册表中移除 ask_user 和 long_term_update
@@ -189,25 +197,29 @@ def main(argv: Optional[list[str]] = None) -> None:
     # 记录配置路径以支持热重载
     agent.set_config_path(getattr(config, "_source_path", None))
 
-    if args.reflect:
-        # Reflect 反射模式
-        if args.llm_no is not None:
-            agent.next_llm(args.llm_no)
-        _run_reflect(agent, args.reflect, _parse_reflect_args(args.reflect_arg))
-    elif args.func:
-        if args.llm_no is not None:
-            agent.next_llm(args.llm_no)
-        _run_func_mode(agent, args.func, args.history)
-    elif args.task:
-        if args.llm_no is not None:
-            agent.next_llm(args.llm_no)
-        _run_task_mode(agent, args.task, args.history)
-    elif args.input:
-        # 一次性任务模式
-        _run_oneshot(agent, args.input)
-    else:
-        # 交互 REPL 模式
-        _run_repl(agent)
+    try:
+        if args.reflect:
+            # Reflect 反射模式
+            if args.llm_no is not None:
+                agent.next_llm(args.llm_no)
+            _run_reflect(agent, args.reflect, _parse_reflect_args(args.reflect_arg))
+        elif args.func:
+            if args.llm_no is not None:
+                agent.next_llm(args.llm_no)
+            _run_func_mode(agent, args.func, args.history)
+        elif args.task:
+            if args.llm_no is not None:
+                agent.next_llm(args.llm_no)
+            _run_task_mode(agent, args.task, args.history)
+        elif args.input:
+            # 一次性任务模式
+            _run_oneshot(agent, args.input)
+        else:
+            # 交互 REPL 模式
+            _run_repl(agent)
+    finally:
+        # 退出前释放扩展（MCP 子进程）；幂等，atexit 还会兜底一次
+        agent.close()
 
 
 def _build_parser() -> argparse.ArgumentParser:

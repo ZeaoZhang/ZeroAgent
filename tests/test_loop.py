@@ -13,7 +13,8 @@ import pytest
 from zero_agent.core.handler import BaseHandler
 from zero_agent.core.loop import AgentLoop
 from zero_agent.core.types import StepAction, StepOutcome, TaskContract, TaskMode, TerminalStatus
-from zero_agent.core.hooks import HookSystem
+from zero_agent.extensions.context import ExtensionContext
+from zero_agent.extensions.runtime import ExtensionRuntime
 from zero_agent.llm.base import MockFunction, MockResponse, MockToolCall
 from zero_agent.tools.registry import ToolDefinition, ToolRegistry
 from zero_agent.utils.text import smart_format
@@ -34,6 +35,7 @@ def _make_mock_client(responses: List[MockResponse]):
             self,
             messages: List[Dict[str, Any]],
             tools: Optional[List[Dict[str, Any]]] = None,
+            **kwargs,
         ) -> Generator[str, None, MockResponse]:
             self.system_snapshots.append(self.system)
             self.message_snapshots.append(messages)
@@ -184,19 +186,20 @@ class TestAgentLoop:
         client = _make_mock_client([
             MockResponse(content="done"),
         ])
-        hooks = HookSystem()
+        hooks = ExtensionRuntime(registry=mock_handler.registry)
+        observer = ExtensionContext("test_observer", hooks)
 
         def enter_execution(_context: dict) -> None:
             _set_execution_contract(mock_handler)
 
-        hooks.register("turn_before", enter_execution)
+        observer.on_turn_start(enter_execution)
         loop = AgentLoop(
             client=client,
             handler=mock_handler,
             tools_schema=[],
             max_turns=1,
             verbose=False,
-            hooks=hooks,
+            agent=SimpleNamespace(extensions=hooks),
         )
 
         _exhaust(loop.run(
@@ -1047,7 +1050,7 @@ class TestAgentLoop:
             name = "exploding"
             last_tools = ""
 
-            def chat(self, messages, tools=None):
+            def chat(self, messages, tools=None, **kwargs):
                 raise RuntimeError("boom")
                 yield
 
@@ -1162,6 +1165,7 @@ def _make_recording_client(responses: List[MockResponse]):
             self,
             messages: List[Dict[str, Any]],
             tools: Optional[List[Dict[str, Any]]] = None,
+            **kwargs,
         ) -> Generator[str, None, MockResponse]:
             self.calls.append([dict(m) for m in messages])
             if self._call_count >= len(self._responses):

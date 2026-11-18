@@ -10,7 +10,7 @@ from zero_agent.core.agent import PromptAssembly, PromptBlock, ZeroAgent
 from zero_agent.core.handler import BaseHandler
 from zero_agent.core.config import AgentConfig, LLMBackendConfig, _config_mtime
 from zero_agent.core.exceptions import ConfigError
-from zero_agent.core.hooks import HookSystem
+from zero_agent.extensions.context import ExtensionContext
 from zero_agent.core.localization import PROMPT_CAPABILITY_FILE_DELIVERY
 from zero_agent.core.types import (
     EvidenceLedger,
@@ -78,20 +78,28 @@ class TestZeroAgentBackends:
             def reconfigure(self, config) -> None:
                 self.reconfigured.append(config)
 
+            def start_agent(self, context) -> None:
+                pass
+
+            def finish_agent(self, context) -> None:
+                pass
+
+            def start_turn_metadata(self, context) -> None:
+                pass
+
+            def finish_turn_metadata(self, context) -> None:
+                pass
+
+            def start_tool(self, context):
+                return None
+
+            def finish_tool(self, observation, context) -> None:
+                pass
+
         tracer = FakeTracer()
         monkeypatch.setattr(
             "zero_agent.plugins.langfuse_tracing.LangfuseTracer.from_config",
             lambda config: tracer,
-        )
-        registered = []
-
-        def register(hooks, **kwargs):
-            registered.append(kwargs["tracer"])
-            return True
-
-        monkeypatch.setattr(
-            "zero_agent.plugins.langfuse_tracing.register",
-            register,
         )
         from zero_agent.llm.factory import LLMFactory
 
@@ -109,7 +117,7 @@ class TestZeroAgentBackends:
 
         agent = ZeroAgent(config=multi_backend_config)
 
-        assert registered == [tracer]
+        assert agent.extensions.services["langfuse_tracer"] is tracer
 
 
         assert captured == [tracer]
@@ -137,14 +145,28 @@ class TestZeroAgentBackends:
             def reconfigure(self, new_config) -> None:
                 self.reconfigured.append(new_config)
 
+            def start_agent(self, context) -> None:
+                pass
+
+            def finish_agent(self, context) -> None:
+                pass
+
+            def start_turn_metadata(self, context) -> None:
+                pass
+
+            def finish_turn_metadata(self, context) -> None:
+                pass
+
+            def start_tool(self, context):
+                return None
+
+            def finish_tool(self, observation, context) -> None:
+                pass
+
         tracer = FakeTracer()
         monkeypatch.setattr(
             "zero_agent.plugins.langfuse_tracing.LangfuseTracer.from_config",
             lambda current: tracer,
-        )
-        monkeypatch.setattr(
-            "zero_agent.plugins.langfuse_tracing.register",
-            lambda hooks, **kwargs: True,
         )
         monkeypatch.setattr(
             "zero_agent.core.agent.LLMFactory.create_all_sessions",
@@ -556,8 +578,6 @@ class TestZeroAgentConfigReload:
         monkeypatch,
         tmp_path,
     ) -> None:
-        import zero_agent.plugins.langfuse_tracing as langfuse_plugin
-
         config_path = tmp_path / "config.yaml"
         _write_reload_config(config_path, workspace=tmp_path / "workspace")
         config = AgentConfig.from_yaml(config_path)
@@ -591,19 +611,10 @@ class TestZeroAgentConfigReload:
                 pass
 
         tracer = FakeTracer()
-        register_results = []
-        original_register = langfuse_plugin.register
-
-        def register(hooks, **kwargs):
-            result = original_register(hooks, **kwargs)
-            register_results.append(result)
-            return result
-
         monkeypatch.setattr(
             "zero_agent.plugins.langfuse_tracing.LangfuseTracer.from_config",
             lambda current: tracer,
         )
-        monkeypatch.setattr("zero_agent.plugins.langfuse_tracing.register", register)
         factory_tracers = []
         monkeypatch.setattr(
             "zero_agent.core.agent.LLMFactory.create_all_sessions",
@@ -629,7 +640,6 @@ class TestZeroAgentConfigReload:
         assert agent.reload_config() is True
         assert factory_tracers == [None, tracer]
         assert tracer.reconfigured == [agent.config]
-        assert register_results == [False, True]
         assert getattr(tracer, "_hook_handlers", None) is not None
 
     def test_invalid_yaml_and_factory_failure_roll_back_all_state(
@@ -845,6 +855,52 @@ class TestZeroAgentConfigReload:
         )
         assert "执行" in code_run["function"]["description"]
 
+    def test_reload_rebuilds_registry_when_sandbox_mode_changes(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        config_path = tmp_path / "config.yaml"
+        workspace = tmp_path / "workspace"
+
+        def write(sandbox: str) -> None:
+            config_path.write_text(
+                f"""
+default_backend: primary
+workspace_dir: {workspace}
+memory_dir: {workspace}/memory
+extensions:
+  sandbox: {sandbox}
+llm_backends:
+  primary:
+    provider: openai
+    api_key: sk-primary
+    api_base: https://primary.invalid/v1
+    model: gpt-4o
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+        write("off")
+        config = AgentConfig.from_yaml(config_path)
+        monkeypatch.setattr(
+            "zero_agent.core.agent.LLMFactory.create_all_sessions",
+            lambda current: {
+                "primary": _ReloadClient(current.llm_backends["primary"]),
+            },
+        )
+        agent = ZeroAgent(config=config)
+        old_registry = agent.registry
+        baseline = _config_mtime[str(config_path)]
+
+        write("macos")
+        _bump_mtime(config_path, baseline)
+
+        assert agent.reload_config() is True
+        assert agent.config.sandbox_mode == "macos"
+        # code_run 的沙箱模式由 registry 构建时的 config 决定，必须重建才生效
+        assert agent.registry is not old_registry
+
     def test_apply_pending_runtime_config_is_noop_without_pending(
         self,
         tmp_path,
@@ -1037,29 +1093,60 @@ class TestZeroAgentHooks:
             parameters={"type": "object", "properties": {}},
             handler=file_read_handler,
             evidence_kind="read",
+            effects=("read",),
+        ))
+        registry.register(ToolDefinition(
+            name="complete_task",
+            description="",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda args, _response, _handler: None,
+            evidence_kind="system",
+            effects=("control",),
         ))
 
         events: list[tuple[str, dict]] = []
-        hooks = HookSystem()
-        for event in hooks._handlers:
-            hooks.register(event, lambda ctx, event=event: events.append((event, ctx)))
 
-        agent = ZeroAgent(config=config, registry=registry, hooks=hooks)
+        agent = ZeroAgent(config=config, registry=registry)
+        observer = ExtensionContext("test_observer", agent.extensions)
+        observer.on_agent_start(
+            lambda ctx: events.append(("agent_start", ctx))
+        )
+        observer.on_turn_start(
+            lambda ctx: events.append(("turn_start", ctx))
+        )
+        observer.on_llm_before(
+            lambda ctx: events.append(("llm_before", ctx))
+        )
+        observer.on_llm_after(
+            lambda ctx: events.append(("llm_after", ctx))
+        )
+        observer.on_tool_before(
+            lambda ctx: events.append(("tool_before", ctx))
+        )
+        observer.on_tool_after(
+            lambda ctx: events.append(("tool_after", ctx))
+        )
+        observer.on_turn_end(
+            lambda ctx: events.append(("turn_end", ctx))
+        )
+        observer.on_agent_end(
+            lambda ctx: events.append(("agent_end", ctx))
+        )
+
         exit_reason = _exhaust(agent.run("hello"))
         event_names = [event for event, _ctx in events]
 
         assert exit_reason.status is TerminalStatus.COMPLETED
         assert exit_reason.certificate is not None
         assert agent.loop is not None
-        assert agent.loop.hooks is hooks
-        assert "agent_before" in event_names
+        assert "agent_start" in event_names
         assert "llm_before" in event_names
         assert "llm_after" in event_names
         assert "tool_before" in event_names
         assert "tool_after" in event_names
-        assert "turn_before" in event_names
-        assert event_names.count("turn_after") == 2
-        assert event_names[-1] == "agent_after"
+        assert "turn_start" in event_names
+        assert event_names.count("turn_end") == 2
+        assert event_names[-1] == "agent_end"
         tool_after_ctx = next(ctx for event, ctx in events if event == "tool_after")
         assert tool_after_ctx["result"] == "content from config.py"
         assert '<task_control state="open">' in fake_client.system_snapshots[0]
@@ -1679,7 +1766,7 @@ class _FakeClient:
         self.calls = []
         self.system_snapshots = []
 
-    def chat(self, messages, tools=None):
+    def chat(self, messages, tools=None, **kwargs):
         self.system_snapshots.append(self.system)
         self.calls.append(messages)
         if self._call_count >= len(self._responses):

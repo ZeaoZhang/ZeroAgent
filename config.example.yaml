@@ -23,6 +23,25 @@ memory_dir: ./memory
 sessions_dir: ./workspace/sessions
 log_dir: null
 
+# Extension system (plugins / skills / MCP).
+# Plugins live in <home>/extensions/, skills in <home>/skills/,
+# MCP servers in <home>/mcp.json. Default home is ~/.zeroagent.
+extensions:
+  enabled: true
+  home: ~/.zeroagent
+  # Extra paths that require human approval before the agent writes them.
+  # Writes under ~/.zeroagent/{skills,extensions,mcp.json} are already protected:
+  # the agent pauses and asks the user; approval is bound to the exact call, and
+  # permission_gate adds a per-task, per-path scope so repeated edits to the same
+  # file are not re-asked within 600 seconds. Writes inside workspace_dir are
+  # never gated.
+  protected_writes: []
+  # Optional process sandbox for code_run: off | auto | macos | linux.
+  # "auto" picks sandbox-exec on macOS and bwrap on Linux; unsupported
+  # platforms degrade to no isolation instead of failing the command.
+  # Takes effect on config reload (registry rebuild); enabled/home need a restart.
+  sandbox: off
+
 # Optional local LiteLLM model price/context-window cache.
 # litellm_model_cost_map: ./model_prices_and_context_window.json
 

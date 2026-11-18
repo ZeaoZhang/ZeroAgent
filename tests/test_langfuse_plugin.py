@@ -7,7 +7,15 @@ from types import SimpleNamespace
 import litellm
 
 import zero_agent.plugins.langfuse_tracing as plugin
-from zero_agent.core.hooks import HookSystem
+from zero_agent.extensions.context import ExtensionContext
+from zero_agent.extensions.runtime import ExtensionRuntime
+from zero_agent.tools.registry import ToolRegistry
+
+
+def _runtime(tracer) -> ExtensionRuntime:
+    runtime = ExtensionRuntime(registry=ToolRegistry())
+    runtime.services["langfuse_tracer"] = tracer
+    return runtime
 
 
 class FakeObservation:
@@ -169,7 +177,7 @@ class TestLangfusePlugin:
         self, monkeypatch
     ) -> None:
         tracer = RecordingTracer()
-        hooks = HookSystem()
+        runtime = _runtime(tracer)
         sentinel_success = ["existing-success"]
         sentinel_failure = ["existing-failure"]
         sentinel_callbacks = ["existing-callback"]
@@ -177,46 +185,46 @@ class TestLangfusePlugin:
         monkeypatch.setattr(litellm, "failure_callback", sentinel_failure)
         monkeypatch.setattr(litellm, "callbacks", sentinel_callbacks, raising=False)
 
-        result = plugin.register(hooks, config=_config(), tracer=tracer)
+        plugin.setup(ExtensionContext("langfuse_tracing", runtime))
 
-        assert result is True
-        assert set(event for event, handlers in hooks._handlers.items() if handlers) == {
-            "agent_before",
-            "turn_before",
+        assert {
+            event for event, callbacks in runtime._notify.items() if callbacks
+        } == {
+            "agent_start",
+            "turn_start",
             "tool_before",
             "tool_after",
-            "turn_after",
-            "agent_after",
+            "turn_end",
+            "agent_end",
         }
         assert litellm.success_callback is sentinel_success
         assert litellm.failure_callback is sentinel_failure
         assert litellm.callbacks is sentinel_callbacks
 
-        hooks.trigger("agent_before", {"task": "inspect"})
-        hooks.trigger("tool_before", {"tool_name": "file_read", "args": {}})
-        hooks.trigger("tool_after", {"tool_name": "file_read", "result": "ok"})
-        hooks.trigger("agent_after", {"turns": 1})
+        runtime.notify("agent_start", {"task": "inspect"})
+        runtime.notify("tool_before", {"tool_name": "file_read", "args": {}})
+        runtime.notify("tool_after", {"tool_name": "file_read", "result": "ok"})
+        runtime.notify("agent_end", {"turns": 1})
         assert len(tracer.agent_contexts) == 2
         assert len(tracer.tool_contexts) == 2
 
-    def test_register_is_idempotent_for_same_tracer(self) -> None:
+    def test_setup_registers_each_event_once(self) -> None:
         tracer = RecordingTracer()
-        hooks = HookSystem()
+        runtime = _runtime(tracer)
 
-        assert plugin.register(hooks, config=_config(), tracer=tracer) is True
-        assert plugin.register(hooks, config=_config(), tracer=tracer) is True
+        plugin.setup(ExtensionContext("langfuse_tracing", runtime))
 
         assert {
             event: len(callbacks)
-            for event, callbacks in hooks._handlers.items()
+            for event, callbacks in runtime._notify.items()
             if callbacks
         } == {
-            "agent_before": 1,
-            "turn_before": 1,
+            "agent_start": 1,
+            "turn_start": 1,
             "tool_before": 1,
             "tool_after": 1,
-            "turn_after": 1,
-            "agent_after": 1,
+            "turn_end": 1,
+            "agent_end": 1,
         }
 
     def test_finish_agent_closes_pending_tools_and_sanitizes_terminal(self, monkeypatch) -> None:
@@ -296,14 +304,11 @@ class TestLangfusePlugin:
         tracer.start_agent({"task": "inspect"})
         tracer.finish_agent({"turns": 1})
 
-    def test_register_returns_false_without_langfuse_or_config(self, monkeypatch) -> None:
-        hooks = HookSystem()
-        monkeypatch.setattr(plugin, "_get_langfuse", lambda: None)
-        assert plugin.register(hooks) is False
+    def test_setup_without_tracer_is_noop(self) -> None:
+        runtime = ExtensionRuntime(registry=ToolRegistry())
+        plugin.setup(ExtensionContext("langfuse_tracing", runtime))
 
-        monkeypatch.setattr(plugin, "_get_langfuse", lambda: FakeLangfuse)
-        monkeypatch.setattr(plugin, "_get_config", lambda *args: None)
-        assert plugin.register(hooks) is False
+        assert not any(runtime._notify.values())
 
     def test_environment_fallback_without_explicit_config(self, monkeypatch) -> None:
         monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-env")

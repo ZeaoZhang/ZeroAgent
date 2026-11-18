@@ -1,8 +1,9 @@
 """Project Mode plugin — cross-session project context persistence.
 
-Mechanism: registers an agent_before hook that appends L1 project context
-(rule + memory file pointer + closing discipline) to the last user message
-when a project is active.
+Mechanism: registers an ``on_llm_request`` transform that appends L1 project
+context (rule + memory file pointer + closing discipline) to the last user
+message when a project is active. The transform runs on a deep-copied request,
+so the injection never enters session history.
 
 Anchor file: <workspace_dir>/projects/.active_project.<pid>
   - PID keying: each agent process activates its own project
@@ -12,8 +13,6 @@ Anchor file: <workspace_dir>/projects/.active_project.<pid>
 
 import os
 from typing import Any, Optional
-
-from zero_agent.core.hooks import EVENT_AGENT_BEFORE
 
 
 def _workspace_dir_from_ctx(ctx: dict) -> str:
@@ -132,11 +131,25 @@ def _build_injection(ctx, name: str) -> str:
     )
 
 
-def _on_agent_before(ctx: dict) -> None:
-    """agent_before hook: inject project context when a project is active."""
+def _hook_context(ctx: Any) -> dict:
+    """把扩展上下文适配成现有项目模式辅助函数需要的字典."""
+    agent = getattr(getattr(ctx, "runtime", None), "agent", None)
+    return {"handler": getattr(agent, "handler", None)}
+
+
+def _inject_project_context(request: Any, ctx: dict) -> Any:
+    """活跃项目时把项目上下文追加到最后一条 user 消息.
+
+    Args:
+        request: LlmRequest（session 已深拷贝）.
+        ctx: 含 handler 的辅助上下文字典.
+
+    Returns:
+        变换后的 LlmRequest；无活跃项目时原样返回.
+    """
     name = _active_project(ctx)
     if not name:
-        return
+        return request
 
     # Ensure projects dir exists and clean stale anchors
     os.makedirs(_projects_dir(ctx), exist_ok=True)
@@ -144,34 +157,48 @@ def _on_agent_before(ctx: dict) -> None:
 
     injection = _build_injection(ctx, name)
 
-    # Get the last message from ctx
-    messages = ctx.get("messages")
+    messages = request.messages
     if not messages or not isinstance(messages, list):
-        return
+        return request
 
-    last_msg = messages[-1] if messages else None
-    if last_msg is None:
-        return
+    # 只改最后一条 user 消息；工具结果轮次的尾部可能是 role=tool，
+    # 往那里追加文本会生成非法消息序列。
+    last_index = None
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if isinstance(message, dict) and message.get("role") == "user":
+            last_index = index
+            break
+    if last_index is None:
+        return request
 
-    content = last_msg.get("content") if isinstance(last_msg, dict) else None
+    last_msg = messages[last_index]
+    content = last_msg.get("content")
     if content is None:
-        return
+        return request
 
+    updated = dict(last_msg)
     if isinstance(content, str):
-        last_msg["content"] = content + injection
+        updated["content"] = content + injection
     elif isinstance(content, list):
         # Multimodal: append a text block
-        content.append({"type": "text", "text": injection})
+        updated["content"] = [*content, {"type": "text", "text": injection}]
+    else:
+        return request
+
+    updated_messages = list(messages)
+    updated_messages[last_index] = updated
+    return request.replace(messages=updated_messages)
 
 
-def register(hook_system: Any) -> bool:
-    """Register the project mode hook.
+def setup(ctx: Any) -> None:
+    """安装 project_mode 扩展.
 
     Args:
-        hook_system: HookSystem instance.
-
-    Returns:
-        True (always — this plugin has no optional dependencies).
+        ctx: 插件上下文（ExtensionContext）.
     """
-    hook_system.register(EVENT_AGENT_BEFORE, _on_agent_before)
-    return True
+
+    @ctx.on_llm_request
+    def inject(request: Any) -> Any:
+        """在请求副本上注入项目上下文."""
+        return _inject_project_context(request, _hook_context(ctx))

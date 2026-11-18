@@ -7,6 +7,7 @@ LiteLLMSession 封装 litellm.completion()，用一套代码处理所有 LLM 提
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import json
 import logging
@@ -14,7 +15,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Optional
 from urllib.parse import urlsplit
 
 import litellm
@@ -426,14 +427,45 @@ class LiteLLMSession:
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
+        *,
+        transform: Optional[Callable[[Any], Any]] = None,
     ) -> Generator[str, None, MockResponse]:
-        """发送消息到 LLM 并获取流式响应."""
+        """发送消息到 LLM 并获取流式响应.
+
+        ``transform`` 接收 :class:`LlmRequest`，在完整历史组装完成、provider
+        转换之前执行。原始消息先进入 history，变换只作用于本次 wire 请求，
+        因此插件改写不会污染后续轮次。
+        """
         request_started = time.monotonic()
         with self.lock:
             normalized_messages = self._normalize_incoming_messages(messages)
             self.history.extend(normalized_messages)
             self._trim_history()
-            full_messages = self._build_messages()
+            history_messages = self._history_without_session_system()
+            system_prompt = self.system
+
+        if transform is not None:
+            # 只把当前轮消息交给插件，前缀历史保持原对象；这样既隔离了
+            # 跨轮状态，也不必每轮深拷贝整段历史。
+            current_count = min(len(normalized_messages), len(history_messages))
+            if current_count:
+                prior = history_messages[:-current_count]
+                current = history_messages[-current_count:]
+            else:
+                prior, current = history_messages, []
+            current, tools, system_prompt = self._apply_request_transform(
+                current, tools, transform, system_prompt,
+            )
+            full_messages: List[Dict[str, Any]] = []
+            if system_prompt:
+                full_messages.append(
+                    {"role": "system", "content": system_prompt},
+                )
+            full_messages.extend(prior)
+            full_messages.extend(current)
+        else:
+            full_messages = self._assemble_messages()
+        full_messages = self._prepare_messages(full_messages)
 
         tools = self._sanitize_tools(tools)
         _logger.info(
@@ -945,20 +977,19 @@ class LiteLLMSession:
             return self._fix_messages(msgs_claude_to_openai(messages))
         return messages
 
-    def _build_messages(self) -> List[Dict[str, Any]]:
-        """从历史构建完整的消息列表，包含 system prompt.
-
-        自动修复消息格式并标记缓存.
-
-        Returns:
-            完整的消息列表.
-        """
+    def _assemble_messages(self) -> List[Dict[str, Any]]:
+        """从历史组装原始消息列表（system + history，不做 provider 修复）."""
         messages: List[Dict[str, Any]] = []
         if self.system:
             messages.append({"role": "system", "content": self.system})
         messages.extend(self._history_without_session_system())
+        return messages
 
-        # 修复 Anthropic/OpenAI 消息格式问题
+    def _prepare_messages(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """修复消息格式并标记缓存，准备发送给 provider."""
         messages = self._fix_messages(messages)
 
         # 标记 Anthropic 缓存
@@ -967,6 +998,48 @@ class LiteLLMSession:
         )
 
         return messages
+
+    def _build_messages(self) -> List[Dict[str, Any]]:
+        """从历史构建完整的消息列表，包含 system prompt.
+
+        自动修复消息格式并标记缓存.
+
+        Returns:
+            完整的消息列表.
+        """
+        return self._prepare_messages(self._assemble_messages())
+
+    def _apply_request_transform(
+        self,
+        current_messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        transform: Callable[[Any], Any],
+        system_prompt: Optional[str],
+    ) -> tuple[List[Dict[str, Any]], Optional[List[Dict[str, Any]]], Optional[str]]:
+        """对当前轮消息应用扩展变换，不影响 history.
+
+        Args:
+            current_messages: 本轮的原始消息（history 尾部）.
+            tools: 工具 schema 列表.
+            transform: ``ExtensionRuntime.run_llm_request``.
+            system_prompt: 当前 system prompt.
+
+        Returns:
+            ``(变换后的本轮消息, 变换后的工具 schema, 变换后的 system prompt)``.
+        """
+        from zero_agent.extensions.events import LlmRequest
+
+        request = LlmRequest(
+            model=self.config.model,
+            messages=copy.deepcopy(current_messages),
+            tools=copy.deepcopy(list(tools or [])),
+            system_prompt=system_prompt,
+        )
+        updated = transform(request)
+        if not isinstance(updated, LlmRequest):
+            return current_messages, tools, system_prompt
+
+        return list(updated.messages), updated.tools, updated.system_prompt
 
     @staticmethod
     def _completed_task_pairs(history: List[Dict[str, Any]]) -> List[tuple[str, str]]:

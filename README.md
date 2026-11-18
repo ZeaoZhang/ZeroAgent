@@ -11,6 +11,7 @@ ZeroAgent 是一个基于 `litellm` 的可复用自主 Agent 框架，采用 gen
 - **文本工具调用回退**: 对不支持原生 tool calling 的模型，可从 XML/JSON 文本中解析工具调用。
 - **记忆与压缩**: 分层记忆管理、历史标签压缩、消息裁剪和 OCR/视觉记忆扩展。
 - **Hook 与插件**: 8 个标准事件钩子，包含 Langfuse tracing 插件示例。
+- **扩展体系**: `~/.zeroagent/extensions/` 下的插件提供工具、提示词与三类事件（通知/变换/门控）；外部 skill 目录原样复用，MCP 走单个 `mcp.json`。
 - **UltraPlan 编排**: Python 脚本多 agent 编排，支持 Explore/Sweep/Hunt/Improve 模式。
 - **持续子 Agent**: 基于文件 I/O 的持续子 agent 协作，支持 reply.txt 轮询和 conductor UI。
 - **ACP 协议桥**: JSON-RPC over stdio 协议桥，支持外部编辑器/IDE 集成。
@@ -286,6 +287,7 @@ zero_agent/
   core/        # Agent 编排、配置、handler、loop、hooks、异常和类型
   llm/         # LiteLLM session、failover、factory、SSE parser、格式转换
   tools/       # 工具注册表；默认核心工具和可选扩展工具模块
+  extensions/  # 扩展运行时：插件 / skill 索引 / MCP，含三类事件语义
   memory/      # 记忆管理与 L4 会话压缩
   reflect/     # 反射式运行、目标模式、调度、subagent/team worker
   frontends/   # Web2/Tauri desktop bridge、静态前端和 launcher
@@ -300,6 +302,7 @@ docs/          # quickstart、architecture、reflect 文档
 
 - [Quick Start](docs/quickstart.md)
 - [Architecture](docs/architecture.md)
+- [Extension Design](docs/extension-design.md)
 - [Reflect](docs/reflect.md)
 - [Memory evaluation](docs/memory-evaluation.md)
 - [Contributing](CONTRIBUTING.md)

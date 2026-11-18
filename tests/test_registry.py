@@ -203,3 +203,40 @@ def test_with_builtins_registers_vision_when_backend_supports_it() -> None:
     registry = ToolRegistry.with_builtins(config)
 
     assert "vision" in {tool.name for tool in registry.list_all()}
+
+
+def test_tool_definition_defaults_to_unknown_effects() -> None:
+    td = ToolDefinition(
+        name="plugin_tool",
+        description="",
+        parameters={"type": "object", "properties": {}},
+        handler=_stub_handler,
+    )
+    assert td.effects == ("unknown",)
+    assert td.write_path_keys == ()
+    assert td.execute_code_keys == ()
+
+
+def test_builtin_tools_declare_effects(tmp_path) -> None:
+    config = AgentConfig(
+        llm_backends={
+            "default": LLMBackendConfig(
+                name="default",
+                provider="openai",
+                api_key="k",
+                api_base="https://api.openai.com/v1",
+                model="gpt-test",
+            )
+        },
+        default_backend="default",
+        workspace_dir=str(tmp_path / "ws"),
+        memory_dir=str(tmp_path / "mem"),
+    )
+    registry = ToolRegistry.with_builtins(config)
+
+    assert registry.get("file_write").effects == ("write",)
+    assert registry.get("file_write").write_path_keys == ("path",)
+    assert registry.get("file_patch").effects == ("write",)
+    assert registry.get("code_run").effects == ("execute",)
+    assert "script_path" in registry.get("code_run").execute_code_keys
+    assert registry.get("file_read").effects == ("read",)

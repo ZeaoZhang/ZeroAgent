@@ -41,3 +41,11 @@ class ToolError(ZeroAgentError):
     由工具 handler 抛出，BaseHandler.dispatch() 捕获后转为结构化
     错误数据作为 tool_result 回传给 LLM，让模型自行纠正参数.
     """
+
+
+class ExtensionBootstrapError(ZeroAgentError):
+    """扩展运行时或安全类扩展无法安装.
+
+    安全类扩展（permission_gate）安装失败时必须让启动显式失败，
+    不能在没有写入保护的情况下继续运行。
+    """

@@ -11,7 +11,6 @@ core/agent.py           ←── ZeroAgent: 组装所有组件
         ├── core/config.py     ←── AgentConfig: YAML/ENV/程序化
         ├── core/loop.py       ←── AgentLoop: generator-based 事件循环
         ├── core/handler.py    ←── BaseHandler: 工具执行 + 计划模式 + 轮次管理
-        ├── core/hooks.py      ←── HookSystem: 8 事件钩子 + 插件发现
         ├── core/types.py      ←── StepOutcome, TurnResult
         ├── core/exceptions.py ←── ZeroAgentError 层次
         │
@@ -26,6 +25,12 @@ core/agent.py           ←── ZeroAgent: 组装所有组件
         ├── tools/             ←── 工具系统
         │   ├── registry.py    ←── ToolRegistry + ToolDefinition
         │   └── builtin/       ←── code, file, memory, user, web
+        │
+        ├── extensions/        ←── 扩展运行时（插件 / skill / MCP）
+        │   ├── runtime.py     ←── 发现、加载、三类事件、注册归属
+        │   ├── context.py     ←── 面向插件的稳定 API
+        │   ├── events.py      ←── 通知 / 变换 / 门控契约
+        │   └── builtin/       ←── permission_gate, skills_index, mcp_client
         │
         ├── memory/            ←── 记忆管理
         │   └── manager.py     ←── L0-L4 分层记忆
@@ -74,6 +79,29 @@ LLM 返回 tool_calls → ToolRegistry.dispatch()
        ├── XML <tool_use> 格式
        └── JSON 数组格式
 ```
+
+### 扩展体系
+
+```
+~/.zeroagent/
+  ├── extensions/<name>.py 或 <name>/__init__.py   → 插件，导出 setup(ctx)
+  ├── skills/<name>/SKILL.md                       → 只读技能，正文按需
+  └── mcp.json                                     → MCP server（单个文件）
+```
+
+加载时机：`ZeroAgent.__init__` 中，内置工具注册之后、handler 创建之前。
+插件按文件名字典序加载，单个失败只跳过自身。
+
+三类扩展点（语义不同，不可混用）：
+
+| 类别 | 事件 | 失败时 |
+| --- | --- | --- |
+| 通知 | `agent_start / turn_start / llm_before / llm_after / tool_before / tool_after / turn_end / agent_end` | 记录后继续 |
+| 变换 | `llm_request / tool_result / prompt_block` | 退回原值 |
+| 门控 | `tool_call` | **fail-closed：判定失败即拒绝** |
+
+注册归属：插件注册的工具记录 owner，卸载或 registry 重建时可整体撤销与重放。
+详见 [`docs/extension-design.md`](extension-design.md)。
 
 ### LLM 后端选择
 

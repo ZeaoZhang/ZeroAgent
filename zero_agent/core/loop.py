@@ -13,7 +13,6 @@ import os
 import re
 from typing import TYPE_CHECKING, Any, Callable, Dict, Generator, List, Optional
 
-from zero_agent.core.hooks import HookSystem
 from zero_agent.core.interruption import classify_interruption
 from zero_agent.core.interfaces import LLMClient, ToolDispatcher
 from zero_agent.core.types import StepAction, StepOutcome, TerminalEvent, TerminalStatus
@@ -48,7 +47,6 @@ class AgentLoop:
         tools_schema: List[Dict[str, Any]],
         max_turns: int = 80,
         verbose: bool = True,
-        hooks: Optional[HookSystem] = None,
         agent: Optional[ZeroAgent] = None,  # type: ignore[name-defined]  # TYPE_CHECKING
     ) -> None:
         """初始化 AgentLoop.
@@ -59,15 +57,13 @@ class AgentLoop:
             tools_schema: LLM 工具 schema 列表（OpenAI function-calling 格式）.
             max_turns: 最大轮次限制.
             verbose: True 时输出详细工具调用信息.
-            hooks: 可选的 HookSystem 实例，用于事件钩子.
-            agent: 可选的 ZeroAgent 引用，用于配置热重载.
+            agent: 可选的 ZeroAgent 引用，用于配置热重载与扩展运行时.
         """
         self.client = client
         self.handler = handler
         self.tools_schema = tools_schema
         self.max_turns = max_turns
         self.verbose = verbose
-        self.hooks = hooks
         self.handler.loop = self
         self._agent = agent
         self.system_prompt_factory: Optional[Callable[[], str]] = None
@@ -118,7 +114,7 @@ class AgentLoop:
         self._record_user_history(initial_content)
 
         agent_config = getattr(self._agent, "config", None)
-        self._trigger_hook("agent_before", {
+        self._notify("agent_start", {
             "task": user_input,
             "user_input": user_input,
             "model": self._model_name(),
@@ -127,6 +123,7 @@ class AgentLoop:
             "tools": self.tools_schema,
             "max_turns": self.handler.max_turns,
             "session_id": getattr(agent_config, "_desktop_session_id", None),
+            "handler": self.handler,
         })
 
         try:
@@ -147,25 +144,41 @@ class AgentLoop:
                 if turn % 10 == 0:
                     self._clear_tool_cache()
 
-                self._trigger_hook("turn_before", {
+                self._notify("turn_start", {
                     "turn": turn,
                     "messages": messages,
                     "tools": self.tools_schema,
                     "model": self._model_name(),
+                    "handler": self.handler,
                 })
                 if self.system_prompt_factory is not None:
                     prompt = self.system_prompt_factory()
                     if self.client.system != prompt:
                         self.client.system = prompt
-                self._trigger_hook("llm_before", {
+                self._notify("llm_before", {
                     "turn": turn,
                     "messages": messages,
                     "tools": self.tools_schema,
                     "model": self._model_name(),
                     "system_prompt": self.client.system,
+                    "handler": self.handler,
                 })
+
+                # 请求变换在 LLM session 组装完整请求后执行，只作用于本次 wire
+                # 请求，不写回 history。没有订阅者时不传参数，保持零开销。
+                extensions = self._extensions()
+                transform = (
+                    extensions.run_llm_request
+                    if extensions is not None
+                    and extensions.has_llm_request_subscribers
+                    else None
+                )
+                chat_kwargs: Dict[str, Any] = {}
+                if transform is not None:
+                    chat_kwargs["transform"] = transform
+
                 response_gen = self.client.chat(
-                    messages=messages, tools=self.tools_schema,
+                    messages=messages, tools=self.tools_schema, **chat_kwargs,
                 )
 
                 if self.verbose:
@@ -323,13 +336,14 @@ class AgentLoop:
                             "id": tool_call_id,
                         })
 
-                self._trigger_hook("llm_after", {
+                self._notify("llm_after", {
                     "turn": turn,
                     "response": response,
                     "tool_calls": tool_calls,
                     "usage": self._usage_from_response(response),
                     "stop_reason": getattr(response, "stop_reason", ""),
                     "model": self._model_name(),
+                    "handler": self.handler,
                 })
 
                 tool_results: List[Dict[str, Any]] = []
@@ -449,7 +463,7 @@ class AgentLoop:
                         response, tool_calls, tool_results, turn,
                         "", turn_terminal,
                     )
-                    self._trigger_hook("turn_after", {
+                    self._notify("turn_end", {
                         "turn": turn,
                         "response": response,
                         "tool_calls": tool_calls,
@@ -457,6 +471,7 @@ class AgentLoop:
                         "next_prompt": "",
                         "terminal": turn_terminal,
                         "model": self._model_name(),
+                        "handler": self.handler,
                     })
                     terminal = turn_terminal
                     break
@@ -470,7 +485,7 @@ class AgentLoop:
                     self.handler.turn_end_callback(
                         response, tool_calls, tool_results, turn, "", terminal,
                     )
-                    self._trigger_hook("turn_after", {
+                    self._notify("turn_end", {
                         "turn": turn,
                         "response": response,
                         "tool_calls": tool_calls,
@@ -478,6 +493,7 @@ class AgentLoop:
                         "next_prompt": "",
                         "terminal": terminal,
                         "model": self._model_name(),
+                        "handler": self.handler,
                     })
                     break
 
@@ -513,7 +529,7 @@ class AgentLoop:
                         text="Stopped after three consecutive turns without new evidence.",
                         turn=turn,
                     )
-                    self._trigger_hook("turn_after", {
+                    self._notify("turn_end", {
                         "turn": turn,
                         "response": response,
                         "tool_calls": tool_calls,
@@ -521,6 +537,7 @@ class AgentLoop:
                         "next_prompt": "",
                         "terminal": terminal,
                         "model": self._model_name(),
+                        "handler": self.handler,
                     })
                     break
                 if stalled_turns == 2:
@@ -531,7 +548,7 @@ class AgentLoop:
                     )
                 messages = self._build_next_messages(next_prompt, tool_results)
 
-                self._trigger_hook("turn_after", {
+                self._notify("turn_end", {
                     "turn": turn,
                     "response": response,
                     "tool_calls": tool_calls,
@@ -539,6 +556,7 @@ class AgentLoop:
                     "next_prompt": next_prompt,
                     "terminal": None,
                     "model": self._model_name(),
+                    "handler": self.handler,
                 })
         except Exception as exc:
             terminal = TerminalEvent(
@@ -557,10 +575,11 @@ class AgentLoop:
                 turn=turn,
             )
 
-        self._trigger_hook("agent_after", {
+        self._notify("agent_end", {
             "turns": turn,
             "terminal": terminal,
             "model": self._model_name(),
+            "handler": self.handler,
         })
         return terminal
 
@@ -680,12 +699,20 @@ class AgentLoop:
         yield "```\n"
         return outcome
 
-    # ---- hook 辅助 ----
+    # ---- 扩展事件辅助 ----
 
-    def _trigger_hook(self, event: str, context: dict) -> None:
-        """触发 hook 并隔离 hook 失败."""
-        if self.hooks:
-            self.hooks.trigger(event, context)
+    def _extensions(self) -> Any:
+        """返回扩展运行时；未装配或扩展关闭时返回 None."""
+        agent = getattr(self, "_agent", None)
+        if agent is None:
+            return None
+        return getattr(agent, "extensions", None)
+
+    def _notify(self, event: str, context: dict) -> None:
+        """把生命周期事件交给扩展运行时；运行时负责隔离回调失败."""
+        extensions = self._extensions()
+        if extensions is not None:
+            extensions.notify(event, context)
 
     def _model_name(self) -> str:
         """获取当前 LLM model 名称."""
@@ -696,7 +723,7 @@ class AgentLoop:
 
     @staticmethod
     def _usage_from_response(response: Any) -> dict:
-        """Return canonical token usage for llm_after hooks."""
+        """Return canonical token usage for llm_after notifications."""
         raw = getattr(response, "raw", None)
         usage = getattr(raw, "usage", None) if raw is not None else None
         if usage is None:

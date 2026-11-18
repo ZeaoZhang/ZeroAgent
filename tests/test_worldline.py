@@ -125,11 +125,62 @@ def test_worldline_import():
             raise
 
 
-def test_worldline_tracking_plugin_register():
-    """worldline_tracking plugin register() succeeds."""
-    from zero_agent.plugins.worldline_tracking import register
-    from zero_agent.core.hooks import HookSystem
+def test_worldline_tracking_plugin_setup():
+    """worldline_tracking setup() registers notification callbacks."""
+    from zero_agent.extensions.context import ExtensionContext
+    from zero_agent.extensions.runtime import ExtensionRuntime
+    from zero_agent.plugins.worldline_tracking import setup
+    from zero_agent.tools.registry import ToolRegistry
 
-    hs = HookSystem()
-    result = register(hs)
-    assert result is True
+    runtime = ExtensionRuntime(registry=ToolRegistry())
+    setup(ExtensionContext("worldline_tracking", runtime))
+    assert len(runtime._notify.get("tool_before", [])) == 1
+    assert len(runtime._notify.get("turn_end", [])) == 1
+
+
+def test_worldline_callbacks_receive_handler_payload(tmp_path, monkeypatch):
+    """tool_before/turn_end 通知必须把 handler 传给 worldline 扩展."""
+    from types import SimpleNamespace
+
+    import zero_agent.plugins.worldline_tracking as worldline
+    from zero_agent.extensions.context import ExtensionContext
+    from zero_agent.extensions.runtime import ExtensionRuntime
+    from zero_agent.tools.registry import ToolRegistry
+
+    calls: list = []
+
+    class FakeStore:
+        def track_pre_edit(self, path):
+            calls.append(("track", path))
+
+        def commit(self, **kwargs):
+            calls.append(("commit", kwargs))
+
+    monkeypatch.setattr(worldline, "_get_store", lambda ctx: FakeStore())
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    target = workspace / "a.txt"
+    target.write_text("x", encoding="utf-8")
+    config = SimpleNamespace(
+        enable_worldline=True,
+        workspace_dir=str(workspace),
+    )
+    handler = SimpleNamespace(
+        parent=SimpleNamespace(config=config),
+        cwd=str(workspace),
+        working={"key_info": "note"},
+        history_info=[],
+    )
+    runtime = ExtensionRuntime(registry=ToolRegistry())
+    worldline.setup(ExtensionContext("worldline_tracking", runtime))
+
+    runtime.notify("tool_before", {
+        "tool_name": "file_write",
+        "args": {"path": "a.txt"},
+        "handler": handler,
+    })
+    runtime.notify("turn_end", {"handler": handler})
+
+    assert calls[0] == ("track", str(target))
+    assert calls[1][0] == "commit"
+    assert calls[1][1]["summary"] == "note"

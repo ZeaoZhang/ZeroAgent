@@ -1,0 +1,549 @@
+"""MCP 接入扩展：读取单个 ``mcp.json``，把外部工具注册进 ToolRegistry.
+
+设计约束（见 ``docs/extension-design.md`` 第七节）:
+
+- 单文件 ``~/.zeroagent/mcp.json``，使用社区标准的 ``mcpServers`` 键.
+- 靠字段形状判断传输方式：有 ``command`` → stdio；有 ``url`` → HTTP（首版未实现）.
+- 支持 ``${ENV_NAME}`` 环境变量替换，凭据只放环境变量.
+- 工具名统一加前缀 ``mcp__<server>__<tool>``，避免与内置工具重名.
+- **不依赖 MCP SDK**：stdio 传输直接按 newline-delimited JSON-RPC 手写，
+  因此未配置 MCP 时进程内不需要任何额外依赖.
+"""
+
+from __future__ import annotations
+
+import atexit
+import json
+import logging
+import os
+import re
+import queue
+import subprocess
+import threading
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+_logger = logging.getLogger("zero_agent.extensions.mcp")
+
+_PROTOCOL_VERSION = "2024-11-05"
+_DEFAULT_TIMEOUT = 10.0
+_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+# 工具名只允许这些字符，超长截断，避免生成非法的 function name
+_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_-]")
+_MAX_TOOL_NAME = 64
+# 暴露给模型的完整名字上限（含 mcp__<server>__ 前缀与冲突后缀）
+_MAX_EXPOSED_NAME = 64
+
+# 进程退出时统一关闭，避免残留子进程
+_live_clients: List["StdioMcpClient"] = []
+
+
+def _close_all() -> None:
+    """关闭全部 MCP 子进程."""
+    for client in list(_live_clients):
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001 - 关闭失败不影响退出
+            pass
+    _live_clients.clear()
+
+
+atexit.register(_close_all)
+
+
+def _expand_env(value: Any) -> Any:
+    """递归替换字符串中的 ``${ENV}``.
+
+    Args:
+        value: 任意 JSON 值.
+
+    Returns:
+        替换后的值；未设置的环境变量替换为空串.
+    """
+    if isinstance(value, str):
+
+        def repl(match: re.Match[str]) -> str:
+            return os.environ.get(match.group(1), "")
+
+        return _ENV_PATTERN.sub(repl, value)
+    if isinstance(value, list):
+        return [_expand_env(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand_env(item) for key, item in value.items()}
+    return value
+
+
+def load_config(home: Optional[Path]) -> Dict[str, Any]:
+    """读取 ``mcp.json``.
+
+    Args:
+        home: 扩展根目录.
+
+    Returns:
+        ``mcpServers`` 映射；文件不存在或损坏时返回空字典.
+    """
+    if home is None:
+        return {}
+    path = Path(home) / "mcp.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _logger.warning("mcp.json 解析失败，已忽略: %s", exc)
+        return {}
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    if not isinstance(servers, dict):
+        return {}
+    return {
+        name: _expand_env(cfg)
+        for name, cfg in servers.items()
+        if isinstance(cfg, dict) and cfg.get("enabled", True) is not False
+    }
+
+
+class _LineReader:
+    """后台按行读取子进程输出，跨平台且不受半行影响.
+
+    之前用 select + readline：文本缓冲已经吃掉数据时 fd 可能不可读，
+    造成假超时；Windows 管道也不支持 select。用线程 + 队列规避这两个问题。
+    """
+
+    _MAX_BUFFERED_LINES = 4096
+
+    def __init__(self, stream: Any) -> None:
+        self._queue: "queue.Queue[Optional[str]]" = queue.Queue(
+            maxsize=self._MAX_BUFFERED_LINES
+        )
+        self._eof = threading.Event()
+        self._thread = threading.Thread(target=self._pump, args=(stream,), daemon=True)
+        self._thread.start()
+
+    def _pump(self, stream: Any) -> None:
+        try:
+            for line in stream:
+                try:
+                    self._queue.put(line, timeout=5)
+                except queue.Full:
+                    # 消费端不读时主动停止，避免内存无界增长
+                    break
+        except Exception:  # noqa: BLE001 - 读取线程异常在取行时统一报告
+            pass
+        finally:
+            self._eof.set()
+            try:
+                self._queue.put_nowait(None)
+            except queue.Full:
+                pass
+
+    def read_line(self, timeout: float) -> str:
+        """读取一行，超时或进程退出时抛异常."""
+        if self._eof.is_set() and self._queue.empty():
+            raise RuntimeError("MCP 进程已退出")
+        try:
+            item = self._queue.get(timeout=timeout)
+        except queue.Empty:
+            if self._eof.is_set():
+                raise RuntimeError("MCP 进程已退出") from None
+            raise TimeoutError("MCP 读取超时") from None
+        if item is None:
+            raise RuntimeError("MCP 进程已退出")
+        return item
+
+
+def sanitize_tool_name(raw: str) -> str:
+    """把远端工具名清洗成合法的 function name.
+
+    Args:
+        raw: 远端工具名.
+
+    Returns:
+        仅含字母数字下划线连字符、长度不超过 64 的名称.
+    """
+    cleaned = _NAME_PATTERN.sub("_", str(raw or "")).strip("_")
+    return (cleaned or "tool")[:_MAX_TOOL_NAME]
+
+
+class StdioMcpClient:
+    """最小的同步 MCP stdio 客户端.
+
+    只覆盖 ``initialize`` / ``tools/list`` / ``tools/call`` 三个方法，
+    足以把外部工具注册进来。
+    """
+
+    def __init__(
+        self,
+        command: str,
+        args: Optional[List[str]] = None,
+        env: Optional[Dict[str, str]] = None,
+        cwd: Optional[str] = None,
+        timeout: float = _DEFAULT_TIMEOUT,
+    ) -> None:
+        """记录启动参数（不启动进程）."""
+        self.command = command
+        self.args = list(args or [])
+        self.env = dict(os.environ)
+        self.env.update({str(k): str(v) for k, v in (env or {}).items()})
+        self.cwd = cwd
+        self.timeout = timeout
+        self._proc: Optional[subprocess.Popen[str]] = None
+        self._reader: Optional[_LineReader] = None
+        self._next_id = 0
+
+    # ---- 进程与协议 -----------------------------------------------------
+
+    def start(self) -> None:
+        """启动子进程并完成 MCP 握手.
+
+        Raises:
+            RuntimeError: 进程启动或握手失败.
+        """
+        try:
+            self._proc = subprocess.Popen(
+                [self.command, *self.args],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=self.env,
+                cwd=self.cwd,
+                text=True,
+                bufsize=1,
+            )
+        except OSError as exc:
+            raise RuntimeError(f"MCP 进程启动失败: {exc}") from exc
+        _live_clients.append(self)
+        self._reader = _LineReader(self._proc.stdout)
+
+        try:
+            self._request(
+                "initialize",
+                {
+                    "protocolVersion": _PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "zeroagent", "version": "0.2.0"},
+                },
+            )
+            self._notify("notifications/initialized", {})
+        except Exception:
+            # 握手失败必须回收子进程，否则会留下常驻孤儿进程
+            self.close()
+            raise
+
+    def close(self) -> None:
+        """终止子进程."""
+        if self._proc is None:
+            return
+        try:
+            if self._proc.stdin is not None:
+                self._proc.stdin.close()
+        except Exception:  # noqa: BLE001 - 关闭管道失败可忽略
+            pass
+        try:
+            self._proc.terminate()
+            self._proc.wait(timeout=3)
+        except Exception:  # noqa: BLE001 - 进程可能已退出
+            try:
+                self._proc.kill()
+                self._proc.wait(timeout=3)
+            except Exception:  # noqa: BLE001
+                pass
+        self._proc = None
+        self._reader = None
+        if self in _live_clients:
+            _live_clients.remove(self)
+
+    def list_tools(self) -> List[Dict[str, Any]]:
+        """列出远端工具.
+
+        Returns:
+            工具定义列表（含 name / description / inputSchema）.
+        """
+        response = self._request("tools/list", {})
+        tools = response.get("tools")
+        return tools if isinstance(tools, list) else []
+
+    def call_tool(self, name: str, arguments: Dict[str, Any]) -> str:
+        """调用远端工具并返回文本结果.
+
+        Args:
+            name: 远端工具名.
+            arguments: 参数字典.
+
+        Returns:
+            拼接后的文本内容；失败时返回带 ``Error:`` 前缀的说明.
+        """
+        try:
+            response = self._request(
+                "tools/call",
+                {"name": name, "arguments": arguments},
+            )
+        except Exception as exc:  # noqa: BLE001 - 工具失败转成可读错误
+            return f"Error: MCP 调用失败: {exc}"
+        return _render_content(response)
+
+    # ---- 内部 -----------------------------------------------------------
+
+    def _write(self, payload: Dict[str, Any]) -> None:
+        """写入一行 JSON-RPC 消息."""
+        proc = self._proc
+        if proc is None or proc.stdin is None:
+            raise RuntimeError("MCP 进程未启动")
+        proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        proc.stdin.flush()
+
+    def _notify(self, method: str, params: Dict[str, Any]) -> None:
+        """发送无需响应的通知."""
+        self._write({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def _request(
+        self,
+        method: str,
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """发送请求并等待匹配 id 的响应.
+
+        Args:
+            method: JSON-RPC 方法名.
+            params: 参数.
+
+        Returns:
+            响应中的 ``result`` 字段.
+
+        Raises:
+            TimeoutError: 超时未收到响应.
+            RuntimeError: 进程退出或返回错误.
+        """
+        self._next_id += 1
+        request_id = self._next_id
+        self._write(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }
+        )
+        deadline = time.monotonic() + self.timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"MCP 请求 {method} 超时")
+            message = self._read_message(remaining)
+            if message.get("id") != request_id:
+                # 通知或其他请求的响应，忽略
+                continue
+            if "error" in message:
+                raise RuntimeError(f"MCP {method} 返回错误: {message['error']}")
+            result = message.get("result")
+            return result if isinstance(result, dict) else {}
+
+    def _read_message(self, timeout: float) -> Dict[str, Any]:
+        """读取一行 JSON-RPC 消息.
+
+        Args:
+            timeout: 最长等待秒数.
+
+        Returns:
+            解析后的消息字典.
+
+        Raises:
+            TimeoutError: 超时.
+            RuntimeError: 进程退出.
+        """
+        reader = self._reader
+        if reader is None:
+            raise RuntimeError("MCP 进程未启动")
+        line = reader.read_line(timeout)
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"MCP 返回了非法 JSON: {line[:200]!r}") from exc
+        return message if isinstance(message, dict) else {}
+
+
+def _render_content(response: Dict[str, Any]) -> str:
+    """把 ``tools/call`` 结果渲染为文本.
+
+    Args:
+        response: ``result`` 字段.
+
+    Returns:
+        文本结果.
+    """
+    if response.get("isError"):
+        prefix = "Error: "
+    else:
+        prefix = ""
+    parts: List[str] = []
+    content = response.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+            else:
+                parts.append(f"[{item.get('type')}]")
+    if not parts:
+        return prefix + json.dumps(response, ensure_ascii=False)
+    return prefix + "\n".join(parts)
+
+
+def _fit_exposed_name(base: str, suffix: int) -> str:
+    """把暴露名压到长度上限内，同时保留冲突后缀.
+
+    Args:
+        base: 基础名字（mcp__server__tool）.
+        suffix: 冲突序号，1 表示不追加后缀.
+
+    Returns:
+        长度不超过 ``_MAX_EXPOSED_NAME`` 的名字.
+    """
+    tag = "" if suffix <= 1 else f"_{suffix}"
+    limit = _MAX_EXPOSED_NAME - len(tag)
+    return base[:limit] + tag
+
+
+def _register_server(
+    ctx: Any,
+    server_name: str,
+    config: Dict[str, Any],
+    used_names: Optional[set[str]] = None,
+) -> Tuple[int, Optional[StdioMcpClient]]:
+    """连接一个 MCP server 并注册其工具.
+
+    Args:
+        ctx: 插件上下文.
+        server_name: server 名（来自 ``mcpServers`` 的键）.
+        config: 该 server 的配置.
+
+    Args:
+        used_names: 跨 server 共享的已用名字集合，用于避免静默覆盖.
+
+    Returns:
+        ``(成功注册的工具数量, 客户端实例)``；跳过时客户端为 None.
+    """
+    command = config.get("command")
+    if not command:
+        _logger.warning(
+            "MCP server %s 未提供 command（HTTP 传输暂未实现），已跳过",
+            server_name,
+        )
+        return 0, None
+
+    client = StdioMcpClient(
+        command=str(command),
+        args=[str(item) for item in (config.get("args") or [])],
+        env=config.get("env") if isinstance(config.get("env"), dict) else None,
+        cwd=config.get("cwd"),
+        timeout=float(config.get("timeout", _DEFAULT_TIMEOUT)),
+    )
+    try:
+        client.start()
+        tools = client.list_tools()
+    except Exception:
+        # 启动或列工具失败时回收进程
+        client.close()
+        raise
+
+    registered = 0
+    if used_names is None:
+        used_names = set()
+    for tool in tools:
+        remote_name = str(tool.get("name") or "").strip()
+        if not remote_name:
+            continue
+        safe_server = sanitize_tool_name(server_name)
+        safe_tool = sanitize_tool_name(remote_name)
+        base = f"mcp__{safe_server}__{safe_tool}"
+        suffix = 1
+        exposed = _fit_exposed_name(base, suffix)
+        while exposed in used_names:
+            suffix += 1
+            exposed = _fit_exposed_name(base, suffix)
+        if suffix > 1:
+            _logger.warning(
+                "MCP 工具名冲突，%s 的 %s 暴露为 %s",
+                server_name,
+                remote_name,
+                exposed,
+            )
+        used_names.add(exposed)
+        schema = tool.get("inputSchema")
+        if not isinstance(schema, dict):
+            schema = {"type": "object", "properties": {}}
+
+        effects = config.get("effects")
+        if isinstance(effects, str):
+            effects = (effects,)
+        elif not isinstance(effects, (list, tuple)) or not effects:
+            effects = ("unknown",)
+        write_path_keys = config.get("write_path_keys")
+        if not isinstance(write_path_keys, (list, tuple)):
+            write_path_keys = ()
+        execute_code_keys = config.get("execute_code_keys")
+        if not isinstance(execute_code_keys, (list, tuple)):
+            execute_code_keys = ()
+
+        def make_handler(name: str):
+            def call(arguments: Dict[str, Any]) -> str:
+                return client.call_tool(name, arguments)
+
+            return call
+
+        ctx.tool(
+            name=exposed,
+            description=str(tool.get("description") or f"MCP {server_name} 工具"),
+            parameters=schema,
+            evidence_kind=None,
+            category="mcp",
+            effects=tuple(effects),
+            write_path_keys=tuple(write_path_keys),
+            execute_code_keys=tuple(execute_code_keys),
+        )(make_handler(remote_name))
+        registered += 1
+    return registered, client
+
+
+def setup(ctx: Any) -> Any:
+    """安装 MCP 扩展.
+
+    Args:
+        ctx: 插件上下文（ExtensionContext）.
+
+    Returns:
+        卸载回调（关闭所有子进程）；没有可用 server 时返回 None.
+    """
+    servers = load_config(getattr(ctx.runtime, "home", None))
+    if not servers:
+        return None
+
+    clients: List[StdioMcpClient] = []
+    used_names: set[str] = set()
+    for server_name, config in servers.items():
+        try:
+            count, client = _register_server(
+                ctx, server_name, config, used_names,
+            )
+            if client is not None:
+                clients.append(client)
+            if count:
+                _logger.info("MCP server %s 注册了 %d 个工具", server_name, count)
+        except Exception as exc:  # noqa: BLE001 - 单个 server 失败不影响其他
+            _logger.warning("MCP server %s 连接失败，已跳过: %s", server_name, exc)
+
+    if not clients:
+        return None
+
+    def teardown() -> None:
+        """关闭本运行时创建的全部 MCP 子进程."""
+        for client in list(clients):
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001 - 关闭失败不影响卸载
+                pass
+        clients.clear()
+
+    return teardown

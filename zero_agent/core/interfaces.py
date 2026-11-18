@@ -30,6 +30,8 @@ class LLMClient(Protocol):
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
+        *,
+        transform: Optional[Any] = None,
     ) -> Generator[str, None, Any]:
         """发送消息到 LLM 并获取流式响应."""
         ...

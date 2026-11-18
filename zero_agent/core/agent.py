@@ -6,18 +6,21 @@
 
 from __future__ import annotations
 
+import atexit
 import copy
+import importlib
+import logging
 import os
 import re
 import time
+import weakref
 from dataclasses import dataclass
 from importlib import resources
 from typing import Any, Dict, Generator, Iterable, List, Optional
 
 from zero_agent.core.config import AgentConfig, load_default_config
-from zero_agent.core.exceptions import ConfigError
+from zero_agent.core.exceptions import ConfigError, ExtensionBootstrapError
 from zero_agent.core.handler import BaseHandler
-from zero_agent.core.hooks import HookSystem
 from zero_agent.core.localization import (
     PROMPT_PEER_HINT,
     PROMPT_REPLY_LANGUAGE,
@@ -39,6 +42,24 @@ from zero_agent.core.types import (
 )
 from zero_agent.memory.manager import MemoryManager
 from zero_agent.tools.registry import ToolRegistry
+
+_logger = logging.getLogger("zero_agent")
+
+# 进程退出时兜底释放扩展运行时（MCP 子进程等）。
+# 弱引用集合不会阻止 agent 被回收，显式 close() 过的 agent 会自行移出。
+_live_agents: "weakref.WeakSet[Any]" = weakref.WeakSet()
+
+
+def close_live_agents() -> None:
+    """进程退出兜底：关闭仍存活 agent 的扩展运行时."""
+    for agent in list(_live_agents):
+        try:
+            agent.close()
+        except Exception:  # noqa: BLE001 - 退出阶段不再抛异常
+            continue
+
+
+atexit.register(close_live_agents)
 
 
 
@@ -296,7 +317,6 @@ class ZeroAgent:
         config: Optional[AgentConfig] = None,
         handler: Optional[BaseHandler] = None,
         registry: Optional[ToolRegistry] = None,
-        hooks: Optional[HookSystem] = None,
         session_log_path: str | None = None,
     ) -> None:
         """初始化 ZeroAgent.
@@ -305,20 +325,17 @@ class ZeroAgent:
             config: Agent 配置，None 时从项目 config.yaml 或环境变量构建.
             handler: 自定义工具分发器，None 时创建 BaseHandler.
             registry: 自定义工具注册中心，None 时自动加载内置工具.
-            hooks: 自定义 HookSystem，None 时创建默认 HookSystem.
             session_log_path: Optional explicit response-log path.
         """
         self.config = config or load_default_config()
         self._session_log_path = session_log_path
         self._response_log_retired = False
-        self.hooks = hooks or HookSystem()
         from zero_agent.plugins.langfuse_tracing import LangfuseTracer
 
         try:
             self._langfuse_tracer = LangfuseTracer.from_config(self.config)
         except Exception:
             self._langfuse_tracer = LangfuseTracer()
-        self._register_builtin_plugins(self._langfuse_tracer)
 
         # 1. 工具注册中心
         self._owns_registry = registry is None
@@ -336,6 +353,7 @@ class ZeroAgent:
         else:
             self.registry = registry
 
+        # 2. LLM 会话
         session_kwargs: dict[str, Any] = {}
         if self._session_log_path is not None:
             session_kwargs["session_log_path"] = self._session_log_path
@@ -369,6 +387,10 @@ class ZeroAgent:
             self._owns_registry = False
             self.registry = handler_registry
 
+        # 3.5 扩展运行时：必须在 handler registry 归一化之后加载，
+        # 否则插件工具会注册进随后被丢弃的 registry
+        self.extensions = self._init_extensions()
+
         # 4. 记忆管理器
         self.memory = MemoryManager(
             memory_dir=self.config.memory_dir,
@@ -384,6 +406,7 @@ class ZeroAgent:
         self.pending_runtime_config: Optional[AgentConfig] = None
         self._config_path: Optional[str] = getattr(self.config, "_source_path", None)
         self._pending_task_state: Optional[PendingTaskState] = None
+        _live_agents.add(self)
 
     def set_config_path(self, path: Optional[str]) -> None:
         """设置配置文件的路径，用于热重载检测."""
@@ -400,6 +423,24 @@ class ZeroAgent:
                     close()
                 except Exception:
                     pass
+
+    def close(self) -> None:
+        """释放扩展运行时（MCP 子进程、门控与插件工具注册）；幂等.
+
+        显式关闭后 agent 仍可继续运行，但扩展能力（含 ``permission_gate``）
+        不再生效。用于「确定不再使用该 agent」时的确定性清理；进程退出时还有
+        ``atexit`` 兜底。
+        """
+        extensions = getattr(self, "extensions", None)
+        if extensions is None:
+            _live_agents.discard(self)
+            return
+        self.extensions = None
+        try:
+            extensions.release()
+        except Exception:  # noqa: BLE001 - 清理失败不得抛给退出路径
+            _logger.warning("扩展运行时清理失败", exc_info=True)
+        _live_agents.discard(self)
 
     def reload_config(self) -> bool:
         """若配置文件已变更则原子热重载配置并重建 LLM session.
@@ -418,8 +459,7 @@ class ZeroAgent:
         try:
             new_config = reload_config_if_changed(self._config_path)
         except Exception as exc:
-            import logging
-            logging.getLogger("zero_agent").warning(
+            _logger.warning(
                 "reload_config: 解析配置失败，将保留旧配置: %s", exc
             )
             return False
@@ -473,15 +513,20 @@ class ZeroAgent:
                 new_tool_language = new_config.resolved_tool_language_for_backend(
                     target_name,
                 )
-                if old_tool_language != new_tool_language:
+                # code_run 的沙箱开关由 registry 构建时捕获的 config 决定，
+                # 因此 sandbox 变更必须重建 registry 才能生效
+                sandbox_changed = (
+                    getattr(old_config, "sandbox_mode", None)
+                    != getattr(new_config, "sandbox_mode", None)
+                )
+                if old_tool_language != new_tool_language or sandbox_changed:
                     new_registry = ToolRegistry.with_builtins(
                         new_config,
                         language=new_tool_language,
                     )
                     registry_changed = True
         except Exception as exc:
-            import logging
-            logging.getLogger("zero_agent").warning(
+            _logger.warning(
                 "reload_config: 重建运行时失败，将保留旧会话: %s", exc
             )
             return False
@@ -500,8 +545,7 @@ class ZeroAgent:
             self.handler.client = self.client
             if registry_changed:
                 self.handler.registry = self.registry
-                if self.loop is not None:
-                    self.loop.tools_schema = self.registry.generate_openai_schema()
+                self._replay_extension_registrations()
         except Exception as exc:
             self.config = old_config
             self._sessions = old_sessions
@@ -517,8 +561,7 @@ class ZeroAgent:
                 self.handler.cwd = old_handler_cwd
             except Exception:
                 pass
-            import logging
-            logging.getLogger("zero_agent").warning(
+            _logger.warning(
                 "reload_config: 提交运行时失败，将保留旧状态: %s", exc
             )
             return False
@@ -530,17 +573,13 @@ class ZeroAgent:
 
         try:
             self._langfuse_tracer.reconfigure(new_config)
-            self._register_builtin_plugins(self._langfuse_tracer)
         except Exception:
-            import logging
-
-            logging.getLogger("zero_agent").warning(
+            _logger.warning(
                 "reload_config: Langfuse reconfiguration failed",
                 exc_info=True,
             )
 
-        import logging
-        logging.getLogger("zero_agent").info(
+        _logger.info(
             "Config reloaded from %s, active backend: %s",
             self._config_path,
             target_name,
@@ -658,7 +697,6 @@ class ZeroAgent:
             tools_schema=tools_schema,
             max_turns=(120 if self.handler.task_contract.mode is TaskMode.PLAN else self.config.max_turns),
             verbose=self.config.verbose,
-            hooks=self.hooks,
             agent=self,
         )
         self.loop = loop
@@ -695,12 +733,90 @@ class ZeroAgent:
             "接受 PARTIAL 并完成",
         }
 
+    _APPROVAL_WORDS = frozenset({
+        "批准", "同意", "允许", "可以", "确认", "通过",
+        "approve", "allow", "yes", "y", "ok", "confirm",
+    })
+
+    @classmethod
+    def _is_approval_answer(cls, answer: str) -> bool:
+        """判断用户答复是否表示批准（默认拒绝，安全优先）.
+
+        Args:
+            answer: 用户答复文本.
+
+        Returns:
+            True 表示批准.
+        """
+        normalized = " ".join(str(answer or "").strip().lower().split())
+        # 允许句末标点（"批准。" / "OK！"），但仍要求整串命中词表：
+        # 不做前缀或模糊匹配，避免把"批准吧""不同意"当成批准
+        normalized = normalized.rstrip("。.!！,，~～ ")
+        return normalized in cls._APPROVAL_WORDS
+
+    def _approval_continuation(
+        self,
+        pending: PendingTaskState,
+        answer: str,
+    ) -> str:
+        """处理「等待人类批准」的恢复，返回续跑提示.
+
+        Args:
+            pending: 暂停的任务状态.
+            answer: 用户答复.
+
+        Returns:
+            交给模型的续跑说明.
+        """
+        approval = (pending.waiting_data or {}).get("approval")
+        if not isinstance(approval, dict):
+            approval = {}
+        fingerprint = str(approval.get("fingerprint") or "")
+        scope = str(approval.get("scope") or "")
+        tool_name = str(approval.get("tool_name") or "该工具")
+
+        extensions = getattr(self, "extensions", None)
+
+        if not fingerprint:
+            # 指纹缺失说明暂停状态已失效，绝不能谎报批准
+            if extensions is not None:
+                extensions.clear_approvals(task_id=pending.contract.task_id)
+            return (
+                "[System] 审批状态已失效（缺少操作指纹），本次操作未获批准。"
+                "请重新发起该操作以获取新的审批请求。"
+            )
+
+        if self._is_approval_answer(answer):
+            if extensions is not None:
+                extensions.grant_approval(
+                    fingerprint,
+                    task_id=pending.contract.task_id,
+                    scope=scope,
+                )
+            return (
+                f"[System] 用户已批准对 {tool_name} 的这一次调用。"
+                "只重新执行这一个调用，且参数必须与上次完全一致；"
+                "本轮此前已经成功的调用不要重放，避免重复副作用。"
+                "如果不再需要该操作，说明情况后继续。"
+            )
+
+        if extensions is not None:
+            # 只清当前任务：其他任务/插件刚发放的通行证不应被这次拒绝连带作废
+            extensions.clear_approvals(task_id=pending.contract.task_id)
+        return (
+            f"[System] 用户没有批准 {tool_name} 的这次调用。用户原话：{answer}\n"
+            "不要重试该操作；如果用户在答复里给了新的指令，按新指令处理。"
+        )
+
     def _pending_continuation_content(
         self,
         pending: PendingTaskState,
         answer: str,
     ) -> str:
         """Build the continuation message without changing the original objective."""
+
+        if pending.waiting_kind == "approval":
+            return self._approval_continuation(pending, answer)
 
         if pending.waiting_kind == "plan_partial_acceptance":
             if self._is_partial_acceptance(answer):
@@ -726,12 +842,16 @@ class ZeroAgent:
         payload = waiting_data.get("data") if isinstance(waiting_data.get("data"), dict) else waiting_data
         candidates = payload.get("candidates", []) if isinstance(payload, dict) else []
         partial_candidates = {"接受 PARTIAL 并完成", "继续修复"}
-        waiting_kind = (
-            "plan_partial_acceptance"
-            if self.handler.task_contract.mode is TaskMode.PLAN
+        approval = waiting_data.get("approval") if isinstance(waiting_data, dict) else None
+        if isinstance(approval, dict) and approval.get("fingerprint"):
+            waiting_kind = "approval"
+        elif (
+            self.handler.task_contract.mode is TaskMode.PLAN
             and set(candidates or []) == partial_candidates
-            else "ask_user"
-        )
+        ):
+            waiting_kind = "plan_partial_acceptance"
+        else:
+            waiting_kind = "ask_user"
         self._pending_task_state = PendingTaskState(
             contract=copy.deepcopy(self.handler.task_contract),
             ledger=copy.deepcopy(self.handler.evidence_ledger),
@@ -816,6 +936,7 @@ class ZeroAgent:
         if self._owns_registry:
             self.registry = new_registry
             self.handler.registry = self.registry
+            self._replay_extension_registrations()
         self.memory = new_memory
         self.handler.cwd = self.config.workspace_dir
         self.handler.client = self.client
@@ -876,6 +997,7 @@ class ZeroAgent:
             )
             if self.handler is not None:
                 self.handler.registry = self.registry
+            self._replay_extension_registrations()
 
         active_loop = self.loop
         if active_loop is not None:
@@ -887,24 +1009,133 @@ class ZeroAgent:
                 if self.client.system != prompt:
                     self.client.system = prompt
 
-    def _register_builtin_plugins(self, tracer: Any = None) -> None:
-        """注册内置插件；缺依赖或缺配置时静默跳过."""
-        try:
-            from zero_agent.plugins.langfuse_tracing import register
+    def _replay_extension_registrations(self) -> None:
+        """registry 被重建后重放扩展注册，并刷新 loop 的 tool schema.
 
-            register(self.hooks, config=self.config, tracer=tracer)
-        except Exception:
-            pass
+        共有三条重建路径（reload_config / _apply_pending_runtime_config /
+        switch_backend），都必须经过这里，否则插件工具会随旧 registry 消失。
+
+        同时把运行时持有的 config 换成新对象：``permission_gate`` 等内置扩展
+        通过 ``runtime.config`` 解析相对路径的基准目录，若仍指向旧对象，
+        路径判定会与实际写入位置（handler.cwd）分叉。插件与扩展目录本身
+        （``extensions_home``）变更仍需重启，这里不重新加载。
+        """
+        extensions = getattr(self, "extensions", None)
+        if extensions is not None:
+            extensions.config = self.config
+            extensions.attach_registry(self.registry)
+        active_loop = getattr(self, "loop", None)
+        if active_loop is not None:
+            active_loop.tools_schema = self.registry.generate_openai_schema()
+
+    # 安全类内置扩展：extensions.enabled=false 时仍然保留，避免“关插件顺手关掉安全门”
+    _SAFETY_EXTENSIONS = ("permission_gate",)
+    # 能力类内置扩展：只在启用扩展时安装
+    _CAPABILITY_EXTENSIONS = ("skills_index", "mcp_client")
+    # 内部扩展：与外部插件共用同一运行时，始终安装（自身按配置 no-op）
+    _INTERNAL_EXTENSIONS = (
+        ("langfuse_tracing", "zero_agent.plugins.langfuse_tracing"),
+        ("project_mode", "zero_agent.plugins.project_mode"),
+        ("worldline_tracking", "zero_agent.plugins.worldline_tracking"),
+    )
+
+    def _init_extensions(self) -> Any:
+        """创建扩展运行时并加载插件与内置扩展.
+
+        ``extensions_enabled=false`` 只关闭外部插件与能力类扩展，安全门仍然生效。
+        当前没有配置项可以关闭安全门：要关必须改代码（移除 ``permission_gate``
+        的安装），这是刻意设计——避免一次误配置就失去全部写入保护。
+
+        安全类扩展或运行时本身安装失败时抛 :class:`ExtensionBootstrapError`，
+        绝不在没有写入保护的情况下继续启动。外部插件与能力类扩展的失败仍只
+        记录日志，不影响启动。
+
+        Returns:
+            ExtensionRuntime 实例.
+
+        Raises:
+            ExtensionBootstrapError: 运行时或安全类扩展无法安装.
+        """
+        enabled = bool(getattr(self.config, "extensions_enabled", True))
+        from zero_agent.extensions.runtime import ExtensionRuntime
+
         try:
-            from zero_agent.plugins.project_mode import register
-            register(self.hooks)
-        except Exception:
-            pass
+            runtime = ExtensionRuntime(
+                registry=self.registry,
+                home=getattr(self.config, "extensions_home", None),
+                config=self.config,
+                agent=self,
+            )
+            runtime.services["langfuse_tracer"] = self._langfuse_tracer
+        except Exception as exc:  # noqa: BLE001 - 无运行时意味着无安全门
+            raise ExtensionBootstrapError(
+                f"扩展运行时初始化失败: {exc}",
+            ) from exc
+
         try:
-            from zero_agent.plugins.worldline_tracking import register
-            register(self.hooks)
+            if enabled:
+                runtime.load_all()
+            self._install_builtin_extensions(runtime, enabled=enabled)
         except Exception:
-            pass
+            try:
+                runtime.release()
+            except Exception:  # noqa: BLE001 - 清理失败不覆盖原始错误
+                _logger.warning("扩展运行时清理失败", exc_info=True)
+            raise
+        return runtime
+
+    def _install_builtin_extensions(
+        self,
+        runtime: Any,
+        *,
+        enabled: bool = True,
+    ) -> None:
+        """安装内置扩展；安全类失败致命，能力类失败可跳过.
+
+        Args:
+            runtime: ExtensionRuntime 实例.
+            enabled: 是否安装能力类扩展（安全类始终安装）.
+
+        Raises:
+            ExtensionBootstrapError: 安全类扩展安装失败.
+        """
+        from zero_agent.extensions.context import ExtensionContext
+
+        logger = _logger
+        targets = [
+            (name, f"zero_agent.extensions.builtin.{name}", name in self._SAFETY_EXTENSIONS)
+            for name in self._SAFETY_EXTENSIONS
+        ]
+        if enabled:
+            targets.extend(
+                (name, f"zero_agent.extensions.builtin.{name}", False)
+                for name in self._CAPABILITY_EXTENSIONS
+            )
+        targets.extend(
+            (name, module_path, False)
+            for name, module_path in self._INTERNAL_EXTENSIONS
+        )
+        for name, module_path, is_safety in targets:
+            try:
+                module = importlib.import_module(module_path)
+                teardown = module.setup(ExtensionContext(name, runtime))
+                if callable(teardown):
+                    runtime.register_teardown(name, teardown)
+                # 内置扩展不经 load_all，必须显式登记归属，
+                # 否则 release()（ZeroAgent.close() 与进程退出兜底）不会撤销
+                # 它们注册的工具与回调
+                runtime.track_owner(name)
+            except Exception as exc:  # noqa: BLE001 - 按安全/能力分级处理
+                # 安装到一半失败时清掉半成品注册（例如门控只注册了一半）
+                try:
+                    runtime.unregister_owner(name)
+                except Exception:  # noqa: BLE001 - 清理失败不影响后续处理
+                    pass
+                if is_safety:
+                    raise ExtensionBootstrapError(
+                        f"安全扩展 {name} 安装失败: {exc}",
+                    ) from exc
+                logger.warning("内置扩展 %s 安装失败，已跳过: %s", name, exc)
 
     def list_backends(self) -> list[tuple[str, str, bool]]:
         """列出所有可用的 LLM 后端.
@@ -1044,6 +1275,19 @@ class ZeroAgent:
                 localizer=localizer,
             ).blocks
         )
+
+        # 扩展贡献的提示词块（插件 / skill 索引 / 其他内置扩展）
+        extensions = getattr(self, "extensions", None)
+        if extensions is not None:
+            try:
+                for block in extensions.collect_prompt_blocks():
+                    blocks.append(PromptBlock(
+                        f"ext:{block.name}",
+                        f"\n{block.text}\n",
+                        dynamic=True,
+                    ))
+            except Exception:  # noqa: BLE001 - 提示词块失败不得阻断任务
+                _logger.warning("扩展提示词块组装失败", exc_info=True)
 
         return PromptAssembly(tuple(blocks))
 

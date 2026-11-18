@@ -262,6 +262,7 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         handler=_make_file_read_handler(config),
         evidence_kind="read",
         category="file",
+        effects=("read",),
     ))
 
     registry.register(ToolDefinition(
@@ -302,6 +303,8 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         handler=_make_file_patch_handler(config),
         evidence_kind="write",
         category="file",
+        effects=("write",),
+        write_path_keys=("path",),
     ))
 
     registry.register(ToolDefinition(
@@ -349,6 +352,8 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         handler=_make_file_write_handler(config),
         evidence_kind="write",
         category="file",
+        effects=("write",),
+        write_path_keys=("path",),
     ))
 
 
