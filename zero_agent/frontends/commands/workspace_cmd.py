@@ -412,7 +412,7 @@ def prepare(abs_path: str) -> dict:
     warning = ""
 
     # Idempotent link creation
-    if link.exists(follow_symlinks=False):
+    if os.path.lexists(str(link)):
         if is_dir_link(link):
             cur = link_target(link)
             if cur and _norm_abspath(cur) == _norm_abspath(target):
