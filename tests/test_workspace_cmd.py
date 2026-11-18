@@ -165,7 +165,7 @@ def test_prepare_creates_junction_and_returns_info(real_target_dir):
     assert r["target"]
     assert r["error"] == ""
     # The link path should exist
-    assert Path(r["link"]).exists(follow_symlinks=False)
+    assert os.path.lexists(r["link"])
 
 
 def test_prepare_is_idempotent(real_target_dir):
@@ -366,12 +366,12 @@ def test_remove_cleans_registry_and_junction(real_target_dir):
     link_path = wcmd._link_path(name)
 
     assert name in wcmd.registry_load()
-    assert link_path.exists(follow_symlinks=False)
+    assert os.path.lexists(link_path)
 
     wcmd.remove(name)
 
     assert name not in wcmd.registry_load()
-    assert not link_path.exists(follow_symlinks=False)
+    assert not os.path.lexists(link_path)
 
 
 def test_remove_does_not_delete_target_files(real_target_dir):
@@ -406,7 +406,7 @@ def test_cleanup_removes_dangling_links(real_target_dir):
     name = r["name"]
     link_path = wcmd._link_path(name)
 
-    assert link_path.exists(follow_symlinks=False)
+    assert os.path.lexists(link_path)
 
     # Remove target to dangle the link
     import shutil
@@ -416,7 +416,7 @@ def test_cleanup_removes_dangling_links(real_target_dir):
     wcmd.cleanup()
 
     # The dangling link should be removed
-    assert not link_path.exists(follow_symlinks=False)
+    assert not os.path.lexists(link_path)
 
 
 def test_cleanup_keeps_valid_links(real_target_dir):
@@ -424,12 +424,12 @@ def test_cleanup_keeps_valid_links(real_target_dir):
     name = r["name"]
     link_path = wcmd._link_path(name)
 
-    assert link_path.exists(follow_symlinks=False)
+    assert os.path.lexists(link_path)
 
     wcmd.cleanup()
 
     # Valid link should persist
-    assert link_path.exists(follow_symlinks=False)
+    assert os.path.lexists(link_path)
 
 
 def test_cleanup_removes_unregistered_links(real_target_dir):
@@ -437,7 +437,7 @@ def test_cleanup_removes_unregistered_links(real_target_dir):
     name = r["name"]
     link_path = wcmd._link_path(name)
 
-    assert link_path.exists(follow_symlinks=False)
+    assert os.path.lexists(link_path)
 
     # Remove from registry but keep the link
     wcmd.registry_remove(name)
@@ -445,7 +445,7 @@ def test_cleanup_removes_unregistered_links(real_target_dir):
     wcmd.cleanup()
 
     # Unregistered link should be removed
-    assert not link_path.exists(follow_symlinks=False)
+    assert not os.path.lexists(link_path)
 
 
 def test_cleanup_does_not_touch_real_directories(temp_project):
