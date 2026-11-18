@@ -8,15 +8,6 @@ import os
 from contextvars import ContextVar
 from typing import Any, Dict, Optional
 
-from zero_agent.core.hooks import (
-    EVENT_AGENT_AFTER,
-    EVENT_AGENT_BEFORE,
-    EVENT_TOOL_AFTER,
-    EVENT_TOOL_BEFORE,
-    EVENT_TURN_AFTER,
-    EVENT_TURN_BEFORE,
-)
-
 
 _logger = logging.getLogger("zero_agent.plugins.langfuse")
 
@@ -598,27 +589,30 @@ def _handler_map(tracer: LangfuseTracer) -> Dict[str, Any]:
         tracer.finish_tool(observation, context)
 
     handlers = {
-        EVENT_AGENT_BEFORE: on_agent_before,
-        EVENT_TURN_BEFORE: tracer.start_turn_metadata,
-        EVENT_TOOL_BEFORE: on_tool_before,
-        EVENT_TOOL_AFTER: on_tool_after,
-        EVENT_TURN_AFTER: tracer.finish_turn_metadata,
-        EVENT_AGENT_AFTER: on_agent_after,
+        "agent_start": on_agent_before,
+        "turn_start": tracer.start_turn_metadata,
+        "tool_before": on_tool_before,
+        "tool_after": on_tool_after,
+        "turn_end": tracer.finish_turn_metadata,
+        "agent_end": on_agent_after,
     }
     setattr(tracer, "_hook_handlers", handlers)
     return handlers
 
 
-def register(
-    hook_system: Any,
-    config: Optional[Any] = None,
-    tracer: Optional[LangfuseTracer] = None,
-) -> bool:
-    """Register Langfuse lifecycle hooks when tracing is configured."""
-    active_tracer = tracer or LangfuseTracer.from_config(config)
-    if not active_tracer.enabled and not getattr(active_tracer, "_pending_config_set", False):
-        return False
-    for event, callback in _handler_map(active_tracer).items():
-        if not hook_system.has(event, callback):
-            hook_system.register(event, callback)
-    return True
+def setup(ctx: Any) -> None:
+    """安装 Langfuse 生命周期追踪扩展.
+
+    tracer 未启用时回调直接 no-op；这样后续配置热重载启用 langfuse 时，
+    已注册的订阅会自动生效，无需重新安装扩展。
+    """
+    tracer = getattr(ctx.runtime, "services", {}).get("langfuse_tracer")
+    if tracer is None:
+        return None
+    handlers = _handler_map(tracer)
+    ctx.on_agent_start(handlers["agent_start"])
+    ctx.on_turn_start(handlers["turn_start"])
+    ctx.on_tool_before(handlers["tool_before"])
+    ctx.on_tool_after(handlers["tool_after"])
+    ctx.on_turn_end(handlers["turn_end"])
+    ctx.on_agent_end(handlers["agent_end"])

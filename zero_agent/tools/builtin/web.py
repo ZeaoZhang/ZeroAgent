@@ -358,6 +358,7 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         handler=_make_web_scan_handler(config),
         evidence_kind="web",
         category="browser",
+        effects=("read", "network"),
     ))
 
     registry.register(ToolDefinition(
@@ -423,6 +424,8 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         evidence_kind="web",
         handler=_make_web_execute_js_handler(config),
         category="browser",
+        effects=("write", "network"),
+        write_path_keys=("save_to_file",),
     ))
 
     registry.register(ToolDefinition(
@@ -466,6 +469,8 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         handler=_make_web_screenshot_handler(config),
         evidence_kind="web",
         category="browser",
+        effects=("write",),
+        write_path_keys=("save_to_file",),
     ))
 
 

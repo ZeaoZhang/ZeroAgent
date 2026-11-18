@@ -475,6 +475,18 @@ def _register_server(
         if not isinstance(schema, dict):
             schema = {"type": "object", "properties": {}}
 
+        effects = config.get("effects")
+        if isinstance(effects, str):
+            effects = (effects,)
+        elif not isinstance(effects, (list, tuple)) or not effects:
+            effects = ("unknown",)
+        write_path_keys = config.get("write_path_keys")
+        if not isinstance(write_path_keys, (list, tuple)):
+            write_path_keys = ()
+        execute_code_keys = config.get("execute_code_keys")
+        if not isinstance(execute_code_keys, (list, tuple)):
+            execute_code_keys = ()
+
         def make_handler(name: str):
             def call(arguments: Dict[str, Any]) -> str:
                 return client.call_tool(name, arguments)
@@ -487,6 +499,9 @@ def _register_server(
             parameters=schema,
             evidence_kind=None,
             category="mcp",
+            effects=tuple(effects),
+            write_path_keys=tuple(write_path_keys),
+            execute_code_keys=tuple(execute_code_keys),
         )(make_handler(remote_name))
         registered += 1
     return registered, client

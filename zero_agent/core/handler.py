@@ -219,24 +219,16 @@ class BaseHandler:
             return None
         return getattr(parent, "extensions", None)
 
-    def _trigger_hook(self, event: str, context: dict) -> None:
-        """触发钩子事件（若 HookSystem 可用）.
-
-        优先使用 AgentLoop 上的 HookSystem，回退到 _turn_end_hooks 字典.
+    def _notify(self, event: str, context: dict) -> None:
+        """把工具生命周期事件交给扩展运行时；失败由运行时隔离.
 
         Args:
-            event: 钩子事件名.
-            context: 传递给钩子的上下文字典.
+            event: 扩展通知事件名.
+            context: 事件负载.
         """
-        # 通过 parent.loop 访问 HookSystem
-        try:
-            loop = getattr(getattr(self, "parent", None), "loop", None)
-            if loop is None:
-                loop = getattr(self, "loop", None)
-            if loop and hasattr(loop, "hooks") and loop.hooks:
-                loop.hooks.trigger(event, context)
-        except Exception:
-            pass
+        extensions = self._extensions()
+        if extensions is not None:
+            extensions.notify(event, context)
 
     def dispatch(
         self,
@@ -270,9 +262,12 @@ class BaseHandler:
         if tool_name != "no_tool":
             self.completion_gate.reset()
 
-        # tool_before 钩子
-        self._trigger_hook("tool_before", {
-            "tool_name": tool_name, "args": args, "response": response,
+        # tool_before 通知（只观察；任何修改请走门控或结果变换）
+        self._notify("tool_before", {
+            "tool_name": tool_name,
+            "args": args,
+            "response": response,
+            "handler": self,
         })
 
         # 扩展门控（fail-closed）：三态判定——放行 / 拒绝 / 需人类批准
@@ -382,18 +377,19 @@ class BaseHandler:
     def _emit_tool_after(
         self, tool_name: str, args: Dict[str, Any], ret: Any,
     ) -> None:
-        """触发 tool_after 钩子（统一 result 取值口径）."""
-        self._trigger_hook("tool_after", {
+        """触发 tool_after 扩展通知（统一 result 取值口径）."""
+        self._notify("tool_after", {
             "tool_name": tool_name,
             "args": args,
             "outcome": ret,
             "result": ret.data if isinstance(ret, StepOutcome) else ret,
+            "handler": self,
         })
 
     def _finalize_tool_dispatch(
         self, tool_name: str, args: Dict[str, Any], ret: Any,
     ) -> Any:
-        """Apply common post-dispatch bookkeeping and hooks."""
+        """Apply common post-dispatch bookkeeping and notifications."""
         ret = self._apply_tool_protocol_budget(tool_name, ret)
 
         # 扩展结果变换：只处理 StepOutcome，避免破坏内部信号对象

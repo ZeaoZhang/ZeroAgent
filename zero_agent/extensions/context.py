@@ -13,14 +13,21 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Dict, Generator, List, Optional
 
 from zero_agent.extensions.events import ApprovalRequired, ExtensionVeto, PromptBlock
 from zero_agent.tools.registry import ToolDefinition
 
+_logger = logging.getLogger("zero_agent.extensions")
+
 
 def _wrap_tool(fn: Callable[[Dict[str, Any]], Any], name: str) -> Callable[..., Generator]:
     """把插件里 ``fn(args) -> Any`` 适配成 registry 需要的 generator handler.
+
+    扩展工具异常必须隔离：插件代码抛错时返回结构化的 error 结果，让模型
+    看到失败并换策略，而不是让异常冒到 AgentLoop 把整个任务判为 FAILED。
+    不用 except BaseException，保留 KeyboardInterrupt/SystemExit 的语义。
 
     Args:
         fn: 插件提供的工具函数，接受参数字典并返回结果.
@@ -36,7 +43,15 @@ def _wrap_tool(fn: Callable[[Dict[str, Any]], Any], name: str) -> Callable[..., 
         _handler: Any,
     ) -> Generator[str, None, Any]:
         yield f"[{name}] running ...\n"
-        return fn(args)
+        try:
+            return fn(args)
+        except Exception as exc:  # noqa: BLE001 - 插件失败不得中止任务
+            _logger.exception("扩展工具 %s 执行失败", name)
+            return {
+                "status": "error",
+                "error": f"extension tool {name} failed: {exc}",
+                "exception": exc.__class__.__name__,
+            }
 
     return handler
 
@@ -70,6 +85,9 @@ class ExtensionContext:
         evidence_kind: Optional[str] = None,
         category: str = "extension",
         promotes_task_state: bool = True,
+        effects: tuple[str, ...] = ("unknown",),
+        write_path_keys: tuple[str, ...] = (),
+        execute_code_keys: tuple[str, ...] = (),
     ) -> Callable[[Callable[[Dict[str, Any]], Any]], Callable[[Dict[str, Any]], Any]]:
         """注册一个模型可调用的工具.
 
@@ -80,6 +98,9 @@ class ExtensionContext:
             evidence_kind: 证据类型；声明后成功结果可被 complete_task 引用.
             category: 工具分类.
             promotes_task_state: 成功分发前是否推进 OPEN → EXECUTING.
+            effects: 副作用声明；未声明时策略层按 unknown 要求审批.
+            write_path_keys: 参数字典中指向写入目标的键.
+            execute_code_keys: 参数字典中承载待执行代码的键.
 
         Returns:
             装饰器，返回原函数以便直接调用.
@@ -94,6 +115,9 @@ class ExtensionContext:
                 category=category,
                 promotes_task_state=promotes_task_state,
                 evidence_kind=evidence_kind,  # type: ignore[arg-type]
+                effects=tuple(effects),
+                write_path_keys=tuple(write_path_keys),
+                execute_code_keys=tuple(execute_code_keys),
             )
             self.runtime.register_tool(self.name, definition)
             return fn
@@ -122,9 +146,27 @@ class ExtensionContext:
         self.runtime.subscribe_notify("turn_end", self.name, callback)
         return callback
 
+    def on_llm_before(self, callback: Callable[..., None]) -> Callable[..., None]:
+        """订阅模型请求发出前事件（通知型，只观察）."""
+        self.runtime.subscribe_notify("llm_before", self.name, callback)
+        return callback
+
     def on_llm_after(self, callback: Callable[..., None]) -> Callable[..., None]:
         """订阅模型响应完成事件（通知型，只观察，不能改写响应）."""
         self.runtime.subscribe_notify("llm_after", self.name, callback)
+        return callback
+
+    def on_tool_before(self, callback: Callable[..., None]) -> Callable[..., None]:
+        """订阅工具执行前事件（通知型，只观察）.
+
+        该事件在门控与真实执行之前触发；回调不能改变执行结果。
+        """
+        self.runtime.subscribe_notify("tool_before", self.name, callback)
+        return callback
+
+    def on_tool_after(self, callback: Callable[..., None]) -> Callable[..., None]:
+        """订阅工具结束事件（通知型，只观察）."""
+        self.runtime.subscribe_notify("tool_after", self.name, callback)
         return callback
 
     # ---- 变换型扩展点 ---------------------------------------------------

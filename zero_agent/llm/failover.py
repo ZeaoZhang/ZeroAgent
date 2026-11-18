@@ -13,7 +13,7 @@ import copy
 import logging
 import threading
 import time
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Optional
 
 from zero_agent.core.config import LLMBackendConfig
 from zero_agent.core.exceptions import LLMError
@@ -144,6 +144,8 @@ class AutoFailoverSession:
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
+        *,
+        transform: Optional[Callable[[Any], Any]] = None,
     ) -> Generator[str, None, MockResponse]:
         """发送消息到当前活跃的 LLM 后端.
 
@@ -168,8 +170,14 @@ class AutoFailoverSession:
         active = self._active
         history_len = len(active.history)
 
+        chat_kwargs: Dict[str, Any] = {}
+        if transform is not None:
+            chat_kwargs["transform"] = transform
+
         try:
-            mock = yield from active.chat(messages=messages, tools=tools)
+            mock = yield from active.chat(
+                messages=messages, tools=tools, **chat_kwargs,
+            )
             interruption = classify_interruption(mock)
             if interruption and interruption.kind == "incomplete" and self.backups:
                 content = getattr(mock, "content", "") or ""
@@ -183,6 +191,7 @@ class AutoFailoverSession:
                             messages, tools,
                             RuntimeError(f"stream_error: {content[-200:]}"),
                             source_history_len=history_len,
+                            transform=transform,
                         )
                     )
                 switched = self._switch_after_partial_interruption()
@@ -201,6 +210,7 @@ class AutoFailoverSession:
                     tools,
                     primary_error,
                     source_history_len=history_len,
+                    transform=transform,
                 )
             )
     def vision(
@@ -235,6 +245,7 @@ class AutoFailoverSession:
         tools: Optional[List[Dict[str, Any]]],
         original_error: Exception,
         source_history_len: Optional[int] = None,
+        transform: Optional[Callable[[Any], Any]] = None,
     ) -> Generator[str, None, MockResponse]:
         """执行故障转移，依次尝试备用 session（含指数退避）.
 
@@ -279,7 +290,12 @@ class AutoFailoverSession:
 
                 _logger.info("故障转移至备用后端: %s (第 %d 次尝试)", backup.name, i + 1)
                 yield f"[Fallback] 使用备用后端: {backup.name}\n"
-                mock = yield from backup.chat(messages=messages, tools=tools)
+                backup_kwargs: Dict[str, Any] = {}
+                if transform is not None:
+                    backup_kwargs["transform"] = transform
+                mock = yield from backup.chat(
+                    messages=messages, tools=tools, **backup_kwargs,
+                )
                 return mock
             except Exception as e:
                 last_error = e

@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 
 from zero_agent.core.config import AgentConfig, LLMBackendConfig
-from zero_agent.core.hooks import HookSystem
 from zero_agent.core.types import TerminalEvent, TerminalStatus
 from zero_agent.evaluation import memory as evaluation
 from zero_agent.evaluation.evidence import (
@@ -16,6 +15,8 @@ from zero_agent.evaluation.evidence import (
     observed_tool_results,
     trace_context,
 )
+from zero_agent.extensions.runtime import ExtensionRuntime
+from zero_agent.tools.registry import ToolRegistry
 
 
 @pytest.fixture
@@ -34,7 +35,7 @@ def phase(response="", *, trace=None, status="completed"):
 
 def read_trace(content):
     return [{
-        "event": "turn_after", "turn": 1,
+        "event": "turn_end", "turn": 1,
         "tool_calls": [{"id": "read", "tool_name": "file_read", "args": {"path": "global_mem.txt"}}],
         "tool_results": [{"tool_use_id": "read", "content": content}],
     }]
@@ -150,7 +151,7 @@ def test_trace_is_immutable_and_excludes_raw_credentials():
 def test_agent_phase_captures_hooks_and_every_yield_before_compaction(tmp_path, monkeypatch):
     class FakeAgent:
         def __init__(self, config):
-            self.hooks = HookSystem()
+            self.extensions = ExtensionRuntime(registry=ToolRegistry())
             self._sessions = {}
             assert config.failover_backends == []
             assert config.sessions_dir == "" and config.langfuse is None
@@ -160,9 +161,9 @@ def test_agent_phase_captures_hooks_and_every_yield_before_compaction(tmp_path, 
 
         def run(self, prompt):
             context = {"messages": [{"content": "original"}]}
-            self.hooks.trigger("llm_before", context)
+            self.extensions.notify("llm_before", context)
             yield "first"
-            self.hooks.trigger("turn_after", read_trace("observed")[0])
+            self.extensions.notify("turn_end", read_trace("observed")[0])
             context["messages"].clear()
             yield "second"
             return TerminalEvent(status=TerminalStatus.COMPLETED, text="answer")

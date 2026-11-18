@@ -35,11 +35,13 @@ class ToolCall:
         tool_name: 工具名称.
         args: 工具参数；门控回调可以原地修改.
         owner: 发起这次分发的插件归属；核心分发为空字符串.
+        definition: 该工具的声明式定义；核心 ``do_*`` 工具或未注册工具为 None.
     """
 
     tool_name: str
     args: Dict[str, Any]
     owner: str = ""
+    definition: Any = None
 
 
 @dataclass

@@ -62,7 +62,7 @@ class TestCostTracker:
         t = CostTracker()
         tname = threading.current_thread().name
 
-        t.on_llm_after("llm_after", {
+        t.on_llm_after({
             "usage": {
                 "input_tokens": 100,
                 "output_tokens": 50,
@@ -70,7 +70,7 @@ class TestCostTracker:
                 "cache_read_input_tokens": 30,
             }
         })
-        t.on_llm_after("llm_after", {
+        t.on_llm_after({
             "usage": {
                 "input_tokens": 200,
                 "output_tokens": 100,
@@ -86,7 +86,7 @@ class TestCostTracker:
 
     def test_on_llm_after_consumes_canonical_cache_aliases(self) -> None:
         t = CostTracker()
-        t.on_llm_after("llm_after", {
+        t.on_llm_after({
             "usage": {
                 "input_tokens": 100,
                 "output_tokens": 20,
@@ -105,7 +105,7 @@ class TestCostTracker:
 
     def test_on_llm_after_without_cache_metadata_is_unavailable(self) -> None:
         t = CostTracker()
-        t.on_llm_after("llm_after", {
+        t.on_llm_after({
             "usage": {"input_tokens": 100, "output_tokens": 20}
         })
         stats = t.get(threading.current_thread().name)
@@ -121,21 +121,21 @@ class TestCostTracker:
     def test_on_llm_after_empty_usage(self) -> None:
         t = CostTracker()
         tname = threading.current_thread().name
-        t.on_llm_after("llm_after", {"usage": {}})
+        t.on_llm_after({"usage": {}})
         s = t.get(tname)
         assert s.requests == 0  # empty usage, 不计数
 
     def test_on_llm_after_no_usage_key(self) -> None:
         t = CostTracker()
         tname = threading.current_thread().name
-        t.on_llm_after("llm_after", {})
+        t.on_llm_after({})
         s = t.get(tname)
         assert s.requests == 0
 
     def test_reset_clears_tracker(self) -> None:
         t = CostTracker()
         tname = threading.current_thread().name
-        t.on_llm_after("llm_after", {
+        t.on_llm_after({
             "usage": {"input_tokens": 100, "output_tokens": 50}
         })
         assert t.get(tname).requests == 1
@@ -144,7 +144,7 @@ class TestCostTracker:
 
     def test_all_trackers(self) -> None:
         t = CostTracker()
-        t.on_llm_after("llm_after", {
+        t.on_llm_after({
             "usage": {"input_tokens": 10, "output_tokens": 5}
         })
         all_t = t.all_trackers()

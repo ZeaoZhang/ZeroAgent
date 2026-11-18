@@ -39,6 +39,12 @@ class ToolDefinition:
             status=error 或 status=interrupt 时记录为失败。未声明时保守地保持 OPEN，
             避免产生无法被 complete_task 引用的证据死路.
         promotes_task_state: 成功分发前是否将 OPEN 任务推进到 EXECUTING.
+        effects: 工具副作用声明，供权限策略按能力而不是工具名判定.
+            常用值：read / write / execute / network / memory / user / control。
+            扩展工具未声明时默认 ``("unknown",)``，策略层会要求人类审批。
+        write_path_keys: 参数中指向写入目标的键名，例如 ``("path",)``。
+        execute_code_keys: 参数中承载待执行代码的键名，例如
+            ``("script", "script_path", "code")``。
     """
 
     name: str
@@ -48,6 +54,9 @@ class ToolDefinition:
     category: str = "general"
     promotes_task_state: bool = True
     evidence_kind: Optional[Literal["read", "write", "execute", "web", "user", "memory", "verify", "system"]] = None
+    effects: tuple[str, ...] = ("unknown",)
+    write_path_keys: tuple[str, ...] = ()
+    execute_code_keys: tuple[str, ...] = ()
 
 
 @dataclass

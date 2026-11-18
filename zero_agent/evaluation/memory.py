@@ -27,6 +27,7 @@ from typing import Any, Iterable
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import AgentConfig, PROJECT_ROOT, load_default_config
 from zero_agent.core.types import TerminalEvent
+from zero_agent.extensions.context import ExtensionContext
 from zero_agent.memory.manager import MemoryManager
 from zero_agent.llm.sessions import LiteLLMSession
 from zero_agent.evaluation.evidence import historical_tool_evidence, observed_tool_results, trace_context
@@ -373,8 +374,16 @@ def _run_agent_phase(
     agent.set_config_path(None)
     trace: list[dict[str, Any]] = []
     events: list[Any] = []
-    for event in ("llm_before", "llm_after", "turn_after"):
-        agent.hooks.register(event, lambda context, event=event: trace.append(trace_context(event, context)))
+    observer = ExtensionContext("memory_eval", agent.extensions)
+    observer.on_llm_before(
+        lambda context: trace.append(trace_context("llm_before", context))
+    )
+    observer.on_llm_after(
+        lambda context: trace.append(trace_context("llm_after", context))
+    )
+    observer.on_turn_end(
+        lambda context: trace.append(trace_context("turn_end", context))
+    )
     started = time.perf_counter()
     terminal = _consume(agent.run(prompt), events)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)

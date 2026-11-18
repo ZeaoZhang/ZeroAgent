@@ -1001,3 +1001,42 @@ def test_session_usage_stats_separates_cache_creation_and_miss() -> None:
     assert stats["total_cached_tokens"] == 80
     assert stats["cache_hit_rate"] == 80.0
     assert stats["cache_metrics_available"] is True
+
+
+def test_request_transform_only_affects_wire_request(monkeypatch) -> None:
+    """on_llm_request 改写不得写回 session history."""
+    session = _make_session()
+    session.system = "original system"
+    captured = {}
+
+    def fake_stream(messages, tools):
+        captured["messages"] = messages
+        captured["tools"] = tools
+        yield "ok"
+        return MockResponse(content="ok")
+
+    monkeypatch.setattr(session, "_stream_chat", fake_stream)
+
+    def transform(request):
+        request.messages[0]["content"] = "MUTATED"
+        request.messages.append({"role": "assistant", "content": "junk"})
+        return request.replace(
+            system_prompt="transformed system",
+            tools=[{"type": "function", "function": {"name": "new_tool"}}],
+        )
+
+    list(session.chat(
+        [{"role": "user", "content": "hello"}],
+        tools=[{"type": "function", "function": {"name": "old_tool"}}],
+        transform=transform,
+    ))
+
+    assert captured["messages"][0] == {
+        "role": "system",
+        "content": "transformed system",
+    }
+    assert captured["messages"][1]["content"] == "MUTATED"
+    assert captured["messages"][-1] == {"role": "assistant", "content": "junk"}
+    assert captured["tools"][0]["function"]["name"] == "new_tool"
+    assert session.history == [{"role": "user", "content": "hello"}]
+    assert session.system == "original system"

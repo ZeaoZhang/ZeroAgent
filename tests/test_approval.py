@@ -20,8 +20,29 @@ from zero_agent.extensions.runtime import ExtensionRuntime, approval_fingerprint
 from zero_agent.tools.registry import ToolDefinition, ToolRegistry
 
 
+def _noop_handler(args, response, handler):
+    yield ""
+    return None
+
+
 def _registry() -> ToolRegistry:
-    return ToolRegistry()
+    registry = ToolRegistry()
+    definitions = (
+        ("file_write", ("write",), ("path",), ()),
+        ("file_patch", ("write",), ("path",), ()),
+        ("code_run", ("execute",), (), ("script", "script_path", "code")),
+    )
+    for name, effects, write_keys, code_keys in definitions:
+        registry.register(ToolDefinition(
+            name=name,
+            description="",
+            parameters={"type": "object", "properties": {}},
+            handler=_noop_handler,
+            effects=effects,
+            write_path_keys=write_keys,
+            execute_code_keys=code_keys,
+        ))
+    return registry
 
 
 def _runtime(home: Path, registry: ToolRegistry | None = None) -> ExtensionRuntime:
@@ -670,7 +691,7 @@ class TestScopeFlowThroughHandler:
         paused = self._dispatch(handler, "file_write", {"path": target, "content": "a"})
 
         assert paused.action is StepAction.WAIT_FOR_USER
-        assert paused.data["approval"]["scope"] == f"file_write:{target}"
+        assert paused.data["approval"]["scope"] == f"write:{target}"
 
     def test_granted_scope_covers_changed_args(self, tmp_path: Path) -> None:
         runtime = _runtime(tmp_path)

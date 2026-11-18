@@ -110,10 +110,46 @@ def test_goal_mode_continuation_has_phases():
     assert "改进阶段" in CONTINUATION_PROMPT
 
 
-def test_project_mode_plugin_register():
-    """project_mode plugin register() is callable and returns True."""
-    from zero_agent.plugins.project_mode import register
-    from zero_agent.core.hooks import HookSystem
-    hs = HookSystem()
-    result = register(hs)
-    assert result is True
+def test_project_mode_plugin_setup():
+    """project_mode setup() registers an llm request transform."""
+    from zero_agent.extensions.context import ExtensionContext
+    from zero_agent.extensions.runtime import ExtensionRuntime
+    from zero_agent.plugins.project_mode import setup
+    from zero_agent.tools.registry import ToolRegistry
+
+    runtime = ExtensionRuntime(registry=ToolRegistry())
+    setup(ExtensionContext("project_mode", runtime))
+    assert len(runtime._llm_request) == 1
+
+
+def test_project_mode_injects_into_request_copy(tmp_path):
+    """project_mode 只改请求副本，不写回调用方消息列表."""
+    from types import SimpleNamespace
+
+    from zero_agent.extensions.context import ExtensionContext
+    from zero_agent.extensions.events import LlmRequest
+    from zero_agent.extensions.runtime import ExtensionRuntime
+    from zero_agent.plugins.project_mode import setup
+    from zero_agent.tools.registry import ToolRegistry
+
+    workspace = tmp_path / "ws"
+    projects = workspace / "projects"
+    projects.mkdir(parents=True)
+    (projects / f".active_project.{os.getpid()}").write_text(
+        "demo", encoding="utf-8",
+    )
+    config = SimpleNamespace(workspace_dir=str(workspace))
+    handler = SimpleNamespace(parent=SimpleNamespace(config=config))
+    runtime = ExtensionRuntime(registry=ToolRegistry())
+    runtime.agent = SimpleNamespace(handler=handler)
+    setup(ExtensionContext("project_mode", runtime))
+
+    request = LlmRequest(
+        model="m",
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[],
+    )
+    updated = runtime.run_llm_request(request)
+
+    assert "[Project Mode] 当前项目：demo" in updated.messages[-1]["content"]
+    assert request.messages[-1]["content"] == "hello"

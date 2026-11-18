@@ -1,16 +1,14 @@
 """Worldline tracking plugin — rewind/checkpoint integration.
 
 When enabled via config (enable_worldline: true) or env (ZA_ENABLE_WORLDLINE=1),
-hooks into file_write and file_patch tools to track pre-edit file state,
-and commits checkpoints at turn boundaries for rewind capabilities.
+observes file_write/page tools to track pre-edit file state, and commits
+checkpoints at turn boundaries for rewind capabilities.
 
 Must be explicitly enabled — defaults to false to prevent surprise writes.
 """
 
 import os
 from typing import Any, Optional
-
-from zero_agent.core.hooks import EVENT_TOOL_BEFORE, EVENT_TURN_AFTER
 
 
 def _is_enabled(ctx: dict) -> bool:
@@ -114,7 +112,10 @@ def _on_turn_after(ctx: dict) -> None:
         summary = str(key_info)[:200]
 
     history_info = getattr(handler, "history_info", []) or []
-    history_len = len(getattr(handler, "client", {}).history if hasattr(handler, "client") and handler.client else [])
+    client = getattr(handler, "client", None)
+    if client is None:
+        client = getattr(getattr(handler, "parent", None), "client", None)
+    history_len = len(getattr(client, "history", []) or [])
 
     try:
         store.commit(
@@ -127,15 +128,17 @@ def _on_turn_after(ctx: dict) -> None:
         pass
 
 
-def register(hook_system: Any) -> bool:
-    """Register worldline tracking hooks.
+def setup(ctx: Any) -> None:
+    """安装 worldline tracking 扩展.
 
     Args:
-        hook_system: HookSystem instance.
-
-    Returns:
-        True (always — the hooks no-op when worldline is disabled).
+        ctx: 插件上下文（ExtensionContext）.
     """
-    hook_system.register(EVENT_TOOL_BEFORE, _on_tool_before)
-    hook_system.register(EVENT_TURN_AFTER, _on_turn_after)
-    return True
+
+    @ctx.on_tool_before
+    def track_before(payload: dict) -> None:
+        _on_tool_before(payload)
+
+    @ctx.on_turn_end
+    def commit_checkpoint(payload: dict) -> None:
+        _on_turn_after(payload)

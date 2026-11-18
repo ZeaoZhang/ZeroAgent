@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Optional
 
 from zero_agent.llm.base import MockFunction, MockResponse, MockToolCall, merge_mock_responses
 
@@ -152,6 +152,8 @@ class TextToolSession:
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
+        *,
+        transform: Optional[Callable[[Any], Any]] = None,
     ) -> Generator[str, None, MockResponse]:
         """Send messages to the wrapped session with a synthetic text protocol.
 
@@ -170,7 +172,10 @@ class TextToolSession:
         # Delegate to the wrapped session with no native tools
         raw_text = ""
         backend_response: Optional[MockResponse] = None
-        gen = self.backend.chat(full_prompt, tools=None)
+        chat_kwargs: Dict[str, Any] = {}
+        if transform is not None:
+            chat_kwargs["transform"] = transform
+        gen = self.backend.chat(full_prompt, tools=None, **chat_kwargs)
         finished = False
         try:
             while True:

@@ -1,12 +1,13 @@
-"""Per-session LLM token cost tracking via HookSystem.
+"""Per-session LLM token cost tracking via ExtensionRuntime.
 
-使用 ZeroAgent 的 HookSystem (llm_after 事件) 进行 per-thread
-token 用量追踪。
+使用扩展运行时的 ``llm_after`` 通知进行 per-thread token 用量追踪。
 
 Usage:
+    from zero_agent.extensions.context import ExtensionContext
     from zero_agent.utils.cost_tracker import CostTracker
+
     tracker = CostTracker()
-    agent.hooks.register("llm_after", tracker.on_llm_after)
+    tracker.attach(ExtensionContext("cost_tracker", agent.extensions))
     # ... run agent ...
     stats = tracker.get("za-agent-runner")
     print(f"Input: {stats.input}, Output: {stats.output}")
@@ -18,7 +19,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Any, Dict
 
 from zero_agent.llm.base import extract_usage_metrics, usage_has_cache_metrics
 
@@ -59,12 +60,12 @@ class TokenStats:
 class CostTracker:
     """Per-thread token 用量追踪器.
 
-    注册在 HookSystem 的 llm_after 事件上, 从 context["usage"]
+    注册在扩展运行时的 ``llm_after`` 事件上, 从 context["usage"]
     提取 token 统计并按线程名累积.
 
     Usage:
         tracker = CostTracker()
-        agent.hooks.register("llm_after", tracker.on_llm_after)
+        tracker.attach(ExtensionContext("cost_tracker", agent.extensions))
         # 任务完成后:
         stats = tracker.get(threading.current_thread().name)
         print(f"Tokens: {stats.total_tokens()}")
@@ -73,6 +74,14 @@ class CostTracker:
     def __init__(self) -> None:
         self._trackers: Dict[str, TokenStats] = {}
         self._lock = threading.Lock()
+
+    def attach(self, ctx: Any) -> None:
+        """把追踪器挂到扩展上下文的 llm_after 通知上.
+
+        Args:
+            ctx: ExtensionContext 实例.
+        """
+        ctx.on_llm_after(self.on_llm_after)
 
     def get(self, thread_name: str) -> TokenStats:
         with self._lock:
@@ -88,7 +97,7 @@ class CostTracker:
         with self._lock:
             return dict(self._trackers)
 
-    def on_llm_after(self, event: str, context: dict) -> None:
+    def on_llm_after(self, context: dict) -> None:
         usage = context.get("usage", {})
         if not usage:
             return

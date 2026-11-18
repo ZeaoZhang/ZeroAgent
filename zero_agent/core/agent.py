@@ -19,9 +19,8 @@ from importlib import resources
 from typing import Any, Dict, Generator, Iterable, List, Optional
 
 from zero_agent.core.config import AgentConfig, load_default_config
-from zero_agent.core.exceptions import ConfigError
+from zero_agent.core.exceptions import ConfigError, ExtensionBootstrapError
 from zero_agent.core.handler import BaseHandler
-from zero_agent.core.hooks import HookSystem
 from zero_agent.core.localization import (
     PROMPT_PEER_HINT,
     PROMPT_REPLY_LANGUAGE,
@@ -318,7 +317,6 @@ class ZeroAgent:
         config: Optional[AgentConfig] = None,
         handler: Optional[BaseHandler] = None,
         registry: Optional[ToolRegistry] = None,
-        hooks: Optional[HookSystem] = None,
         session_log_path: str | None = None,
     ) -> None:
         """初始化 ZeroAgent.
@@ -327,20 +325,17 @@ class ZeroAgent:
             config: Agent 配置，None 时从项目 config.yaml 或环境变量构建.
             handler: 自定义工具分发器，None 时创建 BaseHandler.
             registry: 自定义工具注册中心，None 时自动加载内置工具.
-            hooks: 自定义 HookSystem，None 时创建默认 HookSystem.
             session_log_path: Optional explicit response-log path.
         """
         self.config = config or load_default_config()
         self._session_log_path = session_log_path
         self._response_log_retired = False
-        self.hooks = hooks or HookSystem()
         from zero_agent.plugins.langfuse_tracing import LangfuseTracer
 
         try:
             self._langfuse_tracer = LangfuseTracer.from_config(self.config)
         except Exception:
             self._langfuse_tracer = LangfuseTracer()
-        self._register_builtin_plugins(self._langfuse_tracer)
 
         # 1. 工具注册中心
         self._owns_registry = registry is None
@@ -578,7 +573,6 @@ class ZeroAgent:
 
         try:
             self._langfuse_tracer.reconfigure(new_config)
-            self._register_builtin_plugins(self._langfuse_tracer)
         except Exception:
             _logger.warning(
                 "reload_config: Langfuse reconfiguration failed",
@@ -703,7 +697,6 @@ class ZeroAgent:
             tools_schema=tools_schema,
             max_turns=(120 if self.handler.task_contract.mode is TaskMode.PLAN else self.config.max_turns),
             verbose=self.config.verbose,
-            hooks=self.hooks,
             agent=self,
         )
         self.loop = loop
@@ -1039,6 +1032,12 @@ class ZeroAgent:
     _SAFETY_EXTENSIONS = ("permission_gate",)
     # 能力类内置扩展：只在启用扩展时安装
     _CAPABILITY_EXTENSIONS = ("skills_index", "mcp_client")
+    # 内部扩展：与外部插件共用同一运行时，始终安装（自身按配置 no-op）
+    _INTERNAL_EXTENSIONS = (
+        ("langfuse_tracing", "zero_agent.plugins.langfuse_tracing"),
+        ("project_mode", "zero_agent.plugins.project_mode"),
+        ("worldline_tracking", "zero_agent.plugins.worldline_tracking"),
+    )
 
     def _init_extensions(self) -> Any:
         """创建扩展运行时并加载插件与内置扩展.
@@ -1047,30 +1046,43 @@ class ZeroAgent:
         当前没有配置项可以关闭安全门：要关必须改代码（移除 ``permission_gate``
         的安装），这是刻意设计——避免一次误配置就失去全部写入保护。
 
-        失败时返回 None：扩展体系不可用不应阻断核心功能。
+        安全类扩展或运行时本身安装失败时抛 :class:`ExtensionBootstrapError`，
+        绝不在没有写入保护的情况下继续启动。外部插件与能力类扩展的失败仍只
+        记录日志，不影响启动。
 
         Returns:
-            ExtensionRuntime 实例或 None.
+            ExtensionRuntime 实例.
+
+        Raises:
+            ExtensionBootstrapError: 运行时或安全类扩展无法安装.
         """
         enabled = bool(getattr(self.config, "extensions_enabled", True))
-        try:
-            from zero_agent.extensions.runtime import ExtensionRuntime
+        from zero_agent.extensions.runtime import ExtensionRuntime
 
+        try:
             runtime = ExtensionRuntime(
                 registry=self.registry,
                 home=getattr(self.config, "extensions_home", None),
-                hooks=self.hooks,
                 config=self.config,
+                agent=self,
             )
+            runtime.services["langfuse_tracer"] = self._langfuse_tracer
+        except Exception as exc:  # noqa: BLE001 - 无运行时意味着无安全门
+            raise ExtensionBootstrapError(
+                f"扩展运行时初始化失败: {exc}",
+            ) from exc
+
+        try:
             if enabled:
                 runtime.load_all()
             self._install_builtin_extensions(runtime, enabled=enabled)
-            return runtime
-        except Exception as exc:  # noqa: BLE001 - 扩展失败不得阻断启动
-            _logger.warning(
-                "扩展运行时初始化失败，已跳过: %s", exc
-            )
-            return None
+        except Exception:
+            try:
+                runtime.release()
+            except Exception:  # noqa: BLE001 - 清理失败不覆盖原始错误
+                _logger.warning("扩展运行时清理失败", exc_info=True)
+            raise
+        return runtime
 
     def _install_builtin_extensions(
         self,
@@ -1078,23 +1090,34 @@ class ZeroAgent:
         *,
         enabled: bool = True,
     ) -> None:
-        """安装内置扩展；单个失败只记录日志.
+        """安装内置扩展；安全类失败致命，能力类失败可跳过.
 
         Args:
             runtime: ExtensionRuntime 实例.
             enabled: 是否安装能力类扩展（安全类始终安装）.
+
+        Raises:
+            ExtensionBootstrapError: 安全类扩展安装失败.
         """
         from zero_agent.extensions.context import ExtensionContext
 
         logger = _logger
-        names = list(self._SAFETY_EXTENSIONS)
+        targets = [
+            (name, f"zero_agent.extensions.builtin.{name}", name in self._SAFETY_EXTENSIONS)
+            for name in self._SAFETY_EXTENSIONS
+        ]
         if enabled:
-            names.extend(self._CAPABILITY_EXTENSIONS)
-        for name in names:
+            targets.extend(
+                (name, f"zero_agent.extensions.builtin.{name}", False)
+                for name in self._CAPABILITY_EXTENSIONS
+            )
+        targets.extend(
+            (name, module_path, False)
+            for name, module_path in self._INTERNAL_EXTENSIONS
+        )
+        for name, module_path, is_safety in targets:
             try:
-                module = importlib.import_module(
-                    f"zero_agent.extensions.builtin.{name}",
-                )
+                module = importlib.import_module(module_path)
                 teardown = module.setup(ExtensionContext(name, runtime))
                 if callable(teardown):
                     runtime.register_teardown(name, teardown)
@@ -1102,32 +1125,17 @@ class ZeroAgent:
                 # 否则 release()（ZeroAgent.close() 与进程退出兜底）不会撤销
                 # 它们注册的工具与回调
                 runtime.track_owner(name)
-            except Exception as exc:  # noqa: BLE001 - 单个内置扩展失败可跳过
+            except Exception as exc:  # noqa: BLE001 - 按安全/能力分级处理
                 # 安装到一半失败时清掉半成品注册（例如门控只注册了一半）
                 try:
                     runtime.unregister_owner(name)
-                except Exception:  # noqa: BLE001 - 清理失败不影响启动
+                except Exception:  # noqa: BLE001 - 清理失败不影响后续处理
                     pass
+                if is_safety:
+                    raise ExtensionBootstrapError(
+                        f"安全扩展 {name} 安装失败: {exc}",
+                    ) from exc
                 logger.warning("内置扩展 %s 安装失败，已跳过: %s", name, exc)
-
-    def _register_builtin_plugins(self, tracer: Any = None) -> None:
-        """注册内置插件；缺依赖或缺配置时静默跳过."""
-        try:
-            from zero_agent.plugins.langfuse_tracing import register
-
-            register(self.hooks, config=self.config, tracer=tracer)
-        except Exception:
-            pass
-        try:
-            from zero_agent.plugins.project_mode import register
-            register(self.hooks)
-        except Exception:
-            pass
-        try:
-            from zero_agent.plugins.worldline_tracking import register
-            register(self.hooks)
-        except Exception:
-            pass
 
     def list_backends(self) -> list[tuple[str, str, bool]]:
         """列出所有可用的 LLM 后端.

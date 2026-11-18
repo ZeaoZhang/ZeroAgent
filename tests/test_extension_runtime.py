@@ -14,8 +14,24 @@ from zero_agent.tools.registry import ToolDefinition, ToolRegistry
 
 
 def _make_registry() -> ToolRegistry:
-    """构造一个空注册表，测试不依赖内置工具."""
-    return ToolRegistry()
+    """构造带策略工具声明的注册表，测试不依赖完整内置工具集."""
+    registry = ToolRegistry()
+    definitions = (
+        ("file_write", ("write",), ("path",), ()),
+        ("file_patch", ("write",), ("path",), ()),
+        ("code_run", ("execute",), (), ("script", "script_path", "code")),
+    )
+    for name, effects, write_keys, code_keys in definitions:
+        registry.register(ToolDefinition(
+            name=name,
+            description="",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda args, response, handler: None,
+            effects=effects,
+            write_path_keys=write_keys,
+            execute_code_keys=code_keys,
+        ))
+    return registry
 
 
 def _write(path: Path, text: str) -> Path:

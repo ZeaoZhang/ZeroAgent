@@ -47,6 +47,7 @@ def register_vision_tools(registry: ToolRegistry, config: AgentConfig) -> None:
             handler=_make_vision_handler(config),
             evidence_kind="read",
             category="vision",
+            effects=("read",),
         )
     )
 

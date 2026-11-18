@@ -24,8 +24,29 @@ def _tool(name: str, description: str = "d") -> ToolDefinition:
     )
 
 
+def _noop_handler(args, response, handler):
+    yield ""
+    return None
+
+
 def _registry() -> ToolRegistry:
-    return ToolRegistry()
+    registry = ToolRegistry()
+    definitions = (
+        ("file_write", ("write",), ("path",), ()),
+        ("file_patch", ("write",), ("path",), ()),
+        ("code_run", ("execute",), (), ("script", "script_path", "code")),
+    )
+    for name, effects, write_keys, code_keys in definitions:
+        registry.register(ToolDefinition(
+            name=name,
+            description="",
+            parameters={"type": "object", "properties": {}},
+            handler=_noop_handler,
+            effects=effects,
+            write_path_keys=write_keys,
+            execute_code_keys=code_keys,
+        ))
+    return registry
 
 
 def _runtime(home: Path, registry: ToolRegistry | None = None) -> ExtensionRuntime:
@@ -539,17 +560,17 @@ class TestCustomHandlerRegistry:
 
 
 class TestNotifyDispatch:
-    """通知型事件必须由 hook 生命周期真正触发（此前 notify() 无调用者）."""
+    """通知型事件由核心循环直接发到扩展运行时."""
 
-    def test_hook_events_map_to_notify(self, tmp_path: Path) -> None:
+    def test_events_dispatch_to_subscribers(self, tmp_path: Path) -> None:
         runtime = _runtime(tmp_path)
         seen: list = []
         runtime.subscribe_notify("agent_start", "p", lambda payload: seen.append(payload))
         runtime.subscribe_notify("turn_end", "p", lambda payload: seen.append(payload))
 
-        runtime.dispatch_hook_notify("agent_before", {"turn": 1})
-        runtime.dispatch_hook_notify("turn_after", {"turn": 2})
-        runtime.dispatch_hook_notify("tool_before", {"ignored": True})
+        runtime.notify("agent_start", {"turn": 1})
+        runtime.notify("turn_end", {"turn": 2})
+        runtime.notify("tool_before", {"ignored": True})
 
         assert seen == [{"turn": 1}, {"turn": 2}]
 
@@ -563,7 +584,7 @@ class TestNotifyDispatch:
             "turn_start", "b", lambda payload: seen.append(dict(payload)),
         )
 
-        runtime.dispatch_hook_notify("turn_before", {"turn": 1})
+        runtime.notify("turn_start", {"turn": 1})
 
         assert seen == [{"turn": 1}]
 
@@ -574,7 +595,7 @@ class TestNotifyDispatch:
             lambda payload: seen.append(payload),
         )
 
-        runtime.dispatch_hook_notify("llm_after", {"turn": 1})
+        runtime.notify("llm_after", {"turn": 1})
 
         assert seen == [{"turn": 1}]
 
@@ -785,3 +806,164 @@ class TestAgentClose:
 
         agent.close()
         assert agent.extensions is None
+
+
+class TestExtensionToolFailureIsolation:
+    """扩展工具抛异常时必须转成 error 结果，而不是拖垮整个任务."""
+
+    def test_tool_exception_returns_error_outcome(self, tmp_path: Path) -> None:
+        from zero_agent.core.handler import BaseHandler
+        from zero_agent.llm.base import MockResponse
+
+        runtime = _runtime(tmp_path)
+        ctx = ExtensionContext("boom_plugin", runtime)
+
+        @ctx.tool(name="boom", description="always fails")
+        def boom(args):
+            raise RuntimeError("plugin tool exploded")
+
+        handler = BaseHandler(registry=runtime.registry)
+        handler.parent = SimpleNamespace(extensions=runtime)
+
+        gen = handler.dispatch("boom", {}, MockResponse())
+        try:
+            while True:
+                next(gen)
+        except StopIteration as stop:
+            outcome = stop.value
+
+        assert outcome.data["status"] == "error"
+        assert "plugin tool exploded" in outcome.data["error"]
+        assert outcome.data["exception"] == "RuntimeError"
+        assert handler.evidence_ledger.records[-1].status == "error"
+
+
+def _bootstrap_config(tmp_path: Path):
+    from zero_agent.core.config import AgentConfig, LLMBackendConfig
+
+    return AgentConfig(
+        llm_backends={
+            "d": LLMBackendConfig(
+                name="d",
+                provider="openai",
+                api_key="k",
+                api_base="https://api.openai.com/v1",
+                model="gpt-4o",
+            )
+        },
+        default_backend="d",
+        workspace_dir=str(tmp_path / "ws"),
+        memory_dir=str(tmp_path / "mem"),
+        sessions_dir=str(tmp_path / "sessions"),
+        extensions_home=str(tmp_path / "home"),
+    )
+
+
+class TestExtensionBootstrapFailure:
+    """安全门安装失败必须显式失败；能力类扩展失败可跳过."""
+
+    def test_safety_extension_failure_aborts_startup(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from zero_agent.core.agent import ZeroAgent
+        from zero_agent.core.exceptions import ExtensionBootstrapError
+
+        def boom(ctx):
+            raise RuntimeError("gate exploded")
+
+        monkeypatch.setattr(permission_gate, "setup", boom)
+
+        with pytest.raises(ExtensionBootstrapError, match="permission_gate"):
+            ZeroAgent(_bootstrap_config(tmp_path))
+
+    def test_capability_extension_failure_is_skipped(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from zero_agent.core.agent import ZeroAgent
+
+        def boom(ctx):
+            raise RuntimeError("mcp exploded")
+
+        monkeypatch.setattr(mcp_client, "setup", boom)
+        agent = ZeroAgent(_bootstrap_config(tmp_path))
+        try:
+            assert agent.extensions is not None
+            assert agent.registry.get("skill_load") is not None
+        finally:
+            agent.close()
+
+
+class TestEffectBasedPolicy:
+    """策略层必须按 effects 判定，而不是按工具名."""
+
+    def _runtime(self, tmp_path: Path) -> ExtensionRuntime:
+        runtime = _runtime(tmp_path)
+        permission_gate.setup(ExtensionContext("permission_gate", runtime))
+        return runtime
+
+    def _register(
+        self,
+        runtime: ExtensionRuntime,
+        name: str,
+        *,
+        effects: tuple[str, ...],
+        write_path_keys: tuple[str, ...] = (),
+        execute_code_keys: tuple[str, ...] = (),
+    ) -> None:
+        runtime.registry.register(ToolDefinition(
+            name=name,
+            description="",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda args, response, handler: None,
+            effects=effects,
+            write_path_keys=write_path_keys,
+            execute_code_keys=execute_code_keys,
+        ))
+
+    def test_renamed_writer_still_requires_approval(
+        self, tmp_path: Path
+    ) -> None:
+        runtime = self._runtime(tmp_path)
+        self._register(
+            runtime, "write_v2",
+            effects=("write",),
+            write_path_keys=("target",),
+        )
+        target = str(Path(runtime.home) / "skills" / "demo" / "SKILL.md")
+
+        verdict = runtime.evaluate_tool_call(
+            "write_v2", {"target": target, "content": "x"},
+        )
+
+        assert verdict.needs_approval
+
+    def test_renamed_exec_tool_still_blocks_dangerous_shell(
+        self, tmp_path: Path
+    ) -> None:
+        runtime = self._runtime(tmp_path)
+        self._register(
+            runtime, "run_v2",
+            effects=("execute",),
+            execute_code_keys=("cmd",),
+        )
+
+        verdict = runtime.evaluate_tool_call("run_v2", {"cmd": "rm -rf /"})
+
+        assert verdict.is_block
+
+    def test_unknown_effects_require_approval(self, tmp_path: Path) -> None:
+        runtime = self._runtime(tmp_path)
+        self._register(runtime, "mystery", effects=("unknown",))
+
+        verdict = runtime.evaluate_tool_call("mystery", {"x": 1})
+
+        assert verdict.needs_approval
+        assert verdict.scope == "tool:mystery"
+
+    def test_write_without_path_keys_is_blocked(self, tmp_path: Path) -> None:
+        runtime = self._runtime(tmp_path)
+        self._register(runtime, "bad_writer", effects=("write",))
+
+        verdict = runtime.evaluate_tool_call("bad_writer", {"x": 1})
+
+        assert verdict.is_block

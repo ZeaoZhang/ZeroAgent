@@ -152,6 +152,7 @@ def setup(ctx: Any) -> None:
         evidence_kind="read",
         category="extension",
         promotes_task_state=False,
+        effects=("read",),
     )
     def skill_load(args: Dict[str, Any]) -> str:
         """读取技能正文.

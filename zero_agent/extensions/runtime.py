@@ -39,15 +39,18 @@ _logger = logging.getLogger("zero_agent.extensions")
 
 DEFAULT_EXTENSION_HOME = "~/.zeroagent"
 
-# 旧 HookSystem 的 hook 事件 → 扩展通知事件（设计第六节的通知类）
-# 由 AgentLoop 在触发 hook 时统一转发，插件通过 ctx.on_agent_start 等订阅
-_HOOK_TO_NOTIFY: Dict[str, str] = {
-    "agent_before": "agent_start",
-    "turn_before": "turn_start",
-    "turn_after": "turn_end",
-    "agent_after": "agent_end",
-    "llm_after": "llm_after",
-}
+# 通知型事件的唯一合法集合。核心循环只允许触发这些事件；
+# 变换与门控各有独立入口，不能混用。
+NOTIFY_EVENTS = frozenset({
+    "agent_start",
+    "turn_start",
+    "llm_before",
+    "llm_after",
+    "tool_before",
+    "tool_after",
+    "turn_end",
+    "agent_end",
+})
 
 # dispatch 注入的内部参数键，不参与审批指纹
 _INTERNAL_ARG_KEYS = frozenset({"_index", "_tool_num"})
@@ -163,7 +166,8 @@ class ExtensionRuntime:
     Attributes:
         registry: 当前使用的工具注册表.
         home: 扩展根目录.
-        hooks: 兼容旧版 HookSystem 的通知出口，可为 None.
+        agent: 所属 ZeroAgent；内置扩展可借此访问 config/handler.
+        services: 供内置扩展使用的依赖注入表（如 langfuse tracer）.
     """
 
     def __init__(
@@ -171,21 +175,22 @@ class ExtensionRuntime:
         *,
         registry: ToolRegistry,
         home: Optional[Path | str] = None,
-        hooks: Any = None,
         config: Any = None,
+        agent: Any = None,
     ) -> None:
         """初始化运行时（不加载任何插件）.
 
         Args:
             registry: 已包含内置工具的工具注册表.
             home: 扩展根目录，默认 ``~/.zeroagent``.
-            hooks: 可选的旧版 HookSystem，用于转发通知.
             config: 可选的 AgentConfig，传给插件上下文.
+            agent: 所属 ZeroAgent；内置扩展用它访问 handler/config.
         """
         self.registry = registry
         self.home = Path(home).expanduser() if home is not None else _default_home()
-        self.hooks = hooks
         self.config = config
+        self.agent = agent
+        self.services: Dict[str, Any] = {}
 
         self._loaded: Dict[str, Any] = {}
         self._teardowns: Dict[str, Callable[[], None]] = {}
@@ -339,6 +344,8 @@ class ExtensionRuntime:
         self._tool_defs.clear()
         self._approvals.clear()
         self._scope_grants.clear()
+        self.services.clear()
+        self.agent = None
 
     def attach_registry(self, registry: ToolRegistry) -> None:
         """在 registry 被重建后重放全部插件工具注册.
@@ -386,6 +393,9 @@ class ExtensionRuntime:
         callback: NotifyCallback,
     ) -> None:
         """订阅通知型事件."""
+        if event not in NOTIFY_EVENTS:
+            _logger.warning("忽略未知的扩展通知订阅: %s", event)
+            return
         self._notify.setdefault(event, []).append((owner, callback))
 
     def subscribe_tool_call(self, owner: str, callback: GateCallback) -> None:
@@ -411,6 +421,15 @@ class ExtensionRuntime:
 
     # ---- 事件分发 -------------------------------------------------------
 
+    @property
+    def has_llm_request_subscribers(self) -> bool:
+        """是否有插件订阅模型请求变换.
+
+        核心循环据此决定是否深拷贝 messages/tools：没有订阅者时不做任何
+        额外复制，避免为不使用该扩展点的用户增加每轮开销。
+        """
+        return bool(self._llm_request)
+
     def notify(self, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
         """分发通知型事件；单个回调失败不影响其他回调.
 
@@ -420,28 +439,15 @@ class ExtensionRuntime:
             event: 事件名.
             payload: 事件负载.
         """
+        if event not in NOTIFY_EVENTS:
+            _logger.warning("忽略未知的扩展通知事件: %s", event)
+            return
         data = payload if isinstance(payload, dict) else {}
         for owner, callback in self._notify.get(event, []):
             try:
                 callback(dict(data))
             except Exception as exc:  # noqa: BLE001 - 通知失败只记录
                 _logger.warning("扩展 %s 的 %s 回调失败: %s", owner, event, exc)
-
-    def dispatch_hook_notify(self, hook_event: str, payload: Optional[Dict[str, Any]] = None) -> None:
-        """把旧 HookSystem 的生命周期 hook 转发成扩展通知事件.
-
-        ``AgentLoop`` 在每个 hook 点调用本方法，从而让
-        ``ctx.on_agent_start / on_turn_start / on_turn_end / on_agent_end /
-        on_llm_after`` 真正被触发。
-
-        Args:
-            hook_event: 旧 hook 事件名（agent_before 等）.
-            payload: 该 hook 的上下文.
-        """
-        event = _HOOK_TO_NOTIFY.get(hook_event)
-        if event is None:
-            return
-        self.notify(event, payload)
 
     def evaluate_tool_call(
         self,
@@ -469,7 +475,11 @@ class ExtensionRuntime:
         if not self._tool_call:
             return ToolCallVerdict("allow")
 
-        call = ToolCall(tool_name=tool_name, args=args)
+        call = ToolCall(
+            tool_name=tool_name,
+            args=args,
+            definition=self.registry.get(tool_name),
+        )
         approval_reason = ""
         approval_fingerprint_value = ""
         approval_scope_value = ""

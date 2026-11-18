@@ -81,6 +81,7 @@ def register_memory_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         evidence_kind="memory",
         category="memory",
         promotes_task_state=False,
+        effects=("memory",),
     ))
 
     registry.register(ToolDefinition(
@@ -102,6 +103,7 @@ def register_memory_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         evidence_kind="memory",
         category="memory",
         promotes_task_state=False,
+        effects=("memory",),
     ))
 
 

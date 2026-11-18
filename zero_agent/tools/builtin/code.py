@@ -304,6 +304,8 @@ def register_code_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         },
         handler=_make_code_run_handler(config),
         category="builtin",
+        effects=("execute",),
+        execute_code_keys=("script", "script_path", "code"),
     ))
 
 
