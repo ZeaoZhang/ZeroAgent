@@ -426,6 +426,8 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         category="browser",
         effects=("write", "network"),
         write_path_keys=("save_to_file",),
+        # save_to_file 可选：不传时结果只回给模型，不落盘（见 handler）
+        optional_write_paths=True,
     ))
 
     registry.register(ToolDefinition(
@@ -471,6 +473,9 @@ def register_web_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         category="browser",
         effects=("write",),
         write_path_keys=("save_to_file",),
+        # save_to_file 可选：不传时写 workspace/screenshots/browser.png，
+        # 目标由 handler 写死，模型控制不到，因此不需要审批
+        optional_write_paths=True,
     ))
 
 

@@ -357,8 +357,13 @@ def register_file_tools(registry: ToolRegistry, config: AgentConfig) -> None:
     ))
 
 
-def _resolve_path(path: str, config: AgentConfig) -> str:
+def resolve_file_path(path: str, config: AgentConfig) -> str:
     """将相对路径解析为绝对路径.
+
+    这是文件工具写入目标的唯一口径：``permission_gate`` 判定「是否受保护」时
+    必须调用同一个函数，否则会出现「判定一个路径、实际写另一个路径」的绕过。
+    执行类工具（``code_run`` 的 ``script_path``）用的是更严格的
+    ``utils.files.resolve_workspace_path``，两者语义不同，不要混用。
 
     Args:
         path: 原始路径.
@@ -395,7 +400,7 @@ def _make_file_read_handler(config: AgentConfig):
         _response: Any,
         handler: Any,
     ) -> Generator[str, None, str | StepOutcome]:
-        path = _resolve_path(args.get("path", ""), config)
+        path = resolve_file_path(args.get("path", ""), config)
         yield f"[Action] Reading file: {path}\n"
         start = args.get("start", 1)
         count = args.get("count", 200)
@@ -473,7 +478,7 @@ def _make_file_write_handler(config: AgentConfig):
         _response: Any,
         handler: Any,
     ) -> Generator[str, None, dict]:
-        path = _resolve_path(args.get("path", ""), config)
+        path = resolve_file_path(args.get("path", ""), config)
         mode = args.get("mode", "overwrite")
         action_str = {"prepend": "Prepending to", "append": "Appending to"}.get(mode, "Overwriting")
         yield f"[Action] {action_str} file: {os.path.basename(path)}\n"
@@ -523,7 +528,7 @@ def _make_file_patch_handler(config: AgentConfig):
         _response: Any,
         handler: Any,
     ) -> Generator[str, None, dict]:
-        path = _resolve_path(args.get("path", ""), config)
+        path = resolve_file_path(args.get("path", ""), config)
         yield f"[Action] Patching file: {path}\n"
         old_content = args.get("old_content", "")
         new_content = args.get("new_content", "")

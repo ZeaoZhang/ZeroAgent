@@ -701,7 +701,8 @@ class FeishuApp(AgentBotMixin):
                         await asyncio.to_thread(
                             _complete,
                             terminal_output_text(item),
-                            terminal_reply_text(item),
+                            terminal_reply_text(item)
+                            or _display_text(terminal_output_text(item)),
                         )
                     else:
                         await asyncio.to_thread(card.terminal, terminal_notice(item))

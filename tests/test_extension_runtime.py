@@ -13,6 +13,12 @@ from zero_agent.extensions.runtime import ExtensionRuntime, discover
 from zero_agent.tools.registry import ToolDefinition, ToolRegistry
 
 
+def _gate_reason(runtime, tool_name: str, args: dict):
+    """读取门控判定，返回拒绝/待批准原因（放行时为 None）."""
+    verdict = runtime.evaluate_tool_call(tool_name, args)
+    return None if verdict.is_allow else (verdict.reason or "blocked")
+
+
 def _make_registry() -> ToolRegistry:
     """构造带策略工具声明的注册表，测试不依赖完整内置工具集."""
     registry = ToolRegistry()
@@ -161,7 +167,7 @@ class TestGates:
         runtime = _runtime(tmp_path)
         runtime.load_all()
 
-        assert runtime.run_tool_call("code_run", {}) == "no"
+        assert _gate_reason(runtime, "code_run", {}) == "no"
 
     def test_exception_fails_closed(self, tmp_path: Path) -> None:
         _write(
@@ -176,7 +182,7 @@ class TestGates:
         runtime = _runtime(tmp_path)
         runtime.load_all()
 
-        reason = runtime.run_tool_call("code_run", {})
+        reason = _gate_reason(runtime, "code_run", {})
         assert reason is not None
         assert "拒绝" in reason
 
@@ -194,7 +200,7 @@ class TestGates:
         runtime.load_all()
         args = {"value": 1}
 
-        assert runtime.run_tool_call("file_read", args) is None
+        assert _gate_reason(runtime, "file_read", args) is None
         assert args["injected"] is True
 
     def test_veto_exception_is_caught(self, tmp_path: Path) -> None:
@@ -211,7 +217,7 @@ class TestGates:
         runtime = _runtime(tmp_path)
         runtime.load_all()
 
-        assert runtime.run_tool_call("code_run", {}) == "raised"
+        assert _gate_reason(runtime, "code_run", {}) == "raised"
 
 
 class TestTransforms:
@@ -339,7 +345,7 @@ class TestBuiltins:
         runtime = _runtime(tmp_path)
         permission_gate.setup(ExtensionContext("permission_gate", runtime))
 
-        reason = runtime.run_tool_call("code_run", {"code": "rm -rf /"})
+        reason = _gate_reason(runtime, "code_run", {"script": "rm -rf /"})
         assert reason is not None
         assert "拦截" in reason
 
@@ -347,7 +353,7 @@ class TestBuiltins:
         runtime = _runtime(tmp_path)
         permission_gate.setup(ExtensionContext("permission_gate", runtime))
 
-        assert runtime.run_tool_call("code_run", {"code": "ls -la"}) is None
+        assert _gate_reason(runtime, "code_run", {"script": "ls -la"}) is None
 
     def test_permission_gate_asks_for_protected_write(self, tmp_path: Path) -> None:
         runtime = _runtime(tmp_path)
@@ -364,7 +370,7 @@ class TestBuiltins:
         runtime = _runtime(tmp_path)
         permission_gate.setup(ExtensionContext("permission_gate", runtime))
 
-        assert runtime.run_tool_call("file_write", {"path": "/tmp/notes.txt"}) is None
+        assert _gate_reason(runtime, "file_write", {"path": "/tmp/notes.txt"}) is None
 
 
 class TestRelease:
@@ -391,7 +397,7 @@ class TestRelease:
 
         assert registry.get("plug") is None
         assert runtime.loaded_names == []
-        assert runtime.run_tool_call("code_run", {}) is None
+        assert _gate_reason(runtime, "code_run", {}) is None
         assert runtime.collect_prompt_blocks() == []
 
 

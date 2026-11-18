@@ -131,8 +131,9 @@ zero_agent/
 
 | 项目 | 规则 |
 | --- | --- |
-| 时机 | `ZeroAgent.__init__` 中，`ToolRegistry.with_builtins()` 之后、`BaseHandler` 创建之前 |
-| 理由 | 内置工具先就位，插件才能覆盖或补充；handler 依赖最终的 registry |
+| 时机 | `ZeroAgent.__init__` 中，`ToolRegistry.with_builtins()` 与 handler registry 归一化**之后** |
+| 理由 | 内置工具先就位，插件才能覆盖或补充；handler 可能替换 registry，
+  扩展必须加载到最终那份 registry 上，否则插件工具会注册进随后被丢弃的对象 |
 | 顺序 | 按插件名字典序，稳定可预期 |
 | 次数 | 每个插件 `setup(ctx)` 只调用一次，进程内常驻 |
 | 失败 | 导入或 `setup` 抛异常 → 记录日志并跳过该插件，不阻断启动 |
@@ -222,7 +223,9 @@ CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有
 接口刻意保持小：**工具、提示词、请求、工具调用、工具结果，五类**。其余能力通过这五类组合实现。
 `ctx.confirm` 不是独立通道，而是 `on_tool_call` 门控的返回值；批准后由任务等待/恢复链路续跑。
 
-通知型回调是**只读契约**：运行时只保证把负载交给回调，不承诺回写。需要修改行为时使用变换或门控。
+通知型回调是**只读契约**：每个回调拿到的是负载的深拷贝（运行期对象如
+`handler` 按引用传递并标为只读），原地修改 `messages`/`args` 不会污染真实请求或历史。
+需要修改行为时使用变换或门控。
 
 ### 6.7 三类扩展点语义
 
@@ -319,26 +322,30 @@ CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有
   SHA-256 前 16 位。模型只要改了目标或内容，指纹就变，需要重新批准。
 - **一次性通行证**：批准后写入 `runtime._approvals`，绑定 `task_id` 且默认
   600 秒有效；下一次同指纹调用消费后立即失效，跨任务无法复用。
-  拒绝则清空全部未使用通行证。
+  拒绝时只清空「当前任务 + 未绑定任务」的通行证，其他任务的通行证不受影响。
 - **批量授权（scope）**：`ctx.confirm(..., scope="...")` 在批准时额外登记一个
   路径级的批量授权，键为 `(task_id, scope)`，与一次性通行证同寿命。之后满足
   「同任务 + 同 scope」的调用直接放行，不再弹审批——内容改一个换行也会被覆盖，
   这是刻意的取舍：模型反复改写同一个文件时，逐字节审批只会把用户训练成
   「闭眼点同意」。窗口由 TTL、任务绑定和路径级 scope 三重收窄；`permission_gate`
-  的 scope 形如 `file_write:<解析后的绝对路径>`，只覆盖该文件，不覆盖同目录其他文件。
+  的 scope 形如 `write:<解析后的绝对路径>`，只覆盖该文件，不覆盖同目录其他文件。
 - **求值顺序**：门控全部跑完才决定是否消费通行证，避免通行证被后续门控的
   `block` 白烧。
 - **暂停与恢复**：门控要求审批时 `dispatch` 返回 `WAIT_FOR_USER`，
   `PendingTaskState.waiting_kind = "approval"`。用户答复被判定为批准
   （「批准/同意/允许/approve/yes/ok」等，允许句末标点）才发放通行证，
   其余一律按拒绝处理——安全优先，不做前缀或模糊匹配（"批准吧"也算拒绝）。
-  指纹缺失（暂停状态失效）时按拒绝处理，不会谎报「已批准」。
+  指纹缺失（暂停状态失效）时按拒绝处理，不会谎报「已批准」。门控给出的
+  `candidates` 会透传到暂停数据，前端可直接展示。
 - **内置策略**：`permission_gate` 对受保护路径的写入走 `confirm`（可批准），
   问句附带将写入内容的长度与 sha256 摘要，避免盲批；对明确危险的 shell
   （递归强制删除、格式化、关机等）仍直接 `block`。路径判定复用文件工具的
   解析口径（含 `memory_dir` 前缀重定向），避免判定与实际写入位置不一致。
-- **路径规范化**：`scope` 使用解析后的绝对路径（realpath + normcase），因此同一
-  文件经软链、相对路径两种写法命中同一个批量授权，不会重复弹审批。
+- **路径规范化**：`scope` 使用解析后的绝对路径（realpath + 平台大小写归一），因此同一
+  文件经软链、相对路径两种写法命中同一个批量授权，不会重复弹审批；
+  macOS/Windows 这类大小写不敏感文件系统上，改大小写也绕不过受保护前缀判定。
+- **任务严格绑定**：通行证只在 `task_id` 完全一致时可消费；空 `task_id` 不再
+  表示「任意任务」（生产路径总是带任务名）。
 - **拒绝的清理范围**：用户拒绝时只清除「当前任务 + 未绑定任务」的通行证，
   其他任务已发放的通行证不受影响。
 - **已知边界**：没有 `scope` 的门控仍然「一次批准只放行一次具体调用」，模型
@@ -364,7 +371,26 @@ CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有
 - 路径型沙箱无法阻止**硬链接**：白名单外的文件被硬链进 workspace 后仍可写。
 - 白名单内的临时目录、以及任何同权限的可写目录，都能被用作落脚点。
 - Linux 依赖可用的 `bwrap` 与 unprivileged userns；不可用时整体降级为不隔离。
+  macOS 与 Linux 都把临时目录纳入可写白名单（python 模式的脚本落在那里）。
 - 降级是静默的（只在执行日志里提示），因此不能把"开了 sandbox"当作安全保证。
+
+**策略层的判定口径与已知漏洞**（`extensions/builtin/shell_policy.py`）：
+
+- 判定的是「将要执行的那份代码」：`script` / `script_path` 参数，
+  以及参数为空时 `code_run` 会退而执行的**回复围栏代码块**。两者都不存在时
+  说明本次调用不执行任何代码，交给 `code_run` 自身报 `code_run_missing_input`
+  （门控不伪造安全结论，也不打断既有的协议重试预算）。
+- `script_path` 用与 `code_run` 完全相同的 `resolve_workspace_path` 解析并读取；
+  读不到、越界、超过 200 000 字符一律拒绝——「检查的文件」必须就是「执行的文件」。
+- 命令词先剥离引号与反斜杠（`\rm`、`"rm"`、`r''m` 都识别为 `rm`）；
+  `sh/bash/zsh -c`、`eval` 的 payload 与 `$(...)`/反引号内容递归判定；
+  `find` 只要出现 `-delete`/`-exec`/`-execdir` 就校验遍历起点；
+  `cd`/`pushd`/`env -C` 会更新相对路径基准。
+- 仍然挡不住的：`sh script.sh` 执行的脚本内容、`python -c`/`perl` 等其它语言里的
+  文件操作、以及任何同权限进程可直接做的事。这些是沙箱层（或操作系统隔离）的职责。
+- 门控只能判定「参数里声明的代码」与「回复代码块」。如果某个 `execute` 类工具从
+  其它参数拼出要执行的代码，它必须把这些参数键全部列进 `execute_code_keys`，
+  否则门控看不到——这是工具声明正确性的责任，不是门控能猜出来的。
 
 ## 十、配置位置
 
@@ -384,11 +410,16 @@ extensions:
   enabled: true            # false 时不加载插件、skill 与 MCP（安全门仍生效）
   home: "~/.zeroagent"     # 扩展根目录，可指向临时目录便于测试
   protected_writes: []     # 额外的受保护路径；写入前需人类批准
-  sandbox: off             # code_run 沙箱：off | auto | macos | linux
+  sandbox: "off"           # code_run 沙箱：off | auto | macos | linux（加引号避免 YAML 布尔）
 ```
 
 生效时机：`sandbox` 随 registry 重建即时生效（配置热重载会触发）；
+`protected_writes` 在每次配置热重载后刷新到运行时（策略层按新列表判定）；
 `enabled` 与 `home` 变更需要重启进程。
+
+配置值解析：`enabled` 接受 `true/false` 与 `"true"/"false"`（字符串 `"false"`
+不会被当成真值）；`protected_writes` 传单个字符串时按一项处理；`sandbox` 非法值
+会告警并按 `off` 处理。
 
 **策略说明（与早期设计的差异）**：策略层不再按工具名判断，而是读取
 `ToolDefinition.effects`。早期设计里的 `approval.default` / `approval.rules`
@@ -396,11 +427,15 @@ extensions:
 
 | 声明 | 行为 |
 | --- | --- |
-| `effects` 含 `write`，目标命中 `~/.zeroagent/{skills,extensions,mcp.json}`、扩展根目录或 `protected_writes` | `ask`：暂停并请求批准；路径级 `scope`，同任务同路径在 TTL 内不重复询问 |
+| `effects` 含 `write`，目标命中 `<extensions.home>/{skills,extensions,mcp.json}`、扩展根目录或 `protected_writes` | `ask`：暂停并请求批准；路径级 `scope`，同任务同路径在 TTL 内不重复询问 |
 | `effects` 含 `write`，目标在 workspace 内（即使 workspace 位于扩展根目录之下） | `allow`：不干预 |
 | `effects` 含 `write` 但未声明 `write_path_keys` | `deny`：注册错误，无法判定目标 |
+| `effects` 含 `write`，声明了键但本次没传，且 `optional_write_paths=False` | `deny`：无法判定目标 |
+| 同上但 `optional_write_paths=True` | `allow`：写入落在工具写死的默认位置（通常在 workspace 内），模型控制不到 |
 | `effects` 含 `execute`，`execute_code_keys` 收集到格式化/写块设备/关机/fork 炸弹 | `deny`：直接拒绝 |
-| `effects` 含 `execute`，递归强制 `rm` / `find -delete` 目标全部在 workspace 内 | `allow`：常规清理 |
+| `effects` 含 `execute`，参数为空但回复里有围栏代码块 | 按代码块内容判定（与 `script` 同口径） |
+| `effects` 含 `execute`，参数与回复代码块里都没有代码 | `allow`：本次不执行任何代码，由工具自身报参数错误 |
+| `effects` 含 `execute`，递归强制 `rm` / `find -delete` / `find -exec` 目标全部在 workspace 内 | `allow`：常规清理 |
 | 同上，但目标越出 workspace、含 shell 展开、或范围无法静态确认 | `deny` |
 | `effects` 含 `unknown`（扩展工具未声明） | `ask`：同任务同工具批量授权 |
 | 其余（read / network / memory / user / control） | `allow`：不干预 |
@@ -489,6 +524,8 @@ extensions:
 | `docs/architecture.md` | 项目结构图与核心包表格加入 `extensions/`，并加一条指向本文的说明 | 阶段 1 完成时 |
 | `README.md` | 特性列表增加“插件 / skill / MCP 扩展”；项目结构注释补 `extensions/`；文档索引加入本文 | 阶段 2 完成时 |
 | 本文 | 状态从“设计稿，未实现”改为“已实现（阶段 N）”，未落地部分保持标注 | 每个阶段完成时 |
+| `README.md` / `CONTRIBUTING.md` | 删除已移除的 `core/hooks.py` 相关描述 | 已同步 |
+| `docs/architecture.md` | 目录树补充 `extensions/sandbox.py` 与 `builtin/{path_policy,shell_policy}.py` | 已同步 |
 
 `pyproject.toml` 这一项最容易漏且后果隐蔽：editable 安装在开发机上能跑，但构建 sdist 或正式安装时新模块不会被打包，用户安装后 import 失败。验收时应以“从零安装后能 import”为准，而不是只看本地能跑。
 

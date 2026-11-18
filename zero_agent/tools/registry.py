@@ -44,7 +44,10 @@ class ToolDefinition:
             扩展工具未声明时默认 ``("unknown",)``，策略层会要求人类审批。
         write_path_keys: 参数中指向写入目标的键名，例如 ``("path",)``。
         execute_code_keys: 参数中承载待执行代码的键名，例如
-            ``("script", "script_path", "code")``。
+            ``("script", "script_path")``。
+        optional_write_paths: ``write_path_keys`` 里的键是否可以不传。声明为 True
+            表示「不传时写入落在工具自己写死的默认位置」（通常在工作目录内），
+            策略层据此放行；否则目标为空视为无法判定，直接拒绝。
     """
 
     name: str
@@ -57,6 +60,7 @@ class ToolDefinition:
     effects: tuple[str, ...] = ("unknown",)
     write_path_keys: tuple[str, ...] = ()
     execute_code_keys: tuple[str, ...] = ()
+    optional_write_paths: bool = False
 
 
 @dataclass

@@ -385,7 +385,13 @@ def _run_agent_phase(
         lambda context: trace.append(trace_context("turn_end", context))
     )
     started = time.perf_counter()
-    terminal = _consume(agent.run(prompt), events)
+    try:
+        terminal = _consume(agent.run(prompt), events)
+    finally:
+        # 每个阶段都会新建 agent；不 close() 就会把 MCP 子进程一路留到进程退出
+        close = getattr(agent, "close", None)
+        if callable(close):
+            close()
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
     return {
         "response": terminal.text or "",

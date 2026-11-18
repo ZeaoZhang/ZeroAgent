@@ -50,7 +50,7 @@ pytest tests/ -v
 
 ```
 zero_agent/
-  core/        — 编排层: exceptions, types, config, handler, loop, agent, hooks
+  core/        — 编排层: exceptions, types, config, handler, loop, agent
   llm/         — LLM 后端: base, sessions, failover, factory, converters, sse_parsers
   tools/       — 工具系统: registry, builtin/(code, file, memory, user, web) 默认核心; im/search/vision/memory_plot 可选扩展
   memory/      — 记忆管理: manager, compress_session

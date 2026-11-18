@@ -418,8 +418,6 @@ def _register_server(
         ctx: 插件上下文.
         server_name: server 名（来自 ``mcpServers`` 的键）.
         config: 该 server 的配置.
-
-    Args:
         used_names: 跨 server 共享的已用名字集合，用于避免静默覆盖.
 
     Returns:
@@ -448,9 +446,65 @@ def _register_server(
         client.close()
         raise
 
-    registered = 0
+    # 副作用声明来自 server 配置，对所有工具共用
+    effects = config.get("effects")
+    if isinstance(effects, str):
+        effects = (effects,)
+    elif not isinstance(effects, (list, tuple)) or not effects:
+        effects = ("unknown",)
+    write_path_keys = config.get("write_path_keys")
+    if not isinstance(write_path_keys, (list, tuple)):
+        write_path_keys = ()
+    execute_code_keys = config.get("execute_code_keys")
+    if not isinstance(execute_code_keys, (list, tuple)):
+        execute_code_keys = ()
+    optional_write_paths = config.get("optional_write_paths") is True
+
     if used_names is None:
         used_names = set()
+    try:
+        return _register_tools(
+            ctx, client, server_name, tools, used_names,
+            effects=effects,
+            write_path_keys=write_path_keys,
+            execute_code_keys=execute_code_keys,
+            optional_write_paths=optional_write_paths,
+        )
+    except Exception:
+        # 注册到一半失败：必须回收子进程，否则它会活到进程退出
+        client.close()
+        raise
+
+
+def _register_tools(
+    ctx: Any,
+    client: StdioMcpClient,
+    server_name: str,
+    tools: List[Dict[str, Any]],
+    used_names: set[str],
+    *,
+    effects: Any,
+    write_path_keys: Any,
+    execute_code_keys: Any,
+    optional_write_paths: bool,
+) -> Tuple[int, Optional[StdioMcpClient]]:
+    """把远端工具逐个注册进 registry.
+
+    Args:
+        ctx: 插件上下文.
+        client: 已握手的 MCP 客户端.
+        server_name: server 名.
+        tools: ``tools/list`` 返回的工具列表.
+        used_names: 跨 server 共享的已用名字集合.
+        effects: 该 server 声明的副作用.
+        write_path_keys: 声明的写入目标键.
+        execute_code_keys: 声明的执行代码键.
+        optional_write_paths: 写入目标是否可缺省.
+
+    Returns:
+        ``(成功注册的工具数量, 客户端实例)``.
+    """
+    registered = 0
     for tool in tools:
         remote_name = str(tool.get("name") or "").strip()
         if not remote_name:
@@ -475,18 +529,6 @@ def _register_server(
         if not isinstance(schema, dict):
             schema = {"type": "object", "properties": {}}
 
-        effects = config.get("effects")
-        if isinstance(effects, str):
-            effects = (effects,)
-        elif not isinstance(effects, (list, tuple)) or not effects:
-            effects = ("unknown",)
-        write_path_keys = config.get("write_path_keys")
-        if not isinstance(write_path_keys, (list, tuple)):
-            write_path_keys = ()
-        execute_code_keys = config.get("execute_code_keys")
-        if not isinstance(execute_code_keys, (list, tuple)):
-            execute_code_keys = ()
-
         def make_handler(name: str):
             def call(arguments: Dict[str, Any]) -> str:
                 return client.call_tool(name, arguments)
@@ -502,6 +544,7 @@ def _register_server(
             effects=tuple(effects),
             write_path_keys=tuple(write_path_keys),
             execute_code_keys=tuple(execute_code_keys),
+            optional_write_paths=optional_write_paths,
         )(make_handler(remote_name))
         registered += 1
     return registered, client

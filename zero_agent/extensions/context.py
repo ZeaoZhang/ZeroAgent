@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, Generator, List, Optional
 
-from zero_agent.extensions.events import ApprovalRequired, ExtensionVeto, PromptBlock
+from zero_agent.extensions.events import ApprovalRequired, ExtensionVeto
 from zero_agent.tools.registry import ToolDefinition
 
 _logger = logging.getLogger("zero_agent.extensions")
@@ -88,6 +88,7 @@ class ExtensionContext:
         effects: tuple[str, ...] = ("unknown",),
         write_path_keys: tuple[str, ...] = (),
         execute_code_keys: tuple[str, ...] = (),
+        optional_write_paths: bool = False,
     ) -> Callable[[Callable[[Dict[str, Any]], Any]], Callable[[Dict[str, Any]], Any]]:
         """注册一个模型可调用的工具.
 
@@ -101,6 +102,8 @@ class ExtensionContext:
             effects: 副作用声明；未声明时策略层按 unknown 要求审批.
             write_path_keys: 参数字典中指向写入目标的键.
             execute_code_keys: 参数字典中承载待执行代码的键.
+            optional_write_paths: ``write_path_keys`` 是否可以不传；声明后
+                「不传目标」表示写入落在工具写死的默认位置，策略层放行.
 
         Returns:
             装饰器，返回原函数以便直接调用.
@@ -118,6 +121,7 @@ class ExtensionContext:
                 effects=tuple(effects),
                 write_path_keys=tuple(write_path_keys),
                 execute_code_keys=tuple(execute_code_keys),
+                optional_write_paths=optional_write_paths,
             )
             self.runtime.register_tool(self.name, definition)
             return fn
@@ -172,7 +176,11 @@ class ExtensionContext:
     # ---- 变换型扩展点 ---------------------------------------------------
 
     def on_llm_request(self, callback: Callable[[Any], Any]) -> Callable[[Any], Any]:
-        """订阅模型请求变换：可改 messages / tools / system_prompt / headers."""
+        """订阅模型请求变换：可改 messages / tools / system_prompt.
+
+        注意：``headers`` 只读——它来自后端配置（``extra_headers``），改这里不会
+        进入真实请求（设计文档 6.4）。
+        """
         self.runtime.subscribe_llm_request(self.name, callback)
         return callback
 
@@ -243,7 +251,3 @@ class ExtensionContext:
             ApprovalRequired，交给运行时处理.
         """
         return ApprovalRequired(reason=question, candidates=candidates, scope=scope)
-
-
-# 供类型标注使用，避免循环导入
-PromptBlockType = PromptBlock

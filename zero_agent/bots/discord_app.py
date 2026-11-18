@@ -346,7 +346,13 @@ class DiscordApp(AgentBotMixin):
             workspace_dir=runner_workspace_dir(self._get_runner(chat_id)),
             fallback_dirs=(MEDIA_DIR, _TEMP_DIR),
         )
-        body = display_text if display_text is not None else _display_done_text(raw_text)
+        # 空摘要（回答里没有 <summary>）不能当成「什么都不发」：
+        # 退回原始回答的清理文本，否则用户只看到「思考中...」
+        body = (
+            display_text
+            if isinstance(display_text, str) and display_text.strip()
+            else _display_done_text(raw_text)
+        )
         if body and body != "...":
             await self.send_text(chat_id, body, **ctx)
         if files:

@@ -30,13 +30,13 @@ from zero_agent.bots.common import (
     AgentBotMixin,
     channel_is_linked,
     PROMPT_CAPABILITY_FILE_DELIVERY,
-    build_done_text,
     clean_reply,
     ensure_single_instance,
     load_keys,
     public_access,
     redirect_log,
     require_runtime,
+    resolve_done_display,
     split_text,
     resolve_output_files,
     runner_workspace_dir,
@@ -164,15 +164,21 @@ class WeComApp(AgentBotMixin):
             fallback_dirs=(MEDIA_DIR, TEMP_DIR),
         )
         if not files:
-            body = display_text if display_text is not None else build_done_text(
+            body = resolve_done_display(
                 raw_text,
+                display_text,
                 workspace_dir=runner_workspace_dir(self.runner),
                 fallback_dirs=(MEDIA_DIR, TEMP_DIR),
             )
             if body:
                 return await self.send_text(chat_id, body, **ctx)
             return None
-        clean = display_text if display_text is not None else clean_reply(strip_files(raw_text))
+        # 空摘要同样要退回原始回答（此处不含 📎 文件名，文件单独发送）
+        clean = (
+            display_text
+            if isinstance(display_text, str) and display_text.strip()
+            else clean_reply(strip_files(raw_text))
+        )
         if clean and clean != "...":
             await self.send_text(chat_id, clean, **ctx)
         for fp in files:

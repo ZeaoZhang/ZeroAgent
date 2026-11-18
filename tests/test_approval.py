@@ -30,7 +30,7 @@ def _registry() -> ToolRegistry:
     definitions = (
         ("file_write", ("write",), ("path",), ()),
         ("file_patch", ("write",), ("path",), ()),
-        ("code_run", ("execute",), (), ("script", "script_path", "code")),
+        ("code_run", ("execute",), (), ("script", "script_path")),
     )
     for name, effects, write_keys, code_keys in definitions:
         registry.register(ToolDefinition(
@@ -191,7 +191,10 @@ class TestHandlerIntegration:
 
         paused = self._dispatch(handler, "danger", {"x": 1})
         fingerprint = paused.data["approval"]["fingerprint"]
-        runtime.grant_approval(fingerprint)
+        # 通行证绑定任务：真实恢复路径（_approval_continuation）也是这么发的
+        runtime.grant_approval(
+            fingerprint, task_id=handler.task_contract.task_id,
+        )
 
         outcome = self._dispatch(handler, "danger", {"x": 1})
         assert outcome.data == "executed"
@@ -212,10 +215,7 @@ class TestPermissionGateApproval:
         runtime = _runtime(tmp_path)
         permission_gate.setup(ExtensionContext("permission_gate", runtime))
 
-        for args in (
-            {"code": "rm -rf /"},
-            {"script": "rm -rf /"},
-        ):
+        for args in ({"script": "rm -rf /"}, {"script": "rm -r -f /tmp/x"}):
             verdict = runtime.evaluate_tool_call("code_run", args)
             assert verdict.is_block, args
 

@@ -39,8 +39,10 @@ extensions:
   # Optional process sandbox for code_run: off | auto | macos | linux.
   # "auto" picks sandbox-exec on macOS and bwrap on Linux; unsupported
   # platforms degrade to no isolation instead of failing the command.
-  # Takes effect on config reload (registry rebuild); enabled/home need a restart.
-  sandbox: off
+  # Takes effect on config reload (registry rebuild); protected_writes is refreshed
+  # on every reload; enabled/home need a restart.
+  # 注意：YAML 1.1 会把未加引号的 off/on 解析成布尔，建议写成 "off"。
+  sandbox: "off"
 
 # Optional local LiteLLM model price/context-window cache.
 # litellm_model_cost_map: ./model_prices_and_context_window.json

@@ -209,6 +209,35 @@ def build_done_text(raw_text: str, *, workspace_dir=None, fallback_dirs=()) -> s
     return body or "..."
 
 
+def resolve_done_display(
+    raw_text: str,
+    display_text: str | None,
+    *,
+    workspace_dir=None,
+    fallback_dirs=(),
+) -> str:
+    """选择「任务完成」消息的正文.
+
+    ``display_text`` 是模型自己写的 ``<summary>`` 摘要。大量回答根本不带摘要，
+    此时必须退回清理后的原始回答：否则完成消息正文为空，用户永远只看到
+    「思考中...」，任务结果被静默丢弃。
+
+    Args:
+        raw_text: Agent 的原始输出文本.
+        display_text: 模型摘要；None 或空串表示没有摘要.
+        workspace_dir: 解析 [FILE:...] 的工作目录.
+        fallback_dirs: 额外的文件解析目录.
+
+    Returns:
+        展示正文；``build_done_text`` 保证非空（兜底 ``"..."``）.
+    """
+    if isinstance(display_text, str) and display_text.strip():
+        return display_text
+    return build_done_text(
+        raw_text, workspace_dir=workspace_dir, fallback_dirs=fallback_dirs,
+    )
+
+
 def extract_waiting_event(item: dict) -> dict | None:
     """Normalize a waiting terminal payload into a bot-friendly prompt."""
     if item.get("type") != "terminal" or item.get("status") != "waiting":
@@ -547,8 +576,11 @@ class AgentBotMixin:
         files = resolve_output_files(
             raw_text, workspace_dir=workspace_dir, fallback_dirs=fallback_dirs,
         )
-        body = display_text if display_text is not None else build_done_text(
-            raw_text, workspace_dir=workspace_dir, fallback_dirs=fallback_dirs,
+        body = resolve_done_display(
+            raw_text,
+            display_text,
+            workspace_dir=workspace_dir,
+            fallback_dirs=fallback_dirs,
         )
         if body:
             await self.send_text(chat_id, body, **ctx)

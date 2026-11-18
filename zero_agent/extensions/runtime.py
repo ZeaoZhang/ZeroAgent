@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -54,6 +55,17 @@ NOTIFY_EVENTS = frozenset({
 
 # dispatch 注入的内部参数键，不参与审批指纹
 _INTERNAL_ARG_KEYS = frozenset({"_index", "_tool_num"})
+
+# 通知负载里按引用传递的键：这些是运行期对象，深拷贝既昂贵（provider 响应
+# 可能带整段 raw payload）又容易语义走样。其余键（messages / args / tools 等
+# 容器）一律深拷贝，因此回调原地修改不会污染真实请求或历史。
+_REFERENCE_PAYLOAD_KEYS = frozenset({
+    "handler",
+    "response",
+    "outcome",
+    "terminal",
+    "client",
+})
 
 NotifyCallback = Callable[[Dict[str, Any]], None]
 GateCallback = Callable[[ToolCall], Any]
@@ -445,15 +457,42 @@ class ExtensionRuntime:
         data = payload if isinstance(payload, dict) else {}
         for owner, callback in self._notify.get(event, []):
             try:
-                callback(dict(data))
+                callback(self._isolate_payload(data))
             except Exception as exc:  # noqa: BLE001 - 通知失败只记录
                 _logger.warning("扩展 %s 的 %s 回调失败: %s", owner, event, exc)
+
+    @staticmethod
+    def _isolate_payload(data: Dict[str, Any]) -> Dict[str, Any]:
+        """为单个通知回调生成隔离副本.
+
+        通知型事件是「只观察」契约：回调拿到的是负载的深拷贝，因此原地修改
+        ``messages`` / ``args`` 之类嵌套结构不会污染真实请求或历史。少数键
+        （``handler`` / ``response`` / ``outcome`` / ``terminal`` / ``client``）
+        是运行期对象，深拷贝既昂贵又容易语义走样，按引用传递并标明只读。
+
+        Args:
+            data: 原始负载.
+
+        Returns:
+            供回调使用的副本.
+        """
+        isolated: Dict[str, Any] = {}
+        for key, value in data.items():
+            if key in _REFERENCE_PAYLOAD_KEYS:
+                isolated[key] = value
+                continue
+            try:
+                isolated[key] = copy.deepcopy(value)
+            except Exception:  # noqa: BLE001 - 深拷贝失败时退回引用
+                isolated[key] = value
+        return isolated
 
     def evaluate_tool_call(
         self,
         tool_name: str,
         args: Dict[str, Any],
         task_id: str = "",
+        response: Any = None,
     ) -> ToolCallVerdict:
         """执行工具调用门控，返回三态判定.
 
@@ -468,6 +507,8 @@ class ExtensionRuntime:
             tool_name: 工具名.
             args: 工具参数，可被回调原地修改.
             task_id: 当前任务标识，用于限定审批通行证的作用域.
+            response: 触发本次调用的 LLM 响应；门控用它判定「参数为空时会
+                执行回复代码块」的工具.
 
         Returns:
             ToolCallVerdict.
@@ -478,11 +519,14 @@ class ExtensionRuntime:
         call = ToolCall(
             tool_name=tool_name,
             args=args,
+            owner=self.registry.owner_of(tool_name) or "",
             definition=self.registry.get(tool_name),
+            response=response,
         )
         approval_reason = ""
         approval_fingerprint_value = ""
         approval_scope_value = ""
+        approval_candidates: Optional[List[str]] = None
         for owner, callback in self._tool_call:
             try:
                 result = callback(call)
@@ -499,6 +543,7 @@ class ExtensionRuntime:
                     approval_fingerprint_value = approval_fingerprint(tool_name, args)
                     approval_reason = result.reason
                     approval_scope_value = result.scope or ""
+                    approval_candidates = list(result.candidates or ()) or None
                 continue
             if isinstance(result, ExtensionVeto):
                 return ToolCallVerdict("block", result.reason)
@@ -530,29 +575,9 @@ class ExtensionRuntime:
                 approval_reason,
                 approval_fingerprint_value,
                 approval_scope_value,
+                approval_candidates,
             )
         return ToolCallVerdict("allow")
-
-    def run_tool_call(
-        self,
-        tool_name: str,
-        args: Dict[str, Any],
-    ) -> Optional[str]:
-        """门控的简化接口：可以直接执行时返回 None，否则返回原因.
-
-        .. note::
-           这是二态接口：``approve``（需人类批准）会被折叠成「返回原因」。
-           生产路径请使用 :meth:`evaluate_tool_call`，否则会自动跳过审批。
-
-        Args:
-            tool_name: 工具名.
-            args: 工具参数.
-
-        Returns:
-            拒绝或待批准的原因；``None`` 表示放行.
-        """
-        verdict = self.evaluate_tool_call(tool_name, args)
-        return None if verdict.is_allow else (verdict.reason or "blocked")
 
     # ---- 审批通行证 -----------------------------------------------------
 
@@ -577,7 +602,8 @@ class ExtensionRuntime:
         Args:
             fingerprint: 由 :func:`approval_fingerprint` 计算.
             ttl: 通行证有效期（秒）.
-            task_id: 任务标识；空串表示不限定任务.
+            task_id: 任务标识；必须与消费时完全一致才生效（空串只匹配空串，
+                不表示「任意任务」）.
             scope: 批量授权键（例如「工具名 + 目标绝对路径」）；空串表示不登记.
         """
         if not fingerprint:
@@ -597,7 +623,8 @@ class ExtensionRuntime:
 
         Args:
             fingerprint: 审批指纹.
-            task_id: 当前任务标识；与发放时不一致则视为无效.
+            task_id: 当前任务标识；必须与发放时完全一致，空串不匹配任何
+                带任务名的通行证.
             scope: 批量授权键；一次性通行证不可用时按它命中残留授权.
 
         Returns:
@@ -608,9 +635,7 @@ class ExtensionRuntime:
         entry = self._approvals.pop(fingerprint, None)
         if entry is not None:
             expiry, granted_task = entry
-            if expiry > time.monotonic() and not (
-                granted_task and granted_task != task_id
-            ):
+            if expiry > time.monotonic() and granted_task == task_id:
                 return True
         # 回溯批量授权：同任务、同 scope、未过期则放行（不消耗，窗口内可重复）
         if not scope:

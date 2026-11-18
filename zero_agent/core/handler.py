@@ -64,6 +64,9 @@ class BaseHandler:
         max_turns: 最大轮次限制.
     """
 
+    # 不参与门控的内部信号：它们不产生副作用，只会带来无意义的人工中断
+    _GATE_EXEMPT_TOOLS = frozenset({"no_tool", "bad_json"})
+
     def __init__(
         self,
         registry: Optional[ToolRegistry] = None,
@@ -272,9 +275,11 @@ class BaseHandler:
 
         # 扩展门控（fail-closed）：三态判定——放行 / 拒绝 / 需人类批准
         extensions = self._extensions()
-        if extensions is not None and tool_name != "no_tool":
+        if extensions is not None and self._needs_gate(tool_name):
             task_id = getattr(getattr(self, "task_contract", None), "task_id", "") or ""
-            verdict = extensions.evaluate_tool_call(tool_name, args, task_id=task_id)
+            verdict = extensions.evaluate_tool_call(
+                tool_name, args, task_id=task_id, response=response,
+            )
 
             if verdict.needs_approval:
                 yield self._tl(
@@ -289,7 +294,8 @@ class BaseHandler:
                             "question": (
                                 f"是否允许执行 {tool_name}？\n{verdict.reason}"
                             ),
-                            "candidates": ["批准", "拒绝"],
+                            "candidates": list(verdict.candidates or ())
+                            or ["批准", "拒绝"],
                         },
                         "approval": {
                             "fingerprint": verdict.fingerprint,
@@ -301,8 +307,10 @@ class BaseHandler:
                     action=StepAction.WAIT_FOR_USER,
                     reason="extension_approval",
                 )
-                self._emit_tool_after(tool_name, args, ret)
-                return ret
+                # 没有执行任何东西，因此不记为证据，只广播 tool_after
+                return self._finish_gated_call(
+                    tool_name, args, ret, record_evidence=False,
+                )
 
             if verdict.is_block:
                 _logger.warning(
@@ -326,9 +334,13 @@ class BaseHandler:
                     action=StepAction.CONTINUE,
                 )
                 # 记录为 error 证据：可观测，但不会满足完成判定要求
-                self._record_evidence(tool_name, args, ret)
-                self._emit_tool_after(tool_name, args, ret)
-                return ret
+                return self._finish_gated_call(
+                    tool_name,
+                    args,
+                    ret,
+                    record_evidence=True,
+                    reason="extension_blocked",
+                )
 
         # 门控通过后才把 OPEN 推进到 EXECUTING
         if tool_name != "no_tool":
@@ -371,8 +383,9 @@ class BaseHandler:
             next_prompt=self._unknown_tool_retry_prompt(tool_name),
             action=StepAction.CONTINUE,
         )
-        self._emit_tool_after(tool_name, args, ret)
-        return ret
+        return self._finish_gated_call(
+            tool_name, args, ret, record_evidence=False,
+        )
 
     def _emit_tool_after(
         self, tool_name: str, args: Dict[str, Any], ret: Any,
@@ -385,6 +398,64 @@ class BaseHandler:
             "result": ret.data if isinstance(ret, StepOutcome) else ret,
             "handler": self,
         })
+
+    def _finish_gated_call(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        ret: Any,
+        *,
+        record_evidence: bool,
+        reason: str = "",
+    ) -> Any:
+        """门控短路路径的统一收尾：协议预算 + 可选证据 + tool_after 通知.
+
+        被拒绝/待批准的调用没有产生真实结果，是否记为证据由调用方决定；
+        通知则必须广播，外部观察者要能看到这次调用发生了.
+
+        被拒绝的调用同样要计入协议重试预算：模型反复发起同一次被拒操作时，
+        应该受控结束（PROTOCOL_ERROR），而不是烧光 ``max_turns``.
+
+        Args:
+            tool_name: 工具名称.
+            args: 工具参数.
+            ret: 短路产生的 StepOutcome.
+            record_evidence: 是否把这次结果记入证据账本.
+            reason: 覆盖 ``ret.reason`` 的机器可读原因（供协议预算分类）.
+
+        Returns:
+            可能被协议预算改写的 ``StepOutcome``.
+        """
+        if isinstance(ret, StepOutcome) and reason:
+            ret.reason = reason
+        if record_evidence:
+            ret = self._apply_tool_protocol_budget(tool_name, ret)
+            self._record_evidence(tool_name, args, ret)
+        self._emit_tool_after(tool_name, args, ret)
+        return ret
+
+    def _needs_gate(self, tool_name: str) -> bool:
+        """是否需要对这次调用执行安全门控.
+
+        只门控「真的会执行」的调用：
+
+        - ``no_tool`` / ``bad_json`` 是循环内部信号，不产生副作用；对它们弹审批
+          会把一次 JSON 解析失败变成人工中断.
+        - 未注册且没有 ``do_<name>`` 的调用只走「未知工具」重试提示，不执行任何
+          代码；交给门控只会被当成 unknown-effect 而要求批准.
+
+        Args:
+            tool_name: 工具名称.
+
+        Returns:
+            True 表示需要门控.
+        """
+        if tool_name in self._GATE_EXEMPT_TOOLS:
+            return False
+        return (
+            self.registry.get(tool_name) is not None
+            or hasattr(self, f"do_{tool_name}")
+        )
 
     def _finalize_tool_dispatch(
         self, tool_name: str, args: Dict[str, Any], ret: Any,
@@ -932,8 +1003,11 @@ class BaseHandler:
             return outcome
 
         reason = str(outcome.reason or "")
+        blocked_key = f"extension_blocked:{tool_name}"
         if tool_name == "bad_json":
             key = "bad_json_arguments"
+        elif reason == "extension_blocked":
+            key = blocked_key
         elif tool_name == "code_run" and reason in _TOOL_PROTOCOL_REASONS:
             key = "code_run_argument"
         else:
@@ -941,6 +1015,8 @@ class BaseHandler:
                 self._tool_protocol_retry_counts.pop("code_run_argument", None)
             if tool_name != "bad_json":
                 self._tool_protocol_retry_counts.pop("bad_json_arguments", None)
+            # 成功或其它原因的非拦截调用：清掉该工具的连续拦截计数
+            self._tool_protocol_retry_counts.pop(blocked_key, None)
             return outcome
 
         attempt = self._tool_protocol_retry_counts.get(key, 0) + 1
