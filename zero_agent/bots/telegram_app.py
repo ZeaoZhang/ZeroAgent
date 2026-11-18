@@ -725,8 +725,11 @@ async def _stream(dq, msg):
             terminal = item
             status = terminal.get("status")
             if status == "completed":
+                # 空摘要（回答里没有 <summary>）不能当成「没有内容」，
+                # 否则终端消息永远停在流式过程中的草稿
                 await stream.finalize(
-                    terminal_reply_text(terminal),
+                    terminal_reply_text(terminal)
+                    or terminal_output_text(terminal),
                     file_text=terminal_output_text(terminal),
                 )
             elif status == "waiting":

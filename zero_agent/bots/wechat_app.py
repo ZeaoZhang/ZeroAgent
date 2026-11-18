@@ -43,7 +43,11 @@ from zero_agent.bots.common import (
     runner_workspace_dir,
 )
 from zero_agent.bots.common import terminal_notice
-from zero_agent.bots.common import terminal_output_text, terminal_reply_text
+from zero_agent.bots.common import (
+    strip_files,
+    terminal_output_text,
+    terminal_reply_text,
+)
 
 _KEYS = {}
 
@@ -614,7 +618,12 @@ def on_message(bot: WxBotClient, msg):
 
         status = terminal.get("status") if terminal else "failed"
         if status == "completed":
-            final_text = _clean(terminal_reply_text(terminal or {}))
+            # 回答没有 <summary> 时 terminal_reply_text 为空；必须退回清理后的
+            # 原始回答，否则用户只看到「思考中」而拿不到结果
+            final_text = _clean(
+                terminal_reply_text(terminal or {})
+                or strip_files(terminal_output_text(terminal or {}))
+            )
         else:
             final_text = terminal_notice(terminal or {})
         if final_text:

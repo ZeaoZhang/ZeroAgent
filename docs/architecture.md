@@ -30,7 +30,9 @@ core/agent.py           ←── ZeroAgent: 组装所有组件
         │   ├── runtime.py     ←── 发现、加载、三类事件、注册归属
         │   ├── context.py     ←── 面向插件的稳定 API
         │   ├── events.py      ←── 通知 / 变换 / 门控契约
-        │   └── builtin/       ←── permission_gate, skills_index, mcp_client
+        │   ├── sandbox.py     ←── code_run 的可选进程沙箱（sandbox-exec / bwrap）
+        │   └── builtin/       ←── permission_gate, skills_index, mcp_client,
+        │                           path_policy, shell_policy
         │
         ├── memory/            ←── 记忆管理
         │   └── manager.py     ←── L0-L4 分层记忆

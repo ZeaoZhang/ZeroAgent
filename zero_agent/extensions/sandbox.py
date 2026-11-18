@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -28,6 +29,8 @@ from typing import Dict, List, Optional, Tuple
 
 VALID_MODES = ("off", "auto", "macos", "linux")
 DEFAULT_MODE = "off"
+
+_logger = logging.getLogger("zero_agent.extensions.sandbox")
 
 # 功能探测结果缓存：同一进程内只探测一次
 _PROBE_CACHE: Dict[str, bool] = {}
@@ -46,7 +49,15 @@ def resolve_mode(config: object) -> str:
         规范化后的模式字符串.
     """
     raw = str(getattr(config, "sandbox_mode", "") or DEFAULT_MODE).strip().lower()
-    return raw if raw in VALID_MODES else DEFAULT_MODE
+    if raw in VALID_MODES:
+        return raw
+    _logger.warning(
+        "未知的沙箱模式 %r（合法值: %s），已按 %s 处理",
+        raw,
+        "/".join(VALID_MODES),
+        DEFAULT_MODE,
+    )
+    return DEFAULT_MODE
 
 
 def _normalize_root(root: str) -> Optional[str]:
@@ -109,23 +120,46 @@ def _probe(key: str, probe_cmd: List[str]) -> bool:
     return ok
 
 
+# 探测用的最小 profile：结构与真实 profile 一致（allow default + deny writes），
+# 但只放行 /dev/null，因此「sandbox-exec 存在但拒绝这份 profile 语法」会被探到
+_PROBE_PROFILE = (
+    "(version 1)\n"
+    "(allow default)\n"
+    "(deny file-write*)\n"
+    "(allow file-write* (literal \"/dev/null\"))\n"
+)
+
+
 def _macos_available() -> bool:
     """macOS sandbox-exec 是否真的可用."""
     if sys.platform != "darwin" or shutil.which("sandbox-exec") is None:
         return False
     return _probe(
         "macos",
-        ["sandbox-exec", "-p", "(version 1)(allow default)", "--", "/usr/bin/true"],
+        ["sandbox-exec", "-p", _PROBE_PROFILE, "--", "/usr/bin/true"],
     )
 
 
 def _linux_available() -> bool:
-    """Linux bwrap 是否真的可用（含 userns 探测）."""
+    """Linux bwrap 是否真的可用（含 userns 探测）.
+
+    探测 argv 必须与真实启动保持同样的隔离项（userns + pid namespace），否则
+    「探测通过、实跑失败」的用户会看到每条命令都失败而不是降级.
+    """
     if not sys.platform.startswith("linux") or shutil.which("bwrap") is None:
         return False
     return _probe(
         "linux",
-        ["bwrap", "--ro-bind", "/", "/", "--", "/bin/true"],
+        [
+            "bwrap",
+            "--ro-bind", "/", "/",
+            "--dev", "/dev",
+            "--proc", "/proc",
+            "--unshare-pid",
+            "--die-with-parent",
+            "--",
+            "/bin/true",
+        ],
     )
 
 
@@ -137,6 +171,27 @@ def _safe_tempdir() -> Optional[str]:
         return None
 
 
+def _writable_dirs(root: str) -> List[str]:
+    """返回沙箱内允许写入的目录（去重）.
+
+    写入根无条件保留（它可能还没被创建，命令自己要 mkdir）；临时目录只在真实
+    存在时加入。临时目录必须可写：``code_run`` 的 python 模式会把脚本落在系统
+    临时目录，遮住它会让命令必然失败.
+
+    Args:
+        root: 已规范的写入根.
+
+    Returns:
+        可写目录列表，``root`` 永远排在第一位.
+    """
+    writable: List[str] = [os.path.realpath(root)]
+    for extra in (_safe_tempdir(), "/tmp"):
+        if not extra or not os.path.isdir(extra):
+            continue
+        writable.append(os.path.realpath(extra))
+    return list(dict.fromkeys(writable))
+
+
 def _macos_profile(root: str) -> str:
     """构造 macOS sandbox profile：只允许写 workspace 与临时目录.
 
@@ -146,12 +201,8 @@ def _macos_profile(root: str) -> str:
     Returns:
         sandbox profile 文本.
     """
-    writable = [root]
-    tempdir = _safe_tempdir()
-    if tempdir:
-        writable.append(tempdir)
-    writable.extend(["/tmp", "/private/tmp"])
-    rules = "\n".join(f'  (subpath "{_escape(path)}")' for path in dict.fromkeys(writable))
+    writable = _writable_dirs(root)
+    rules = "\n".join(f'  (subpath "{_escape(path)}")' for path in writable)
     return (
         "(version 1)\n"
         "(allow default)\n"
@@ -211,13 +262,16 @@ def wrap_command(
     if normalized == "linux":
         if not _linux_available():
             return cmd, False, "bwrap 不可用或被内核禁用，已降级"
+        binds: List[str] = []
+        for directory in _writable_dirs(writable_root):
+            binds.extend(["--bind", directory, directory])
         return (
             [
                 "bwrap",
                 "--ro-bind", "/", "/",
-                "--bind", writable_root, writable_root,
-                # 临时目录保持可写：python 模式的脚本就落在系统临时目录，
-                # 用 --tmpfs 会把它遮住导致命令直接失败
+                # 逐目录再绑定为可写（含临时目录）：不能只用 --tmpfs /tmp，
+                # 那会把 python 模式落在临时目录里的脚本遮住
+                *binds,
                 "--dev", "/dev",
                 "--proc", "/proc",
                 "--unshare-pid",

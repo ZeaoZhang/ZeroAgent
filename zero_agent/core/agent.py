@@ -546,6 +546,9 @@ class ZeroAgent:
             if registry_changed:
                 self.handler.registry = self.registry
                 self._replay_extension_registrations()
+            else:
+                # 配置对象换了但没重建 registry：策略层仍要读新配置
+                self._refresh_extension_config()
         except Exception as exc:
             self.config = old_config
             self._sessions = old_sessions
@@ -937,6 +940,8 @@ class ZeroAgent:
             self.registry = new_registry
             self.handler.registry = self.registry
             self._replay_extension_registrations()
+        else:
+            self._refresh_extension_config()
         self.memory = new_memory
         self.handler.cwd = self.config.workspace_dir
         self.handler.client = self.client
@@ -1020,13 +1025,27 @@ class ZeroAgent:
         路径判定会与实际写入位置（handler.cwd）分叉。插件与扩展目录本身
         （``extensions_home``）变更仍需重启，这里不重新加载。
         """
+        self._refresh_extension_config()
         extensions = getattr(self, "extensions", None)
         if extensions is not None:
-            extensions.config = self.config
             extensions.attach_registry(self.registry)
         active_loop = getattr(self, "loop", None)
         if active_loop is not None:
             active_loop.tools_schema = self.registry.generate_openai_schema()
+
+    def _refresh_extension_config(self) -> None:
+        """把运行时持有的 config 换成当前对象.
+
+        ``permission_gate`` 用 ``runtime.config`` 解析 workspace 与受保护前缀。
+        只要配置换了对象（哪怕没触发 registry 重建，例如只改了
+        ``extensions.protected_writes``），就必须同步刷新，否则策略仍在按旧
+        配置判定。
+
+        插件与扩展目录本身（``extensions_home``）变更仍需重启，这里不重新加载。
+        """
+        extensions = getattr(self, "extensions", None)
+        if extensions is not None:
+            extensions.config = self.config
 
     # 安全类内置扩展：extensions.enabled=false 时仍然保留，避免“关插件顺手关掉安全门”
     _SAFETY_EXTENSIONS = ("permission_gate",)

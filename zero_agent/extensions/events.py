@@ -34,14 +34,17 @@ class ToolCall:
     Attributes:
         tool_name: 工具名称.
         args: 工具参数；门控回调可以原地修改.
-        owner: 发起这次分发的插件归属；核心分发为空字符串.
+        owner: 该工具在注册表中的归属；内置工具与核心 ``do_*`` 为空字符串.
         definition: 该工具的声明式定义；核心 ``do_*`` 工具或未注册工具为 None.
+        response: 触发本次调用的 LLM 响应（可能为 None）；门控据此判定
+            「参数为空时会从回复代码块里取代码执行」的工具.
     """
 
     tool_name: str
     args: Dict[str, Any]
     owner: str = ""
     definition: Any = None
+    response: Any = None
 
 
 @dataclass
@@ -149,12 +152,14 @@ class ToolCallVerdict:
         reason: 拒绝或审批的原因，会展示给模型与用户.
         fingerprint: 审批指纹；只有 ``approve`` 时有值.
         scope: 批量授权键；只有 ``approve`` 时可能非空.
+        candidates: 门控给出的快捷选项；只有 ``approve`` 时可能非空.
     """
 
     action: Literal["allow", "block", "approve"]
     reason: str = ""
     fingerprint: str = ""
     scope: str = ""
+    candidates: Optional[List[str]] = None
 
     @property
     def is_allow(self) -> bool:

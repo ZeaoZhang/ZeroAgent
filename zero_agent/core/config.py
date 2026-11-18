@@ -11,6 +11,7 @@ AgentConfig: 顶层 agent 配置.
 """
 
 from __future__ import annotations
+import logging
 import re
 
 import os
@@ -24,6 +25,58 @@ from zero_agent.core.exceptions import ConfigError
 _config_mtime: dict[str, int] = {}
 
 _CHINESE_MODEL_HINTS = ("glm", "minimax", "kimi", "qwen", "deepseek")
+
+_logger = logging.getLogger("zero_agent.config")
+
+# 布尔配置项的字符串写法：YAML 里写成 "false" 时不能被当成 True
+_FALSE_WORDS = frozenset({"false", "no", "off", "0", "none", ""})
+
+
+def _as_bool(value: object, default: bool) -> bool:
+    """把配置值转成布尔，字符串按常见写法解析.
+
+    ``bool("false")`` 是 True，直接转型会让 ``enabled: "false"`` 静默失效。
+
+    Args:
+        value: 配置值.
+        default: 值为 None 时的默认值.
+
+    Returns:
+        解析后的布尔值.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() not in _FALSE_WORDS
+    _logger.warning("扩展配置项期望布尔值，收到 %r，已按 True 处理", value)
+    return True
+
+
+def _as_str_list(value: object, field_name: str) -> list[str]:
+    """把配置值转成字符串列表.
+
+    单个字符串按「一项」处理；直接 ``list("abc")`` 会变成逐字符的列表，
+    那样配置的路径前缀会静默失效。
+
+    Args:
+        value: 配置值.
+        field_name: 字段名，用于告警.
+
+    Returns:
+        字符串列表.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if str(item).strip()]
+    _logger.warning("扩展配置项 %s 期望字符串列表，收到 %r，已忽略", field_name, value)
+    return []
 
 
 def _config_path_key(path: str | Path) -> str:
@@ -437,13 +490,48 @@ class AgentConfig:
             enable_worldline=data.get("enable_worldline", False),
             litellm_model_cost_map=data.get("litellm_model_cost_map"),
             langfuse=data.get("langfuse"),
-            extensions_enabled=bool(extensions_data.get("enabled", True)),
-            extensions_home=extensions_data.get("home"),
-            extensions_protected_writes=list(
-                extensions_data.get("protected_writes") or []
+            extensions_enabled=_as_bool(
+                extensions_data.get("enabled"), True,
             ),
-            sandbox_mode=str(extensions_data.get("sandbox") or "off"),
+            extensions_home=extensions_data.get("home"),
+            extensions_protected_writes=_as_str_list(
+                extensions_data.get("protected_writes"), "protected_writes",
+            ),
+            sandbox_mode=_parse_sandbox_mode(extensions_data.get("sandbox")),
         )
+
+
+def _parse_sandbox_mode(value: object) -> str:
+    """解析 ``extensions.sandbox``.
+
+    合法值交由 ``extensions.sandbox.resolve_mode`` 统一归一；这里只负责把
+    YAML 里写成布尔/数字的误配置变成可读的空值，避免 ``True`` 变成 ``"true"``
+    后悄悄落回 ``off`` 而无任何提示。
+
+    Args:
+        value: 配置值.
+
+    Returns:
+        ``off`` 或原始的模式字符串.
+    """
+    if value is None:
+        return "off"
+    if isinstance(value, bool):
+        # YAML 1.1 会把 off/on/yes/no 解析成布尔：`sandbox: off` 拿到的是 False。
+        # False 就是 off，不需要告警；True 没有对应模式，告警并回退。
+        if value:
+            _logger.warning(
+                "extensions.sandbox 收到布尔 True（YAML 里的 on/yes），"
+                "没有对应模式，已按 off 处理；请写 auto/macos/linux",
+            )
+        return "off"
+    if not isinstance(value, str):
+        _logger.warning(
+            "extensions.sandbox 期望字符串（off/auto/macos/linux），收到 %r，已按 off 处理",
+            value,
+        )
+        return "off"
+    return value.strip().lower() or "off"
 
 
 def reload_config_if_changed(config_path: str) -> Optional[AgentConfig]:

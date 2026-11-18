@@ -92,7 +92,7 @@ supports_project_python() {
   local version
 
   version="$("${python_bin}" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null)" || return 1
-  [[ "${version}" =~ ^3\.(1[0-3])$ ]]
+  [[ "${version}" =~ ^3\.(1[1-3])$ ]]
 }
 
 supports_editable_pip() {
@@ -116,7 +116,7 @@ select_python() {
 
   if [[ -n "${PYTHON_BIN}" ]]; then
     resolved="$(resolve_executable "${PYTHON_BIN}")" || die "Python executable not found: ${PYTHON_BIN}"
-    supports_project_python "${resolved}" || die "Python executable must satisfy the project's Python requirement (>=3.10,<3.14): ${resolved}"
+    supports_project_python "${resolved}" || die "Python executable must satisfy the project's Python requirement (>=3.11,<3.14): ${resolved}"
     supports_editable_pip "${resolved}" || die "pip must support PEP 660 editable installs (>=21.3): ${resolved}"
     PYTHON_BIN="${resolved}"
     return
@@ -131,7 +131,7 @@ select_python() {
     log "ignoring incompatible virtualenv Python: ${resolved}"
   fi
 
-  for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
+  for candidate in python3.13 python3.12 python3.11 python3; do
     resolved="$(resolve_executable "${candidate}" 2>/dev/null || true)"
     if [[ -n "${resolved}" ]] && supports_project_python "${resolved}" && supports_editable_pip "${resolved}"; then
       PYTHON_BIN="${resolved}"
@@ -139,7 +139,7 @@ select_python() {
     fi
   done
 
-  die "No Python interpreter with pip support for PEP 660 editable installs (Python >=3.10,<3.14; pip >=21.3) was found. Set PYTHON to a compatible interpreter."
+  die "No Python interpreter with pip support for PEP 660 editable installs (Python >=3.11,<3.14; pip >=21.3) was found. Set PYTHON to a compatible interpreter."
 }
 
 json_string() {

@@ -13,6 +13,15 @@ from zero_agent.frontends import channel_onboarding
 from zero_agent.frontends.channel_onboarding import WechatQrManager
 
 
+# QR 渲染需要可选依赖 qrcode（pyproject 的 bots extra）。缺失时跳过依赖它的
+# 用例，而不是让「缺依赖」冒充「功能失败」；降级行为由
+# test_qr_manager_handles_missing_qrcode_dependency 单独覆盖。
+requires_qrcode = pytest.mark.skipif(
+    channel_onboarding.qrcode is None,
+    reason="需要可选依赖 qrcode：pip install -e '.[bots]'",
+)
+
+
 def test_wechat_client_posts_updates_with_auth_headers(monkeypatch, tmp_path):
     import zero_agent.bots.wechat_app as wechat_app
 
@@ -88,6 +97,7 @@ def test_wechat_client_saves_minimal_token_file_with_private_mode(tmp_path):
     assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
 
 
+@requires_qrcode
 def test_qr_manager_returns_data_url_and_never_returns_token(monkeypatch):
     manager = WechatQrManager(client_factory=FakeWechatClient)
     try:
@@ -102,6 +112,7 @@ def test_qr_manager_returns_data_url_and_never_returns_token(monkeypatch):
         manager.close()
 
 
+@requires_qrcode
 def test_confirmed_qr_saves_token_and_reports_configured(tmp_path):
     token_file = tmp_path / "token.json"
     client = FakeWechatClient(
@@ -125,6 +136,7 @@ def test_confirmed_qr_saves_token_and_reports_configured(tmp_path):
         manager.close()
 
 
+@requires_qrcode
 def test_qr_manager_reports_expired_and_cancelled_sessions():
     expired = WechatQrManager(
         client_factory=lambda: FakeWechatClient(statuses=[{"status": "expired"}])
@@ -146,6 +158,7 @@ def test_qr_manager_reports_expired_and_cancelled_sessions():
         cancelled.close()
 
 
+@requires_qrcode
 def test_qr_manager_reuses_one_pending_session():
     FakeWechatClient.instances.clear()
     manager = WechatQrManager(client_factory=FakeWechatClient)
@@ -172,6 +185,7 @@ def test_qr_manager_handles_missing_qrcode_dependency(monkeypatch):
         manager.close()
 
 
+@requires_qrcode
 def test_qr_manager_reports_token_file_failure_without_credentials(tmp_path):
     manager = WechatQrManager(
         client_factory=lambda: FailingSaveClient(

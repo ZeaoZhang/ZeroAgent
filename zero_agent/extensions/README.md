@@ -48,7 +48,7 @@ def setup(ctx):
 
 | 调用 | 用途 |
 | --- | --- |
-| `ctx.tool(...)` | 注册模型可调用的工具；可声明 `effects` / `write_path_keys` / `execute_code_keys` |
+| `ctx.tool(...)` | 注册模型可调用的工具；可声明 `effects` / `write_path_keys` / `execute_code_keys` / `optional_write_paths` |
 | `ctx.on_tool_call` | 门控：放行 / 改参 / 否决 / 要求审批 |
 | `ctx.on_tool_result` | 变换：改写工具结果 |
 | `ctx.on_llm_request` | 变换：改写当前轮模型请求（不写回历史） |
@@ -86,18 +86,25 @@ def run_script(args): ...
 - 声明 `write` 但未声明 `write_path_keys`，或声明 `execute` 但未声明
   `execute_code_keys`，会被门控拒绝（注册错误）。
 - 受保护路径的写入会请求批准；workspace 内写入放行。
+- 写入目标的键**可以不传**时，声明 `optional_write_paths=True`：门控把「没传目标」
+  理解为「写入落在你写死的默认位置」，不再当成无法判定而拒绝。
+- `execute` 类工具的门控看到的是「将要执行的那份代码」：`execute_code_keys` 里
+  的参数，或参数为空时本轮回复里的围栏代码块（`call.response`）。两者都没有时
+  门控放行（这次调用不执行任何代码，由工具自身报参数错误）。
 
 ## 三类回调的语义
 
-- **通知**：返回值被忽略，回调抛异常只记日志，不影响执行。通知是只读契约，
+- **通知**：返回值被忽略，回调抛异常只记日志，不影响执行。每个回调拿到负载的
+  深拷贝（`handler` 之类运行期对象按引用传递），回调是只读契约，
   需要修改请用变换或门控。
 - **变换**：返回新值，链式传递；返回 `None` 表示不干预，抛异常则退回原值。
 - **门控**：返回 `None` 放行，返回 `ctx.block(原因)` 拒绝，
   返回 `ctx.confirm(原因)` 要求人类批准。
   **fail-closed**：门控自身抛异常时，本次调用会被拒绝而不是放行。
-  批准默认只放行「参数完全一致」的一次调用；如果同一个目标会被模型反复改写，
-  可以传 `scope`（例如 `ctx.confirm("...", scope=f"{tool}:{path}")`）登记一个
-  同任务、同路径的批量授权，有效期内不再重复询问。
+  批准默认只放行「参数完全一致」的一次调用，且绑定当前 `task_id`；如果同一个
+  目标会被模型反复改写，可以传 `scope`（例如
+  `ctx.confirm("...", scope=f"{tool}:{path}")`）登记一个同任务、同路径的批量
+  授权，有效期内不再重复询问。快选项用 `candidates=["批准", "拒绝"]` 传给前端。
 
 ## 常见问题
 

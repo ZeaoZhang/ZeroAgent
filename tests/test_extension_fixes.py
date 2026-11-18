@@ -12,7 +12,14 @@ from zero_agent.core.types import TaskContract, TaskMode
 from zero_agent.extensions.builtin import mcp_client, permission_gate
 from zero_agent.extensions.context import ExtensionContext
 from zero_agent.extensions.runtime import ExtensionRuntime
+from zero_agent.llm.base import MockResponse
 from zero_agent.tools.registry import ToolDefinition, ToolRegistry
+
+
+def _gate_reason(runtime, tool_name: str, args: dict):
+    """读取门控判定，返回拒绝/待批准原因（放行时为 None）."""
+    verdict = runtime.evaluate_tool_call(tool_name, args)
+    return None if verdict.is_allow else (verdict.reason or "blocked")
 
 
 def _tool(name: str, description: str = "d") -> ToolDefinition:
@@ -135,7 +142,7 @@ class TestHalfRegisteredPlugin:
         assert runtime.load_all() == 0
 
         assert registry.get("half_tool") is None
-        assert runtime.run_tool_call("code_run", {}) is None
+        assert _gate_reason(runtime, "code_run", {}) is None
         assert runtime.collect_prompt_blocks() == []
         assert "half" not in runtime.loaded_names
 
@@ -233,6 +240,9 @@ class TestReplayOnRegistryRebuild:
             loop = None
             config = new_config
 
+            # 复用真实实现：replay 会先刷新运行时持有的 config
+            _refresh_extension_config = ZeroAgent._refresh_extension_config
+
         ZeroAgent._replay_extension_registrations(Stub())
 
         assert new_registry.get("echo_tool") is not None
@@ -256,11 +266,11 @@ class TestPermissionGateHardening:
             "rm -R -F /tmp/x",
             "cd /tmp && rm -rf build",
         ):
-            assert runtime.run_tool_call("code_run", {"code": code}) is not None, code
+            assert _gate_reason(runtime, "code_run", {"script": code}) is not None, code
 
     def test_plain_force_remove_is_allowed(self, tmp_path: Path) -> None:
         runtime = self._runtime(tmp_path)
-        assert runtime.run_tool_call("code_run", {"code": "rm -f a.txt"}) is None
+        assert _gate_reason(runtime, "code_run", {"script": "rm -f a.txt"}) is None
 
     def test_symlink_into_protected_dir_requires_approval(
         self, tmp_path: Path,
@@ -282,7 +292,7 @@ class TestPermissionGateHardening:
 
     def test_empty_path_is_blocked(self, tmp_path: Path) -> None:
         runtime = self._runtime(tmp_path)
-        assert runtime.run_tool_call("file_write", {"path": ""}) is not None
+        assert _gate_reason(runtime, "file_write", {"path": ""}) is not None
 
 
 class TestShellScope:
@@ -504,9 +514,18 @@ class TestEnabledSemantics:
 
         assert "hello_ext" not in [tool.name for tool in agent.registry.list_all()]
         assert agent.extensions is not None
-        # code_run 的真实参数是 script，历史代码也接受 code，两种都要拦
-        for args in ({"code": "rm -rf /"}, {"script": "rm -rf /"}):
-            assert agent.extensions.run_tool_call("code_run", args) is not None, args
+        # 安全门在 extensions.enabled=false 时仍然生效：
+        # 真实会执行的 script 参数必须被拦
+        assert _gate_reason(
+            agent.extensions, "code_run", {"script": "rm -rf /"},
+        ) is not None
+        # 模型用诱饵参数（code_run 不读 "code"）掩护回复代码块时同样要拦
+        verdict = agent.extensions.evaluate_tool_call(
+            "code_run",
+            {"code": "rm -rf /"},
+            response=MockResponse(content="```bash\nrm -rf /\n```"),
+        )
+        assert verdict.is_block
 
     def test_enabled_loads_plugins(self, tmp_path: Path) -> None:
         agent = self._agent(tmp_path, enabled=True)
@@ -644,12 +663,27 @@ class TestApprovalTaskScope:
 
         assert runtime.consume_approval(fingerprint, task_id="task-A") is True
 
-    def test_global_grant_still_consumed_by_any_task(self, tmp_path: Path) -> None:
+    def test_grant_without_task_is_not_usable_by_named_task(
+        self, tmp_path: Path,
+    ) -> None:
         runtime = _runtime(tmp_path)
         fingerprint = self._fingerprint(tmp_path)
         runtime.grant_approval(fingerprint, task_id="")
 
-        assert runtime.consume_approval(fingerprint, task_id="task-A") is True
+        # 空 task_id 不再表示「任意任务」：生产路径总是带 task_id，
+        # 允许空指纹跨任务复用就等于给未绑定任务的批准开了后门
+        assert runtime.consume_approval(fingerprint, task_id="task-A") is False
+        # 用后即焚：那次不匹配的尝试已经烧掉了通行证
+        assert runtime.consume_approval(fingerprint, task_id="") is False
+
+    def test_grant_without_task_matches_empty_task_only(
+        self, tmp_path: Path,
+    ) -> None:
+        runtime = _runtime(tmp_path)
+        fingerprint = self._fingerprint(tmp_path)
+        runtime.grant_approval(fingerprint, task_id="")
+
+        assert runtime.consume_approval(fingerprint, task_id="") is True
 
 
 class TestReleaseCleansBuiltinOwners:
