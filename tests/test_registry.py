@@ -173,15 +173,21 @@ class TestToolRegistry:
             "file_read",
             "file_patch",
             "file_write",
-            "web_scan",
-            "web_execute_js",
-            "web_screenshot",
+            "find",
+            "read_doc",
+            "fetch",
+            "web_search",
             "update_working_checkpoint",
             "ask_user",
             "start_long_term_update",
         }
         assert "search_web" not in names
         assert "vision" not in names
+        assert not (names & {
+            "web_scan", "web_execute_js", "web_screenshot", "web_tabs",
+            "web_cdp", "web_input", "web_network", "web_intercept",
+            "web_captcha", "web_wait", "upload", "download",
+        })
         assert "memory_plot" not in names
         assert "send_im" not in names
 

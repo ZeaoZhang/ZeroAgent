@@ -1,4 +1,4 @@
-"""Behavioral tests for the bundled MV3 CDP bridge service worker."""
+"""Behavioral test for the MV3 bridge reconnection watchdog."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ BACKGROUND_JS = (
 )
 
 
-def test_watchdog_reconnects_a_dormant_bridge() -> None:
-    """The persistent MV3 wake-up event must restore the master WebSocket."""
+def test_probe_alarm_reconnects_a_dormant_bridge() -> None:
+    """A closed socket must be restored by the probe alarm."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required to execute the extension worker harness")
@@ -28,14 +28,21 @@ def test_watchdog_reconnects_a_dormant_bridge() -> None:
     harness = r"""
 const fs = require('fs');
 const vm = require('vm');
+
 const events = {};
-const event = name => ({
-  addListener(fn) { (events[name] ||= []).push(fn); },
-  removeListener() {},
-});
+function event(name) {
+  const entry = { handlers: [] };
+  entry.addListener = (fn) => entry.handlers.push(fn);
+  entry.removeListener = (fn) => {
+    entry.handlers = entry.handlers.filter((item) => item !== fn);
+  };
+  entry.fire = (...args) => entry.handlers.forEach((fn) => fn(...args));
+  events[name] = entry;
+  return entry;
+}
+
 const sockets = [];
-const intervals = [];
-const clearedIntervals = [];
+const alarms = [];
 class FakeWebSocket {
   static OPEN = 1;
   constructor(url) {
@@ -46,7 +53,7 @@ class FakeWebSocket {
   }
   send(message) { this.sent.push(JSON.parse(message)); }
 }
-const alarms = [];
+
 const chrome = {
   runtime: {
     onInstalled: event('runtime.onInstalled'),
@@ -64,67 +71,87 @@ const chrome = {
     onUpdated: event('tabs.onUpdated'),
     onRemoved: event('tabs.onRemoved'),
     onCreated: event('tabs.onCreated'),
+    onActivated: event('tabs.onActivated'),
   },
+  storage: {
+    session: {
+      get: async () => ({}),
+      set: async () => {},
+    },
+  },
+  debugger: {
+    onEvent: event('debugger.onEvent'),
+    onDetach: event('debugger.onDetach'),
+    attach: async () => {},
+    detach: async () => {},
+    sendCommand: async () => ({}),
+    getTargets: async () => [],
+  },
+  scripting: { executeScript: async () => [{ result: { ok: true, data: null } }] },
+  cookies: { getAll: async () => [] },
+  management: { getAll: async () => [] },
+  contentSettings: {},
+  downloads: { search: async () => [], download: async () => 1 },
 };
+
 const context = {
   AbortController,
+  TextEncoder,
+  btoa,
+  atob,
   chrome,
   console: { log() {}, error() {} },
-  fetch: async () => ({ ok: false }),
+  fetch: async () => ({ ok: true }),
   setTimeout,
   clearTimeout,
-  setInterval(fn, delay) { intervals.push({ fn, delay }); return intervals.length; },
-  clearInterval(id) { clearedIntervals.push(id); },
   WebSocket: FakeWebSocket,
 };
 vm.runInNewContext(fs.readFileSync(process.argv[1], 'utf8'), context);
-if (sockets.length !== 1) throw new Error(`expected initial connection, got ${sockets.length}`);
-sockets[0].readyState = 2;
-for (const listener of events['alarms.onAlarm']) {
-  listener({ name: 'tmwd-ws-watchdog' });
-}
-const replacement = sockets[1];
-sockets[0].onclose();
-replacement.readyState = FakeWebSocket.OPEN;
-replacement.onopen();
-setTimeout(() => {
-  intervals[0].fn();
-  replacement.onclose();
-  for (const listener of events['tabs.onUpdated']) {
-    listener(7, { status: 'complete' });
+
+(async () => {
+  if (sockets.length !== 2) throw new Error(`expected two initial sockets, got ${sockets.length}`);
+  const first = sockets.find((item) => item.url.endsWith(':18765'));
+  if (!first) throw new Error('missing ZeroAgent socket');
+  first.readyState = FakeWebSocket.OPEN;
+  await first.onopen();
+  first.onclose();
+
+  for (const listener of events['alarms.onAlarm'].handlers) {
+    listener({ name: 'tmwd-ws-probe' });
   }
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const second = sockets.find((item) => item.url === first.url && item !== first);
+  if (!second) throw new Error('probe alarm did not reconnect');
+  second.readyState = FakeWebSocket.OPEN;
+  await second.onopen();
+
   process.stdout.write(JSON.stringify({
     socketCount: sockets.length,
     alarms,
-    intervalDelay: intervals[0].delay,
-    sent: replacement.sent,
-    clearedIntervals,
+    firstSent: first.sent,
+    secondSent: second.sent,
   }));
-}, 0);
+})().catch((error) => {
+  console.error(error.stack || error);
+  process.exit(1);
+});
 """
+
     result = subprocess.run(
         [node, "-e", harness, str(BACKGROUND_JS)],
         check=False,
         capture_output=True,
         text=True,
-        timeout=5,
+        timeout=10,
     )
 
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
-        "socketCount": 3,
-        "alarms": [
-            {"name": "tmwd-ws-watchdog", "info": {"periodInMinutes": 1}},
-        ],
-        "intervalDelay": 20_000,
-        "sent": [
-            {
-                "type": "ext_ready",
-                "tabs": [
-                    {"id": 7, "url": "https://example.com", "title": "Example"},
-                ],
-            },
-            {"type": "ping"},
-        ],
-        "clearedIntervals": [1],
-    }
+    payload = json.loads(result.stdout)
+    assert payload["socketCount"] == 3
+    alarm_names = [entry["name"] for entry in payload["alarms"]]
+    assert "tmwd-ws-keepalive" in alarm_names
+    assert "tmwd-ws-probe" in alarm_names
+    assert payload["firstSent"][0]["type"] == "ext_ready"
+    assert payload["secondSent"][0]["type"] == "ext_ready"
+    assert payload["secondSent"][0]["tabs"][0]["id"] == 7

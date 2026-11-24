@@ -220,6 +220,8 @@ class AgentConfig:
             安全类扩展（permission_gate）始终生效.
         extensions_home: 扩展根目录，None 时使用 ``~/.zeroagent``.
         extensions_protected_writes: 额外的受保护写入前缀，修改前需人类同意.
+        browser_tools: 浏览器工具加载模式 "auto" | "on" | "off"；默认 auto，
+            仅在 [browser] 可选运行时可用时注册.
         sandbox_mode: code_run 的进程沙箱模式 "off" | "auto" | "macos" | "linux".
     """
 
@@ -241,6 +243,7 @@ class AgentConfig:
     extensions_enabled: bool = True
     extensions_home: Optional[str] = None
     extensions_protected_writes: list[str] = field(default_factory=list)
+    browser_tools: str = "auto"
     sandbox_mode: str = "off"
 
     @property
@@ -497,8 +500,45 @@ class AgentConfig:
             extensions_protected_writes=_as_str_list(
                 extensions_data.get("protected_writes"), "protected_writes",
             ),
+            browser_tools=_parse_browser_tools_mode(
+                extensions_data.get("browser", "auto"),
+            ),
             sandbox_mode=_parse_sandbox_mode(extensions_data.get("sandbox")),
         )
+
+
+def _parse_browser_tools_mode(value: object) -> str:
+    """解析 ``extensions.browser``.
+
+    ``auto`` registers the browser tools only when the optional runtime imports;
+    ``on`` requires them; ``off`` never registers them. YAML 1.1 may turn
+    unquoted on/off into booleans, so booleans are accepted as aliases.
+
+    Args:
+        value: 配置值.
+
+    Returns:
+        ``auto`` / ``on`` / ``off``.
+    """
+    if value is None:
+        return "auto"
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if isinstance(value, (int, float)):
+        return "on" if value else "off"
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "auto":
+            return "auto"
+        if normalized in {"on", "true", "yes", "1"}:
+            return "on"
+        if normalized in {"off", "false", "no", "0", "none", ""}:
+            return "off"
+    _logger.warning(
+        "extensions.browser 期望 auto/on/off，收到 %r，已按 auto 处理",
+        value,
+    )
+    return "auto"
 
 
 def _parse_sandbox_mode(value: object) -> str:

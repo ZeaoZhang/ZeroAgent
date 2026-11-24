@@ -1051,6 +1051,8 @@ class ZeroAgent:
     _SAFETY_EXTENSIONS = ("permission_gate",)
     # 能力类内置扩展：只在启用扩展时安装
     _CAPABILITY_EXTENSIONS = ("skills_index", "mcp_client")
+    # 可选能力扩展：默认不进入 with_builtins()，按配置加载
+    _OPTIONAL_CAPABILITY_EXTENSIONS = ("browser_tools",)
     # 内部扩展：与外部插件共用同一运行时，始终安装（自身按配置 no-op）
     _INTERNAL_EXTENSIONS = (
         ("langfuse_tracing", "zero_agent.plugins.langfuse_tracing"),
@@ -1130,6 +1132,11 @@ class ZeroAgent:
                 (name, f"zero_agent.extensions.builtin.{name}", False)
                 for name in self._CAPABILITY_EXTENSIONS
             )
+            if getattr(self.config, "browser_tools", "auto") != "off":
+                targets.extend(
+                    (name, f"zero_agent.extensions.builtin.{name}", False)
+                    for name in self._OPTIONAL_CAPABILITY_EXTENSIONS
+                )
         targets.extend(
             (name, module_path, False)
             for name, module_path in self._INTERNAL_EXTENSIONS

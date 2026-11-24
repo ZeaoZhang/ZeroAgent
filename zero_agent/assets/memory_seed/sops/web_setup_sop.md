@@ -6,6 +6,21 @@
 ## 目标
 在仅具备系统级权限（code_run）时，建立 Web 交互能力（web_scan / web_execute_js）。
 
+## 前置：确认浏览器工具已启用
+`web_*` 是可选能力扩展，不在默认 `with_builtins()` 里。先确认 `config.yaml`：
+
+```yaml
+extensions:
+  enabled: true
+  browser: auto   # auto|true|false
+```
+
+- `auto`：仅当安装了 `zero-agent[browser]`（`tm_webdriver` 可导入）时注册。
+- `true`：强制启用；缺少浏览器 runtime 时启动日志会告警且不注册。
+- `false`：关闭整个浏览器工具包。
+
+若模型看不到 `web_scan` / `web_execute_js`，先检查配置与安装，不要直接开始装 Chrome 扩展。
+
 ## 前置：检测浏览器
 
 ## 安装 tmwd_cdp_bridge 扩展

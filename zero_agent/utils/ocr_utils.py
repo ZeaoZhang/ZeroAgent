@@ -66,14 +66,21 @@ def ocr_image(
     engine = _get_ocr()
     result = engine(img)
 
+    # RapidOCR returns (detections, elapsed_times) on recent releases, while
+    # older releases returned the detections list directly.
+    if isinstance(result, tuple):
+        result = result[0] if result else None
+
     lines: list[str] = []
     details: list[dict[str, Any]] = []
     full_text_parts: list[str] = []
 
     if result is not None:
         for item in result:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
             raw_text = str(item[1]) if item[1] else ""
-            conf = float(item[2]) if len(item) > 2 and item[2] else 0.0
+            conf = float(item[2]) if len(item) > 2 and item[2] is not None else 0.0
             bbox = item[0] if item[0] else []
             cleaned = _strip_cjk_spaces(raw_text)
             full_text_parts.append(cleaned)

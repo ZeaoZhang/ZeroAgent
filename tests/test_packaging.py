@@ -65,7 +65,7 @@ def test_qt_chat_frontend_is_not_packaged() -> None:
     pyproject = _pyproject()
     extras = pyproject["project"]["optional-dependencies"]
 
-    assert "zero-agent[ui,browser,memory,plot,bots,monitoring]" in extras["all-extras"]
+    assert "zero-agent[ui,browser,docs,memory,plot,bots,monitoring]" in extras["all-extras"]
     assert importlib.util.find_spec("zero_agent.frontends.qtapp") is None
 
 

@@ -87,7 +87,8 @@ zero_agent/
 │   └── builtin/                # 内置扩展（它们和第三方用同一套接口）
 │       ├── permission_gate.py  # 写入需人类同意的策略
 │       ├── skills_index.py     # skill 发现与描述注入
-│       └── mcp_client.py       # MCP 工具来源
+│       ├── mcp_client.py       # MCP 工具来源
+│       └── browser_tools.py    # 可选浏览器工具包（extensions.browser 控制）
 │
 └── tools/                      # 工具仍注册进现有 ToolRegistry
 ```

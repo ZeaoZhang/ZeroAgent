@@ -92,7 +92,9 @@ LLM 返回 tool_calls → ToolRegistry.dispatch()
 ```
 
 加载时机：`ZeroAgent.__init__` 中，内置工具注册之后、handler 创建之前。
-插件按文件名字典序加载，单个失败只跳过自身。
+插件按文件名字典序加载，单个失败只跳过自身。内置能力扩展同样走这套运行时，
+但由代码显式安装；`browser_tools` 是其中之一，由 `extensions.browser` 控制，
+把 `web_*` 工具从默认工具面里拆出去。
 
 三类扩展点（语义不同，不可混用）：
 

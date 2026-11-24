@@ -36,6 +36,10 @@ extensions:
   # file are not re-asked within 600 seconds. Writes inside workspace_dir are
   # never gated.
   protected_writes: []
+  # Browser-control tools (web_*): auto | true | false.
+  # auto registers them only when the optional [browser] runtime is importable;
+  # true requires it; false disables the whole browser tool bundle.
+  browser: auto
   # Optional process sandbox for code_run: off | auto | macos | linux.
   # "auto" picks sandbox-exec on macOS and bwrap on Linux; unsupported
   # platforms degrade to no isolation instead of failing the command.

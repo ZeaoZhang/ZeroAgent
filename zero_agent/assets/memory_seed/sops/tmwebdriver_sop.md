@@ -1,5 +1,6 @@
 # TMWebDriver SOP
 
+- `web_*` 是可选能力扩展：需要 `extensions.enabled=true` 且 `extensions.browser` 为 `auto`/`true`；`auto` 还要求已安装 `zero-agent[browser]`。工具不在 schema 时先查配置，不要假装调用。
 - 直接用web_scan/web_execute_js工具。本文件只记录特性和坑。
 - 底层：`../TMWebDriver.py`通过Chrome扩展接管用户浏览器（保留登录态/Cookie）
 - 非Selenium/Playwright，保留用户浏览器登录态
@@ -42,6 +43,13 @@ fetch('PDF_URL').then(r=>r.blob()).then(b=>{
 
 ## CDP桥(tmwd_cdp_bridge扩展) ⭐首选
 扩展路径：`assets/tmwd_cdp_bridge/`(需安装，含debugger权限)
+优先用封装工具：`web_tabs`（生命周期）、`web_input`（原生点击/输入/拖拽/滚轮）、`web_cdp`（任意 CDP）、`web_network`（捕获）、`web_intercept`（无人值守改包）、`web_wait`（等待）。下面的 JSON 直传是底层兜底。
+v3.0 扩展已合并 dsh-browser-control 的 popup bridge、downloads、跨扩展桥和探测式重连；同一个扩展实例同时连接 ZeroAgent(18765/18766) 和 dsh(18865)，不要再启用 dsh 自带的 extension（两个扩展会抢 chrome.debugger）。下载/跨扩展可用 JSON 直传：
+```js
+web_execute_js script='{"cmd":"download","method":"start","url":"https://example.com/a.pdf"}'
+web_execute_js script='{"cmd":"download","method":"list"}'
+web_execute_js script='{"cmd":"ext_eval","extensionId":"<id>","tabId":N,"code":"return document.title"}'
+```
 ⚠TID约定标识：首次运行自动生成到`assets/tmwd_cdp_bridge/config.js`(已gitignore)，扩展通过manifest引用
 调用：`web_execute_js` script直传JSON字符串（工具层自动识别对象格式，走WS→background.js cmd路由）
 ```js
@@ -119,17 +127,21 @@ web_execute_js script='{"cmd": "batch", "commands": [...]}'
 - ⚠**前置条件：必须先CDP `Page.bringToFront` 切tab到前台**，Chrome仅在前台tab释放autofill保护值，后台tab物理点击无效
 - ⭐**一键释放与登录**：bringToFront → mousePressed点任一字段(无需Released，一个释放全页) → 等500ms → 补input/change事件 → 点登录
 
-## 验证码/页面视觉截图
-- ⭐首选 `web_screenshot`：它通过 CDP `Page.captureScreenshot` 截取当前或指定标签页，并把 PNG 文件保存到 workspace，默认覆盖 `screenshots/browser.png`。
-- 调用顺序：页面切换/操作完成后 → `web_screenshot(save_to_file="screenshots/browser.png", switch_tab_id="TAB_ID")` → 检查返回的 `path` 和 `bytes` → 如需视觉判断，再把返回路径交给 `vision(image_path=path, prompt=...)`。
-- 默认 `capture_beyond_viewport=true` 用于整页截图；只需要当前视口时设为 `false`。截图不要求标签页前台，后台标签也可通过 `switch_tab_id` 截取。
-- 截图用于验证码、弹窗、布局或操作结果验证时，必须在动作完成后重新截图，不要只凭 `web_scan` 的 HTML 判断视觉状态。
-- 若环境尚未注册 `web_screenshot`，可用已有 CDP 透传验证：
-  ```text
-  web_execute_js script='{"cmd":"cdp","tabId":TAB_ID,"method":"Page.captureScreenshot","params":{"format":"png","captureBeyondViewport":true}}'
-  ```
-  该回退会返回 base64；需要保存成文件或交给 `vision` 时，仍应优先使用 `web_screenshot`，不要把整段 base64 继续塞回模型上下文。
-- 验证码canvas/img：JS `canvas.toDataURL()` 直接拿base64最干净
+## 验证码/无人值守登录
+- ⭐首选 `web_captcha(selector="验证码选择器", tab_id="TAB_ID")`：截取元素图片 → 本地 OCR → 文本为空时自动调用视觉后端；返回 `text` / `normalized_text` / `path` / `confidence`。
+- 识别成功后直接 `web_input(action="type", selector="输入框选择器", text=normalized_text, submit=True)`，不需要人工确认。
+- OCR 误读时用 `web_captcha(engine="vision")`；视觉后端不可用时返回 `path`，再调用 `vision(image_path=path, prompt="读取验证码，只输出字符")`。
+- 滑块/行为验证码无法靠 OCR 解决；可先用 `web_input(action="drag", selector=滑块, to_selector=终点)` 模拟原生拖拽，失败不要假装成功，改用人工或专用方案。
+- 普通整页视觉验证仍用 `web_screenshot` + `vision`；截图不要求标签页前台，后台标签可传 `switch_tab_id`。
+- 验证码 canvas/img 也可用 JS `canvas.toDataURL()` 兜底，但优先 `web_captcha`，避免把大段 base64 塞回模型上下文。
+
+## 无人值守改包
+- `web_intercept(action="apply", tab_id="TAB_ID", rules=[...])` 安装每 tab Fetch 规则；规则按顺序匹配，首个命中生效。
+- 未匹配请求自动 `continue`，不会挂页面；`response_status` / `response_headers` / `response_body` 会自动启用 Response 阶段。
+- 请求头覆盖：`request_headers: {"X-Test":"1"}`；值为空字符串表示删除该头。
+- 响应覆盖：`response_status`、`response_headers`、`response_body`（`response_body_base64=true` 表示二进制）；`abort=true` 直接失败；`delay_ms` 延迟放行。
+- 决策日志：`web_network(action="events", tab_id="TAB_ID", methods=["ZeroAgent.intercept"])`；关闭：`web_intercept(action="clear", tab_id="TAB_ID")`。
+- 规则持久化在扩展 session storage；service worker 被挂起后可恢复，浏览器重启后需重新 apply。
 
 ## simphtml与TMWebDriver调试
 - simphtml调试必须通过`code_run`注入JS到真实浏览器（Python端无法模拟DOM）

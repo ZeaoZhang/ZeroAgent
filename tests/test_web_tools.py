@@ -10,6 +10,14 @@ from zero_agent.tools.builtin import web
 from zero_agent.tools.registry import ToolRegistry
 
 
+def _browser_registry(config):
+    """Core registry plus the optional browser bundle for handler tests."""
+    registry = ToolRegistry.with_builtins(config)
+    for definition in web.build_web_tools(config):
+        registry.register(definition)
+    return registry
+
+
 def test_web_scan_reports_browser_extra_hint_when_runtime_missing(monkeypatch) -> None:
     monkeypatch.setattr(web, "_driver", None)
     monkeypatch.setattr(web, "_driver_error", "missing browser runtime")
@@ -57,7 +65,7 @@ def test_web_execute_js_handler_reads_script_file_and_saves_result(
 
     monkeypatch.setattr(web, "web_execute_js", fake_web_execute_js)
 
-    registry = ToolRegistry.with_builtins(mock_config)
+    registry = _browser_registry(mock_config)
     handler = BaseHandler(registry=registry, cwd=str(workspace))
     gen = handler.dispatch(
         "web_execute_js",
@@ -95,7 +103,7 @@ def test_web_execute_js_handler_uses_javascript_code_block(
 
     monkeypatch.setattr(web, "web_execute_js", fake_web_execute_js)
 
-    registry = ToolRegistry.with_builtins(mock_config)
+    registry = _browser_registry(mock_config)
     handler = BaseHandler(registry=registry, cwd=str(tmp_path))
     response = MockResponse(content="```javascript\nreturn location.href\n```")
     outcome = _exhaust(handler.dispatch("web_execute_js", {}, response))
@@ -157,7 +165,7 @@ def test_web_screenshot_tool_defaults_to_workspace_path(tmp_path, mock_config, m
         "web_screenshot",
         lambda path, **kwargs: {"status": "success", "path": path, **kwargs},
     )
-    registry = ToolRegistry.with_builtins(mock_config)
+    registry = _browser_registry(mock_config)
     handler = BaseHandler(registry=registry, cwd=str(tmp_path))
 
     outcome = _exhaust(handler.dispatch("web_screenshot", {}, MockResponse(content="")))
@@ -170,7 +178,7 @@ def test_web_execute_js_handler_missing_script_returns_error(
     tmp_path, mock_config
 ) -> None:
     mock_config.workspace_dir = str(tmp_path)
-    registry = ToolRegistry.with_builtins(mock_config)
+    registry = _browser_registry(mock_config)
     handler = BaseHandler(registry=registry, cwd=str(tmp_path))
 
     outcome = _exhaust(handler.dispatch(
@@ -198,7 +206,7 @@ def test_web_scan_handler_returns_html_string(
         }
 
     monkeypatch.setattr(web, "web_scan", fake_web_scan)
-    registry = ToolRegistry.with_builtins(mock_config)
+    registry = _browser_registry(mock_config)
     handler = BaseHandler(registry=registry, cwd=str(tmp_path))
 
     outcome = _exhaust(handler.dispatch("web_scan", {}, MockResponse(content="")))

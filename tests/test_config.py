@@ -401,3 +401,47 @@ llm_backends:
     with pytest.raises(ConfigError) as exc:
         AgentConfig.from_yaml(path)
     assert str(exc.value) == "missing environment variable: UNSET_BACKEND_KEY"
+
+
+def test_extensions_browser_mode_parsing(tmp_path) -> None:
+    """``extensions.browser`` accepts auto/on/off and YAML booleans."""
+    def load(value: str) -> str:
+        config_path = tmp_path / f"browser-{value}.yaml"
+        config_path.write_text(
+            f"""
+default_backend: default
+extensions:
+  browser: {value}
+llm_backends:
+  default:
+    provider: openai
+    api_key: sk-test
+    api_base: https://api.openai.com/v1
+    model: gpt-test
+""",
+            encoding="utf-8",
+        )
+        return AgentConfig.from_yaml(config_path).browser_tools
+
+    assert load("auto") == "auto"
+    assert load("true") == "on"
+    assert load("false") == "off"
+    assert load('"on"') == "on"
+
+
+def test_extensions_browser_mode_defaults_to_auto(tmp_path) -> None:
+    config_path = tmp_path / "browser-default.yaml"
+    config_path.write_text(
+        """
+default_backend: default
+llm_backends:
+  default:
+    provider: openai
+    api_key: sk-test
+    api_base: https://api.openai.com/v1
+    model: gpt-test
+""",
+        encoding="utf-8",
+    )
+
+    assert AgentConfig.from_yaml(config_path).browser_tools == "auto"

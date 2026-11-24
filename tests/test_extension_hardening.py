@@ -24,6 +24,7 @@ from zero_agent.extensions.builtin import mcp_client, path_policy, permission_ga
 from zero_agent.extensions.context import ExtensionContext
 from zero_agent.extensions.runtime import ExtensionRuntime
 from zero_agent.llm.base import MockResponse
+from zero_agent.tools.builtin.web import build_web_tools
 from zero_agent.tools.registry import ToolDefinition, ToolRegistry
 
 
@@ -38,6 +39,8 @@ def _builtin_runtime(tmp_path: Path) -> ExtensionRuntime:
     """带内置工具与 permission_gate 的运行时."""
     config = _config(tmp_path)
     registry = ToolRegistry.with_builtins(config)
+    for definition in build_web_tools(config):
+        registry.register(definition)
     runtime = ExtensionRuntime(
         registry=registry, home=tmp_path / "home", config=config,
     )
@@ -267,6 +270,8 @@ class TestOptionalWriteTargets:
         [
             ("web_screenshot", {}),
             ("web_execute_js", {"script": "return 1"}),
+            ("web_cdp", {"method": "Page.printToPDF"}),
+            ("web_captcha", {"selector": "#captcha"}),
         ],
     )
     def test_browser_tools_allow_default_target(
@@ -307,6 +312,18 @@ class TestOptionalWriteTargets:
         )
 
         assert verdict.needs_approval
+
+        cdp_verdict = runtime.evaluate_tool_call(
+            "web_cdp", {"method": "Page.printToPDF", "save_to_file": str(protected)},
+        )
+
+        assert cdp_verdict.needs_approval
+
+        captcha_verdict = runtime.evaluate_tool_call(
+            "web_captcha", {"selector": "#captcha", "save_to_file": str(protected)},
+        )
+
+        assert captcha_verdict.needs_approval
 
 
 class TestCaseInsensitiveProtectedPaths:

@@ -882,7 +882,7 @@ class BaseHandler:
             return "write"
         if tool_name == "code_run":
             return "execute"
-        if tool_name in {"web_scan", "web_execute_js"}:
+        if tool_name.startswith("web_") or tool_name == "web_search":
             return "web"
         if tool_name == "ask_user":
             return "user"
@@ -907,7 +907,7 @@ class BaseHandler:
                 if isinstance(data, str) and not data.startswith("Error:")
                 else "error"
             )
-        if tool_name in {"file_write", "file_patch", "web_scan", "web_execute_js"}:
+        if tool_name.startswith("web_") or tool_name in {"file_write", "file_patch"}:
             return "success" if isinstance(data, dict) and data.get("status") == "success" else "error"
         if tool_name == "code_run":
             return (
