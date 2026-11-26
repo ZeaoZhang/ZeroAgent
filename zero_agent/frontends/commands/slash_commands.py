@@ -235,11 +235,12 @@ _register(
 
 
 def _handle_update(args: str, agent: "ZeroAgent") -> str:
-    """Update agent configuration or components."""
+    """Update agent configuration or reload the whole workflow."""
     usage = (
         "  用法:\n"
         "    /update config         重新加载配置文件\n"
-        "    /update plugins        重新加载插件\n"
+        "    /update workflow       同步 config / plugin / MCP / 核心代码\n"
+        "    /update restart        热重启内核并自动续跑\n"
     )
     if not args.strip():
         return usage
@@ -248,18 +249,58 @@ def _handle_update(args: str, agent: "ZeroAgent") -> str:
     if sub == "config":
         ok = agent.reload_config()
         return "  配置已重新加载" if ok else "  配置未变更或重载失败"
-    elif sub == "plugins":
-        agent._register_builtin_plugins()
-        return "  插件已重新加载"
-    else:
-        return f"  未知子命令: {sub}\n{usage}"
+    if sub == "workflow":
+        report = agent.reload_workflow(force=True)
+        plugins = report.get("plugins") or {}
+        lines = [
+            "  workflow 已同步:",
+            f"    config: {'reloaded' if report.get('config') else 'unchanged'}",
+            f"    topology: {'applied' if report.get('topology') else 'unchanged'}",
+            "    plugins: "
+            f"loaded={plugins.get('loaded') or []} "
+            f"reloaded={plugins.get('reloaded') or []} "
+            f"removed={plugins.get('removed') or []} "
+            f"failed={plugins.get('failed') or {}}",
+            f"    mcp: {'reloaded' if report.get('mcp') else 'unchanged'}",
+            f"    core_restart: {report.get('core_restart') or 'none'}",
+        ]
+        if report.get("core_restart_error"):
+            lines.append(f"    core_restart_error: {report['core_restart_error']}")
+        return "\n".join(lines)
+    if sub == "restart":
+        hook = getattr(agent, "_hot_restart_hook", None)
+        if not callable(hook):
+            return "  当前运行环境不支持热重启"
+        hook("manual")
+        return "  已请求热重启内核"
+    return f"  未知子命令: {sub}\n{usage}"
 
 
 _register(
     "update",
     _handle_update,
     description="更新配置或组件",
-    arg_hint="<config|plugins>",
+    arg_hint="<config|workflow|restart>",
+)
+
+
+def _handle_permissions(args: str, agent: "ZeroAgent") -> str:
+    """Show or switch the tool-gating permission mode."""
+    value = args.strip().lower()
+    if not value:
+        return f"  当前权限模式: {agent.config.permission_mode}"
+    try:
+        mode = agent.set_permission_mode(value)
+    except ValueError:
+        return "  用法: /permissions [ask|full]"
+    return f"  权限模式已切换: {mode}"
+
+
+_register(
+    "permissions",
+    _handle_permissions,
+    description="查看或切换工具权限模式",
+    arg_hint="[ask|full]",
 )
 
 
@@ -317,7 +358,7 @@ def has_active_plan(agent: "ZeroAgent") -> bool:
     user behind the active-plan gate.
     """
 
-    if getattr(agent, "_pending_task_state", None) is not None:
+    if getattr(agent, "pending_task_state", None) is not None:
         return True
 
     handler = getattr(agent, "handler", None)
@@ -333,7 +374,7 @@ def has_active_plan(agent: "ZeroAgent") -> bool:
 def resolve_pending_plan(agent: "ZeroAgent") -> tuple[str, TaskMode, str] | None:
     """Return the resumable pending PLAN/EXECUTING contract for /plan execute."""
 
-    pending = getattr(agent, "_pending_task_state", None)
+    pending = getattr(agent, "pending_task_state", None)
     contract = getattr(pending, "contract", None)
     mode = getattr(contract, "mode", None)
     if mode not in (TaskMode.PLAN, TaskMode.EXECUTING):

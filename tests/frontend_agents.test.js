@@ -75,7 +75,7 @@ t.setAgentElements(agentList, rightDrawer);
 async function appTests() {
   const hydratedAgent = { id: 'agent-aaaaaaaaaaaa', name: 'ZeroAgent', type: 'session-agent', status: 'running', created_at: 1000, updated_at: 1000, reason: '' };
   context.window.zeroAgent = { rpc: async (method) => method === 'session/poll' ? { messages: [{ id: 1, role: 'user', content: 'hello' }] } : { agents: [] } };
-  const sessionWorkspace = '/Users/zhangzeao/workspace/ZeroAgent/workspace';
+  const sessionWorkspace = '/tmp/za-test-workspace';
   await t.hydrateBridgeSessions({ sessions: [{ id: 'bridge-a', title: 'A', cwd: sessionWorkspace, subAgents: [hydratedAgent] }] });
   const sessionA = [...t.state.sessions.values()][0];
   assert.equal(sessionA.cwd, sessionWorkspace);
@@ -140,7 +140,7 @@ async function appTests() {
     JSON.stringify(t.extractOutputFileRefs('Done [FILE:reports/diagram.png]')),
     JSON.stringify(['reports/diagram.png']),
   );
-  const generatedImagePath = '/Users/zhangzeao/workspace/ZeroAgent/workspace/plan_jev_diagram/jev_principle_diagram.png';
+  const generatedImagePath = `${sessionWorkspace}/plan_jev_diagram/jev_principle_diagram.png`;
   sessionA.cwd = sessionWorkspace;
   assert.equal(
     JSON.stringify(t.extractOutputFileRefs('Saved to [FILE:plan_jev_diagram/jev_principle_diagram.png]', sessionWorkspace)),

@@ -32,6 +32,7 @@ def _config(tmp_path: Path) -> AgentConfig:
     return AgentConfig(
         workspace_dir=str(tmp_path / "ws"),
         memory_dir=str(tmp_path / "mem"),
+        permission_mode="ask",
     )
 
 
@@ -550,6 +551,7 @@ class TestWriteScopeConfinement:
         config = AgentConfig(
             workspace_dir=str(link),
             memory_dir=str(tmp_path / "mem"),
+            permission_mode="ask",
         )
         registry = ToolRegistry.with_builtins(config)
         runtime = ExtensionRuntime(

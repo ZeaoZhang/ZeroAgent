@@ -227,6 +227,36 @@ def _macos_profile(root: str, extra_roots: Iterable[str] = ()) -> str:
     )
 
 
+def will_apply(
+    root: Optional[str],
+    mode: str,
+    extra_roots: Iterable[str] = (),
+) -> bool:
+    """Return True when *mode* really wraps commands (no silent degradation).
+
+    ``code_run`` 用它决定要不要再加一层静态兜底：沙箱真生效时不必限制命令，
+    沙箱不可用（``off`` / 平台不支持 / 探测失败）时才退回 ``shell_policy``。
+
+    Args:
+        root: 写入根（通常是 workspace）.
+        mode: ``off`` / ``auto`` / ``macos`` / ``linux``.
+        extra_roots: 额外写入根.
+
+    Returns:
+        True 表示 :func:`wrap_command` 会返回已包装的命令.
+    """
+
+    if not mode or mode == "off":
+        return False
+    try:
+        _cmd, applied, _reason = wrap_command(
+            ["/usr/bin/true"], root, mode, extra_roots,
+        )
+    except Exception:  # noqa: BLE001 - 探测失败按不可用处理
+        return False
+    return applied
+
+
 def wrap_command(
     cmd: List[str],
     root: Optional[str],

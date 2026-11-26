@@ -225,6 +225,13 @@ class AgentConfig:
         browser_tools: 浏览器工具加载模式 "auto" | "on" | "off"；默认 auto，
             仅在 [browser] 可选运行时可用时注册.
         sandbox_mode: code_run 的进程沙箱模式 "off" | "auto" | "macos" | "linux".
+        permission_mode: 工具门控模式 "ask" | "full"；full 绕过全部扩展门控.
+        extensions_hot_reload: 每轮自动同步 plugin / mcp.json 变化.
+        extensions_core_restart: 核心 Python 代码变化后自动热重启.
+        safety_protected_paths: 追加到不可逆破坏底线的写入保护路径
+            (``safety.protected_paths``)；默认清单见 ``zero_agent.core.safety``.
+        safety_allow_paths: 从底线里解禁的路径（``safety.allow_paths``），
+            用于把某个数据目录交给 agent 管理.
     """
 
     llm_backends: dict[str, LLMBackendConfig] = field(default_factory=dict)
@@ -248,6 +255,11 @@ class AgentConfig:
     extra_write_roots: list[str] = field(default_factory=list)
     browser_tools: str = "auto"
     sandbox_mode: str = "auto"
+    permission_mode: str = "full"
+    extensions_hot_reload: bool = True
+    extensions_core_restart: bool = True
+    safety_protected_paths: list[str] = field(default_factory=list)
+    safety_allow_paths: list[str] = field(default_factory=list)
 
     @property
     def resolved_language(self) -> str:
@@ -271,6 +283,12 @@ class AgentConfig:
                 return "zh"
         except Exception:
             pass
+
+        # 2. 模型类型：与 resolved_tool_language 同口径。缺了这一步会出现
+        # 「工具描述中文、系统提示词英文」的分裂，中文 locale 缺失时尤甚。
+        for backend in self.llm_backends.values():
+            if any(k in backend.model.lower() for k in _CHINESE_MODEL_HINTS):
+                return "zh"
 
         return "en"
 
@@ -435,6 +453,11 @@ class AgentConfig:
         language = os.environ.get("ZA_LANG", "auto")
         peer_hint = os.environ.get("ZA_PEER_HINT", "").lower() in ("1", "true", "yes", "on")
         litellm_model_cost_map = os.environ.get("ZA_LITELLM_MODEL_COST_MAP") or None
+        permission_mode = _parse_permission_mode(
+            os.environ.get("ZA_PERMISSION_MODE") or None,
+        )
+        hot_reload = _as_bool(os.environ.get("ZA_HOT_RELOAD") or None, True)
+        core_restart = _as_bool(os.environ.get("ZA_CORE_RESTART") or None, True)
 
         config = cls(
             llm_backends={
@@ -456,6 +479,9 @@ class AgentConfig:
             language=language,
             peer_hint=peer_hint,
             litellm_model_cost_map=litellm_model_cost_map,
+            permission_mode=permission_mode,
+            extensions_hot_reload=hot_reload,
+            extensions_core_restart=core_restart,
         )
         config._resolve_paths(os.getcwd())
         return config
@@ -465,6 +491,14 @@ class AgentConfig:
         """Build AgentConfig from parsed YAML data."""
         data = data or {}
         extensions_data = data.get("extensions") or {}
+        if not isinstance(extensions_data, dict):
+            extensions_data = {}
+        permissions_data = data.get("permissions") or {}
+        if not isinstance(permissions_data, dict):
+            permissions_data = {}
+        safety_data = data.get("safety") or {}
+        if not isinstance(safety_data, dict):
+            safety_data = {}
         backends: dict[str, LLMBackendConfig] = {}
         env_pattern = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
         for name, cfg in data.get("llm_backends", {}).items():
@@ -507,6 +541,19 @@ class AgentConfig:
                 extensions_data.get("browser", "auto"),
             ),
             sandbox_mode=_parse_sandbox_mode(extensions_data.get("sandbox")),
+            permission_mode=_parse_permission_mode(permissions_data.get("mode")),
+            extensions_hot_reload=_as_bool(
+                extensions_data.get("hot_reload"), True,
+            ),
+            extensions_core_restart=_as_bool(
+                extensions_data.get("core_restart"), True,
+            ),
+            safety_protected_paths=_as_str_list(
+                safety_data.get("protected_paths"), "protected_paths",
+            ),
+            safety_allow_paths=_as_str_list(
+                safety_data.get("allow_paths"), "allow_paths",
+            ),
         )
 
 
@@ -542,6 +589,50 @@ def _parse_browser_tools_mode(value: object) -> str:
         value,
     )
     return "auto"
+
+
+PERMISSION_MODES = frozenset({"ask", "full"})
+"""合法的 ``permissions.mode`` 取值."""
+
+
+def normalize_permission_mode(value: object, *, default: str = "full") -> str:
+    """把任意配置/环境值归一为 ``ask`` 或 ``full``.
+
+    这里是权限模式的唯一归一入口：配置解析、扩展运行时与 ``/permissions``
+    命令都走它，避免三处各自的默认值或校验规则漂移。
+
+    Args:
+        value: 原始值.
+        default: ``value`` 为 None 时的返回值.
+
+    Returns:
+        ``ask`` 或 ``full``；非法值回退 ``ask``（安全侧）.
+    """
+    if value is None:
+        return default if default in PERMISSION_MODES else "ask"
+    normalized = str(value).strip().lower()
+    return normalized if normalized in PERMISSION_MODES else "ask"
+
+
+def _parse_permission_mode(value: object) -> str:
+    """解析 ``permissions.mode``.
+
+    缺省是全权限模式；非法值回退 ``ask``（安全侧），并留下告警，避免
+    ``permissions: {mode: fulll}`` 静默变成免审批。
+
+    Args:
+        value: 配置值.
+
+    Returns:
+        ``ask`` 或 ``full``.
+    """
+    mode = normalize_permission_mode(value, default="full")
+    if value is not None and str(value).strip().lower() not in PERMISSION_MODES:
+        _logger.warning(
+            "permissions.mode 期望 ask/full，收到 %r，已按 ask 处理",
+            value,
+        )
+    return mode
 
 
 def _parse_sandbox_mode(value: object) -> str:

@@ -49,6 +49,9 @@ from aiohttp import web, WSMsgType
 
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.core.agent import ZeroAgent
+from zero_agent.core import checkpoint as checkpoint_store
+from zero_agent.core import hot_restart
+from zero_agent.core.checkpoint import CONTINUATION_PROMPT
 from zero_agent.core.config import AgentConfig, default_config_path, load_default_config
 from zero_agent.core.types import TaskMode
 from zero_agent.core.localization import PROMPT_CAPABILITY_FILE_DELIVERY
@@ -133,6 +136,21 @@ def _validate_bridge_security(security: BridgeSecurity) -> BridgeSecurity:
             "and an explicit non-empty ZA_DESKTOP_BRIDGE_TOKEN"
         )
     return security
+
+
+def adopt_bridge_token(security: BridgeSecurity) -> None:
+    """Keep the bridge token in memory only.
+
+    环境变量会被 ``code_run`` / MCP / 插件拉起的子进程继承，读到它就等于拿到
+    bridge 的全部权限；因此启动时读走 token 后立刻从环境删除，只有在热重启
+    exec 前一刻才写回（见 :meth:`AgentManager._exec_restart`）。
+
+    Args:
+        security: 已解析的 bridge 安全配置.
+    """
+
+    manager.bridge_token = security.token
+    os.environ.pop("ZA_DESKTOP_BRIDGE_TOKEN", None)
 
 
 def load_bridge_security(host: str, port: int) -> BridgeSecurity:
@@ -488,6 +506,11 @@ def _public_config_snapshot(config: AgentConfig) -> Dict[str, Any]:
 class AgentManager:
     def __init__(self):
         self.lock = threading.RLock()
+        self._hot_restart_lock = threading.RLock()
+        self._hot_restarting = False
+        # 重新 exec 后要继续服务同一个前端，token 必须跨重启保持一致；
+        # 它只存在于内存，不写环境（见 __main__）。
+        self.bridge_token = ""
         base_config = self._load_base_config()
         self.workspace_dir = _resolve_runtime_path(base_config.workspace_dir)
         self.memory_dir = _resolve_runtime_path(base_config.memory_dir)
@@ -757,9 +780,15 @@ class AgentManager:
             config.sessions_dir = _resolve_runtime_path(config.sessions_dir)
             if sess.model_override:
                 config.default_backend = sess.model_override
+            config._desktop_session_id = sess.id
+            config._checkpoint_session_id = sess.id
+            config._checkpoint_source = "desktop"
             if not sess.log_path and _DESKTOP_SESSION_ID_RE.fullmatch(sess.id):
                 sess.log_path = _desktop_log_path(self.sessions_dir, sess.id)
             agent = ZeroAgent(config=config, session_log_path=sess.log_path)
+            set_hook = getattr(agent, "set_hot_restart_hook", None)
+            if callable(set_hook):
+                set_hook(self.request_hot_restart)
             if sess.restore_history:
                 history = [
                     {"role": message["role"], "content": message["content"]}
@@ -779,6 +808,247 @@ class AgentManager:
         finally:
             with contextlib.suppress(Exception):
                 os.chdir(old_cwd)
+
+    # ---- 核心热重启 / 检查点恢复 ---------------------------------------
+
+    @staticmethod
+    def _pending_waiting_payload(pending: Any) -> tuple[str, list[str]]:
+        """Return ``(question, candidates)`` from a restored waiting state."""
+
+        if pending is None:
+            return "Waiting for user input", []
+        return pending.waiting_prompt()
+
+    def request_hot_restart(self, reason: str, reset_budget: bool = False) -> None:
+        """Request a process hot restart on the bridge event loop."""
+
+        loop = getattr(hub, "loop", None)
+        if (
+            loop is not None
+            and not loop.is_closed()
+            and threading.current_thread() is not threading.main_thread()
+        ):
+            try:
+                loop.call_soon_threadsafe(
+                    lambda: self._perform_hot_restart(reason, reset_budget),
+                )
+                return
+            except RuntimeError:
+                pass
+        self._perform_hot_restart(reason, reset_budget)
+
+    def _perform_hot_restart(self, reason: str, reset_budget: bool) -> None:
+        """Checkpoint running sessions, close runtimes, then exec a new process."""
+
+        with self._hot_restart_lock:
+            if self._hot_restarting:
+                return
+            self._hot_restarting = True
+        try:
+            hub.emit({"type": "bridge-log", "payload": f"hot restart: {reason}"})
+            closed_ids: list[str] = []
+            with self.lock:
+                for sess in list(self.sessions.values()):
+                    runner = sess.agent
+                    za = getattr(runner, "_agent", None)
+                    if za is None:
+                        continue
+                    if sess.status == "running":
+                        if not za.restart_checkpoint_armed:
+                            with contextlib.suppress(Exception):
+                                za.save_checkpoint(
+                                    status="running",
+                                    restart=True,
+                                    reset_budget=reset_budget,
+                                )
+                        elif reset_budget:
+                            # 手动重启也要重置预算，即使自动检查点已写好
+                            with contextlib.suppress(Exception):
+                                za.save_checkpoint(
+                                    status="running",
+                                    reset_budget=True,
+                                )
+                        with contextlib.suppress(Exception):
+                            za.abort()
+                    closed_ids.append(sess.id)
+                for sid in closed_ids:
+                    sess = self.sessions.get(sid)
+                    za = getattr(getattr(sess, "agent", None), "_agent", None)
+                    if za is not None:
+                        with contextlib.suppress(Exception):
+                            za.close()
+            with contextlib.suppress(Exception):
+                self._persist_sessions()
+
+            os.environ["ZA_HOT_RESTART"] = "1"
+            os.environ["ZA_DESKTOP_BRIDGE_NO_BROWSER"] = "1"
+
+            def _exec() -> None:
+                try:
+                    self._exec_restart()
+                except Exception as exc:  # noqa: BLE001 - exec 失败必须恢复可服务状态
+                    with self._hot_restart_lock:
+                        self._hot_restarting = False
+                    hub.emit({
+                        "type": "bridge-log",
+                        "payload": f"hot restart exec failed: {exc}",
+                    })
+                    print(f"hot restart exec failed: {exc}", file=sys.stderr)
+                    self._recover_after_failed_restart(closed_ids)
+
+            loop = getattr(hub, "loop", None)
+            if loop is not None and not loop.is_closed():
+                loop.call_later(0.3, _exec)
+            else:
+                time.sleep(0.3)
+                _exec()
+        except Exception as exc:  # noqa: BLE001 - 失败必须恢复可服务状态
+            with self._hot_restart_lock:
+                self._hot_restarting = False
+            hub.emit({"type": "bridge-log", "payload": f"hot restart failed: {exc}"})
+            print(f"hot restart failed: {exc}", file=sys.stderr)
+            self._recover_after_failed_restart([])
+
+    def _exec_restart(self) -> None:
+        """Close the session store, hand the token to the new process, exec.
+
+        token 只在 exec 前的这一瞬间进环境：新进程启动时读走并立刻清除，
+        工具 / MCP / ``code_run`` 子进程因此看不到它。
+
+        Raises:
+            Exception: exec 本身失败（调用方负责恢复服务）.
+        """
+
+        with contextlib.suppress(Exception):
+            self.session_store.close()
+        token = getattr(self, "bridge_token", "")
+        if token:
+            os.environ["ZA_DESKTOP_BRIDGE_TOKEN"] = token
+        hot_restart.restart_process()
+
+    def _recover_after_failed_restart(self, session_ids: list[str]) -> None:
+        """Rebuild closed session runtimes after a restart that never exec'd.
+
+        进程没被替换时，之前 close() 掉的运行时必须重建，否则会话指向已关闭的
+        agent，bridge 名义上还在服务、实际已经不能跑任务。
+
+        Args:
+            session_ids: 本次被关闭的会话；为空表示按 sessions 全量兜底.
+        """
+        checkpoints: dict[str, dict[str, Any]] = {}
+        try:
+            for _path, data in checkpoint_store.list_checkpoints(self.sessions_dir):
+                if data.get("source") == "desktop":
+                    checkpoints[str(data.get("session_id") or "")] = data
+        except Exception as exc:  # noqa: BLE001 - 恢复失败不得再抛
+            print(f"load checkpoints failed: {exc}", file=sys.stderr)
+
+        targets = session_ids or [sess.id for sess in list(self.sessions.values())]
+        for sid in targets:
+            sess = self.sessions.get(sid)
+            if sess is None:
+                continue
+            try:
+                with self.lock:
+                    sess.agent = self.make_agent(sess)
+                    za = getattr(sess.agent, "_agent", sess.agent)
+                    data = checkpoints.get(sid)
+                    restored = bool(data) and za.restore_checkpoint(data)
+                    if restored:
+                        sess.status = "waiting"
+                        note = (
+                            "内核热重启失败，已保持原进程运行；"
+                            "任务已从检查点恢复，发送任意消息即可继续。"
+                        )
+                    else:
+                        note = "内核热重启失败，已保持原进程运行。"
+                    sess.terminal_status = ""
+                    sess.terminal_reason = ""
+                    self.add_message(sess, "system", note)
+                    self._persist_sessions()
+                emit_session_state(sess, sess.status)
+            except Exception as exc:  # noqa: BLE001 - 单会话失败不影响其他
+                print(f"hot restart recovery failed for {sid}: {exc}", file=sys.stderr)
+
+    def resume_restarted_sessions(self) -> None:
+        """Resume desktop sessions whose checkpoints survived a hot restart."""
+
+        try:
+            entries = checkpoint_store.list_checkpoints(self.sessions_dir)
+        except Exception as exc:  # noqa: BLE001 - 恢复失败不得阻断启动
+            print(f"load checkpoints failed: {exc}", file=sys.stderr)
+            return
+        for path, data in entries:
+            try:
+                if data.get("source") != "desktop":
+                    continue
+                sid = str(data.get("session_id") or "")
+                with self.lock:
+                    sess = self.sessions.get(sid)
+                if sess is None:
+                    with contextlib.suppress(OSError):
+                        path.unlink()
+                    continue
+                if checkpoint_store.restart_budget_exhausted(data):
+                    with self.lock:
+                        sess.status = "error"
+                        sess.terminal_status = "failed"
+                        sess.terminal_reason = "hot_restart_loop"
+                        self.add_message(
+                            sess,
+                            "system",
+                            f"内核 {int(checkpoint_store.RESTART_BUDGET_WINDOW // 60)}"
+                            f" 分钟内已热重启 {checkpoint_store.RESTART_BUDGET_LIMIT} 次，"
+                            "疑似重启循环；已停止自动续跑，请检查核心代码后重试。",
+                        )
+                        self._persist_sessions()
+                    with contextlib.suppress(OSError):
+                        path.unlink()
+                    emit_session_state(sess, "error")
+                    continue
+
+                should_resume = False
+                with self.lock:
+                    sess.agent = self.make_agent(sess)
+                    za = getattr(sess.agent, "_agent", sess.agent)
+                    if not za.restore_checkpoint(data):
+                        with contextlib.suppress(OSError):
+                            path.unlink()
+                        continue
+                    pending = getattr(za, "pending_task_state", None)
+                    waiting_kind = getattr(pending, "waiting_kind", "")
+                    if data.get("status") == "running" or (
+                        data.get("status") == "waiting"
+                        and waiting_kind == "restart"
+                    ):
+                        sess.status = "running"
+                        self.add_message(
+                            sess,
+                            "system",
+                            "内核已热重启，任务从检查点继续。",
+                        )
+                        should_resume = True
+                    else:
+                        sess.status = "waiting"
+                        question, candidates = self._pending_waiting_payload(pending)
+                        self.add_message(
+                            sess,
+                            "system",
+                            question,
+                            kind="input_required",
+                            candidates=candidates,
+                        )
+                    self._persist_sessions()
+                emit_session_state(sess, "running" if should_resume else "waiting")
+                if should_resume:
+                    threading.Thread(
+                        target=self.run_agent_turn,
+                        args=(sess, CONTINUATION_PROMPT),
+                        daemon=True,
+                        name=f"Resume-{sess.id}",
+                    ).start()
+            except Exception as exc:  # noqa: BLE001 - 单个会话失败不影响其他
+                print(f"resume checkpoint {path} failed: {exc}", file=sys.stderr)
 
     def _subagent_registry_path(self, sess: Session) -> str:
         safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", sess.id)[:100] or "session"
@@ -1162,6 +1432,7 @@ class AgentManager:
             if sess.agent and hasattr(sess.agent, "close"):
                 with contextlib.suppress(Exception):
                     sess.agent.close()
+            checkpoint_store.clear(self.sessions_dir, sid)
             previous_active = self.active_session_id
             was_active = previous_active == sid
             self.sessions.pop(sid)
@@ -1218,6 +1489,7 @@ class AgentManager:
             if sess.agent and hasattr(sess.agent, "close"):
                 with contextlib.suppress(Exception):
                     sess.agent.close()
+            checkpoint_store.clear(self.sessions_dir, sid)
             previous_active = self.active_session_id
             replacement_id = "sess-" + uuid.uuid4().hex[:12]
             replacement = Session(
@@ -1699,6 +1971,17 @@ class AgentManager:
                         switch_backend(str(desired_backend))
                 if self.sessions.get(sess.id) is not sess:
                     return None
+                if za is not None and getattr(za, "pending_task_state", None) is None:
+                    # 普通进程重启后，用户的下一条消息应答复检查点里的待答问题
+                    cp = checkpoint_store.load(
+                        checkpoint_store.checkpoint_path(self.sessions_dir, sess.id),
+                    )
+                    if (
+                        cp
+                        and cp.get("source") == "desktop"
+                        and cp.get("status") == "waiting"
+                    ):
+                        za.restore_checkpoint(cp)
                 if not hasattr(agent, "put_task"):
                     raise RuntimeError("AgentRunner object has no put_task method")
                 token, record = self._register_agent_locked(sess)
@@ -2308,6 +2591,13 @@ async def status_handler(request):
         "ready": True,
         "authRequired": True,
     })
+
+
+async def system_restart_handler(request):
+    """Manually hot-restart the bridge process and resume active tasks."""
+
+    manager.request_hot_restart("manual", reset_budget=True)
+    return json_ok({"ok": True, "restarting": True})
 
 
 async def get_config_handler(request):
@@ -2963,6 +3253,7 @@ def create_app(
     app["wechat_qr_manager"] = wechat_qr_manager
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/status", status_handler)
+    app.router.add_post("/system/restart", system_restart_handler)
     app.router.add_get("/config", get_config_handler)
     app.router.add_post("/config", save_config_handler)
     app.router.add_get("/model-profiles", model_profiles_handler)
@@ -3040,6 +3331,11 @@ def create_app(
 
     async def on_startup(app):
         hub.loop = asyncio.get_running_loop()
+        resume = getattr(manager, "resume_restarted_sessions", None)
+        if callable(resume):
+            app["checkpoint_resume_task"] = asyncio.create_task(
+                asyncio.to_thread(resume)
+            )
         parent_pid = desktop_parent_pid()
         if parent_pid is not None:
             app["desktop_parent_monitor"] = asyncio.create_task(monitor_desktop_parent(parent_pid))
@@ -3048,6 +3344,9 @@ def create_app(
         task = app.get("desktop_parent_monitor")
         if task is not None:
             task.cancel()
+        resume_task = app.get("checkpoint_resume_task")
+        if resume_task is not None:
+            resume_task.cancel()
         qr_manager = app.get("wechat_qr_manager")
         if qr_manager is not None:
             qr_manager.close()
@@ -3061,6 +3360,7 @@ if __name__ == "__main__":
     host = os.environ.get("BRIDGE_HOST", "127.0.0.1")
     port = int(os.environ.get("BRIDGE_PORT", "14168"))
     security = load_bridge_security(host, port)
+    adopt_bridge_token(security)
     url = f"http://{host}:{port}/"
     browser_url = f"{url}#token={urllib.parse.quote(security.token, safe='')}"
     print(f"ZeroAgent Web2 bridge: {url}  ws://{host}:{port}/ws", file=sys.stderr)

@@ -15,15 +15,19 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib
 import importlib.util
 import json
 import logging
 import re
+import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from zero_agent.core.config import normalize_permission_mode
 from zero_agent.extensions.context import ExtensionContext
 from zero_agent.extensions.events import (
     ApprovalRequired,
@@ -37,6 +41,10 @@ from zero_agent.extensions.events import (
 from zero_agent.tools.registry import ToolDefinition, ToolRegistry
 
 _logger = logging.getLogger("zero_agent.extensions")
+
+# 插件导入 / 卸载共享进程级 ``sys.modules``；桌面多会话必须串行化，
+# 否则一个会话卸载插件时另一个会话可能正在导入同名模块。
+_IMPORT_LOCK = threading.RLock()
 
 DEFAULT_EXTENSION_HOME = "~/.zeroagent"
 
@@ -141,6 +149,12 @@ def discover(home: Optional[Path | str] = None) -> List[Tuple[str, Path, bool]]:
     return found
 
 
+def _plugin_module_name(name: str) -> str:
+    """Return the synthetic module name used for one plugin."""
+
+    return "zero_extension_" + re.sub(r"\W", "_", name)
+
+
 def _import_plugin(name: str, path: Path, is_package: bool) -> Any:
     """按文件路径导入一个插件模块.
 
@@ -155,7 +169,19 @@ def _import_plugin(name: str, path: Path, is_package: bool) -> Any:
     Raises:
         ImportError: 模块无法构造或执行失败.
     """
-    module_name = "zero_extension_" + re.sub(r"\W", "_", name)
+    module_name = _plugin_module_name(name)
+    # SourceFileLoader 的 pyc 校验精度是秒级 mtime + size；同一秒内改写
+    # 且长度不变的插件会被误判为未变，热重载读到旧代码。导入前清掉缓存。
+    if is_package:
+        for cache_dir in path.parent.rglob("__pycache__"):
+            shutil.rmtree(cache_dir, ignore_errors=True)
+    else:
+        cache_dir = path.parent / "__pycache__"
+        for pyc in cache_dir.glob(f"{path.stem}.*.py[co]"):
+            try:
+                pyc.unlink()
+            except OSError:
+                pass
     if is_package:
         spec = importlib.util.spec_from_file_location(
             module_name,
@@ -167,8 +193,9 @@ def _import_plugin(name: str, path: Path, is_package: bool) -> Any:
     if spec is None or spec.loader is None:
         raise ImportError(f"无法为扩展 {name} 构造模块规格")
     module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
+    with _IMPORT_LOCK:
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
     return module
 
 
@@ -205,6 +232,7 @@ class ExtensionRuntime:
         self.services: Dict[str, Any] = {}
 
         self._loaded: Dict[str, Any] = {}
+        self._signatures: Dict[str, str] = {}
         self._teardowns: Dict[str, Callable[[], None]] = {}
         self._notify: Dict[str, List[Tuple[str, NotifyCallback]]] = {}
         self._tool_call: List[Tuple[str, GateCallback]] = []
@@ -215,6 +243,8 @@ class ExtensionRuntime:
         # 内置扩展（permission_gate 等）的归属；它们不经 load_all 加载，
         # 单独记录才能在 release() 时一并撤销
         self._builtin_owners: List[str] = []
+        # 已安装内置扩展的模块对象；重载失败时用它回滚旧注册
+        self._builtin_modules: Dict[str, Any] = {}
         self._approvals: Dict[str, Tuple[float, str]] = {}
         # 批量授权：键为 (task_id, scope)，值为过期时间。
         # 用于「同一任务内反复写同一个文件」时不重复弹审批。
@@ -225,26 +255,257 @@ class ExtensionRuntime:
     def load_all(self) -> int:
         """加载全部可发现的插件.
 
-        单个插件失败只记录日志并跳过，不影响其他插件与启动流程.
+        单次加载 = 一次 :meth:`sync_plugins` 同步；重复调用不会重复执行
+        ``setup``，因此不会重复登记 prompt block 或通知订阅。
 
         Returns:
-            成功加载的插件数量.
+            本次新加载的插件数量.
         """
-        loaded = 0
+        report = self.sync_plugins(force=False)
+        return len(report["loaded"])
+
+    def sync_plugins(self, force: bool = False) -> Dict[str, Any]:
+        """把已加载插件同步到磁盘现状（新增 / 变化 / 删除）.
+
+        签名在尝试加载**之前**记录（``unload_owner`` 会清掉签名，因此放在
+        卸载之后）：同一份坏代码只尝试一次，文件改动或 ``force=True``（手动
+        ``/update workflow``）才会重试。
+
+        Args:
+            force: True 时无条件重载所有已发现插件（手动 ``/update workflow``）.
+
+        Returns:
+            ``{"loaded": [...], "reloaded": [...], "removed": [...], "failed": {...}}``.
+        """
+        report: Dict[str, Any] = {
+            "loaded": [],
+            "reloaded": [],
+            "removed": [],
+            "failed": {},
+        }
         try:
-            discovered = discover(self.home)
+            discovered = {
+                name: (path, is_package)
+                for name, path, is_package in discover(self.home)
+            }
         except Exception as exc:  # noqa: BLE001 - 目录不可读不得阻断启动
-            # 这里必须隔离：若异常冒到 ZeroAgent._init_extensions，
-            # 整个运行时（含 permission_gate 安全门）都会被跳过。
             _logger.warning("扩展目录扫描失败，已跳过: %s", exc)
-            return 0
-        for name, path, is_package in discovered:
+            report["failed"]["<discover>"] = str(exc)
+            return report
+
+        for name in list(self._loaded):
+            if name in discovered:
+                continue
+            if self.unload_owner(name):
+                report["removed"].append(name)
+
+        for name in sorted(discovered):
+            path, is_package = discovered[name]
+            loaded = name in self._loaded
+            signature = self._plugin_signature(path, is_package)
+            if not force and self._signatures.get(name) == signature:
+                continue
+            if loaded and not self.unload_owner(name):
+                loaded = False
+            # 失败也记录签名：坏插件不会每轮重试（unload_owner 会清签名，
+            # 所以必须放在卸载之后）。
+            self._signatures[name] = signature
             try:
-                self._load_one(name, path, is_package)
-                loaded += 1
+                with _IMPORT_LOCK:
+                    self._load_one(name, path, is_package)
             except (Exception, SystemExit) as exc:  # noqa: BLE001 - 插件失败不得阻断启动
-                _logger.warning("扩展 %s 加载失败，已跳过: %s", name, exc)
-        return loaded
+                report["failed"][name] = str(exc)
+                _logger.warning("%s %s 失败，已跳过: %s",
+                                "重载" if loaded else "加载", name, exc)
+                continue
+            report["reloaded" if loaded else "loaded"].append(name)
+        return report
+
+    def _plugin_signature(self, path: Path, is_package: bool) -> str:
+        """Return a content signature for one plugin entry.
+
+        Directory plugins hash every ``*.py`` below the entry (excluding
+        ``__pycache__``); single-file plugins hash only the entry file.
+        Absolute paths are included so switching ``extensions.home`` cannot
+        make a same-named plugin look unchanged.
+
+        Args:
+            path: 插件入口路径.
+            is_package: 是否目录插件.
+
+        Returns:
+            sha256 十六进制摘要.
+        """
+        # 目录插件的入口是 ``<pkg>/__init__.py``，必须从包目录起递归，
+        # 否则 rglob 作用在单个文件上返回空集，签名恒等于空摘要，
+        # 目录插件的任何修改都不会被判定为「已变化」。
+        entry = path.parent if is_package else path
+        files = sorted(entry.rglob("*.py")) if is_package else [path]
+        rows: List[str] = []
+        for item in files:
+            if "__pycache__" in item.parts:
+                continue
+            try:
+                stat = item.stat()
+            except OSError:
+                continue
+            rows.append(
+                f"{item.resolve()}|{stat.st_mtime_ns}|{stat.st_size}"
+            )
+        return hashlib.sha256("\n".join(sorted(rows)).encode("utf-8")).hexdigest()
+
+    def set_home(self, home: Optional[Path | str]) -> None:
+        """Point the runtime at a new extension home without reloading."""
+
+        self.home = Path(home).expanduser() if home is not None else _default_home()
+
+    @property
+    def installed_builtins(self) -> List[str]:
+        """Return a copy of the installed builtin-extension owner names."""
+
+        return list(self._builtin_owners)
+
+    def _clear_plugin_modules(self, name: str) -> None:
+        """Drop one plugin's synthetic modules (package children included)."""
+
+        prefix = _plugin_module_name(name)
+        for key in list(sys.modules):
+            if key == prefix or key.startswith(prefix + "."):
+                sys.modules.pop(key, None)
+
+    def unload_owner(self, owner: str) -> bool:
+        """Execute teardown and revoke every registration owned by *owner*.
+
+        Args:
+            owner: 插件或内置扩展名.
+
+        Returns:
+            True 表示该归属此前存在（已加载、已登记或已注册）.
+        """
+        with _IMPORT_LOCK:
+            existed = owner in self._loaded or owner in self._teardowns
+            teardown = self._teardowns.pop(owner, None)
+            if teardown is not None:
+                try:
+                    teardown()
+                except Exception as exc:  # noqa: BLE001 - 清理失败不影响卸载
+                    _logger.warning("扩展 %s 的清理回调失败: %s", owner, exc)
+            self._purge_owner(owner)
+            existed = existed or owner in self._builtin_owners
+            self._loaded.pop(owner, None)
+            self._signatures.pop(owner, None)
+            self._builtin_modules.pop(owner, None)
+            if owner in self._builtin_owners:
+                self._builtin_owners.remove(owner)
+            self._clear_plugin_modules(owner)
+            return existed
+
+    def unload_all_plugins(self) -> None:
+        """Unload every external plugin, keeping builtin extensions loaded."""
+
+        for name in list(self._loaded):
+            self.unload_owner(name)
+
+    def register_builtin_module(self, name: str, module: Any) -> None:
+        """Record one builtin extension's module object for later rollback.
+
+        Args:
+            name: 内置扩展归属名.
+            module: 已成功执行 ``setup`` 的模块对象.
+        """
+        self._builtin_modules[name] = module
+
+    @staticmethod
+    def load_builtin_module(module_path: str, *, reexecute: bool = True) -> Any:
+        """Load *module_path*, optionally re-executing an imported module.
+
+        两点原因让它不等于 ``importlib.import_module``：
+
+        1. 已导入的模块由 ``sys.modules`` 直接返回，``import_module`` 永远
+           拿不到文件改动——内置扩展的代码热重载必须走 ``importlib.reload``。
+        2. SourceFileLoader 的 pyc 校验是秒级 mtime + size；同一秒内改写且
+           长度不变的文件会命中旧字节码，因此重载前先删掉该模块的 pyc
+           （与 :func:`_import_plugin` 同一理由）。
+
+        ``reexecute=False`` 用于进程内的**首次**安装：此时 ``sys.modules`` 里的
+        对象就是刚导入的代码，再执行一遍纯属浪费，还会丢掉测试对模块属性的替换。
+
+        Args:
+            module_path: 可导入的模块路径（如 ``zero_agent.extensions...``）.
+            reexecute: 已导入时是否重新执行模块代码.
+
+        Returns:
+            已执行的模块对象.
+
+        Raises:
+            ImportError: 模块无法导入或 ``reload`` 执行失败.
+        """
+        module = sys.modules.get(module_path)
+        if module is None:
+            return importlib.import_module(module_path)
+        if not reexecute:
+            return module
+        filename = getattr(module, "__file__", None)
+        if filename:
+            source = Path(filename)
+            for pyc in (source.parent / "__pycache__").glob(f"{source.stem}.*.py[co]"):
+                try:
+                    pyc.unlink()
+                except OSError:
+                    pass
+        return importlib.reload(module)
+
+    def reload_builtin(self, name: str, module_path: str) -> bool:
+        """Re-run one builtin extension's ``setup`` after unloading it.
+
+        导入在卸载之前完成（导入失败不破坏现有注册）；``setup`` 失败时用旧
+        模块重新安装一次，保证安全类扩展不会因为一次失败的重载而彻底消失。
+
+        模块走 :meth:`load_builtin_module`，因此内置扩展的源码改动会被重新
+        执行。已知边界：``importlib.reload`` 复用同一个模块对象，回滚分支里的
+        ``previous.setup(...)`` 执行的是重载后的代码；``setup`` 失败通常由它
+        读到的数据（如坏的 ``mcp.json``）导致，回滚效果与改动前一致。
+
+        Args:
+            name: 内置扩展归属名.
+            module_path: 可导入的模块路径.
+
+        Returns:
+            True 表示重装成功.
+
+        Raises:
+            Exception: 模块导入或 setup 失败（已撤销半成品注册并尽力回滚）.
+        """
+        with _IMPORT_LOCK:
+            module = self.load_builtin_module(module_path)
+            previous = self._builtin_modules.get(name)
+            self.unload_owner(name)
+            try:
+                teardown = module.setup(ExtensionContext(name, self))
+                if callable(teardown):
+                    self.register_teardown(name, teardown)
+                self.track_owner(name)
+                self._builtin_modules[name] = module
+            except (Exception, SystemExit):
+                self.unregister_owner(name)
+                if previous is not None:
+                    try:
+                        previous.setup(ExtensionContext(name, self))
+                        self.track_owner(name)
+                        self._builtin_modules[name] = previous
+                        _logger.warning(
+                            "内置扩展 %s 重载失败，已回滚到旧注册", name,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 回滚失败只能记录
+                        self.unregister_owner(name)
+                        self._builtin_modules.pop(name, None)
+                        _logger.error(
+                            "内置扩展 %s 重载失败且回滚失败，该扩展当前未生效: %s",
+                            name,
+                            exc,
+                        )
+                raise
+            return True
 
     def _load_one(self, name: str, path: Path, is_package: bool) -> None:
         """加载单个插件并调用其 setup.
@@ -271,7 +532,7 @@ class ExtensionRuntime:
                 self._teardowns[name] = teardown
         except (Exception, SystemExit):
             self._purge_owner(name)
-            sys.modules.pop("zero_extension_" + re.sub(r"\W", "_", name), None)
+            self._clear_plugin_modules(name)
             raise
         self._loaded[name] = module
 
@@ -337,17 +598,21 @@ class ExtensionRuntime:
 
     def release(self) -> None:
         """卸载全部插件与内置扩展，撤销注册并执行清理回调."""
-        for owner, teardown in list(self._teardowns.items()):
+        owners = list(dict.fromkeys([
+            *self._teardowns,
+            *self._loaded,
+            *self._builtin_owners,
+        ]))
+        for owner in owners:
             try:
-                teardown()
+                self.unload_owner(owner)
             except Exception as exc:  # noqa: BLE001 - 清理失败不影响卸载
-                _logger.warning("扩展 %s 的清理回调失败: %s", owner, exc)
+                _logger.warning("扩展 %s 卸载失败: %s", owner, exc)
         self._teardowns.clear()
-
-        for owner in [*self._loaded, *self._builtin_owners]:
-            self._purge_owner(owner)
         self._loaded.clear()
+        self._signatures.clear()
         self._builtin_owners.clear()
+        self._builtin_modules.clear()
         self._notify.clear()
         self._tool_call.clear()
         self._tool_result.clear()
@@ -434,6 +699,19 @@ class ExtensionRuntime:
     # ---- 事件分发 -------------------------------------------------------
 
     @property
+    def permission_mode(self) -> str:
+        """Return the effective tool-gating mode (``ask`` or ``full``).
+
+        缺省按 ``ask`` 处理：*没有* config 的运行时（单元测试、外部装配）
+        不应该因为少传一个参数而静默进入免审批模式。
+        """
+
+        return normalize_permission_mode(
+            getattr(self.config, "permission_mode", None),
+            default="ask",
+        )
+
+    @property
     def has_llm_request_subscribers(self) -> bool:
         """是否有插件订阅模型请求变换.
 
@@ -500,6 +778,10 @@ class ExtensionRuntime:
         返回 ``ctx.confirm(...)`` 要求人类批准。**fail-closed**：门控自身异常
         时返回拒绝，而不是放行。
 
+        模式语义：``full`` 直接返回 ``allow``，**不构造** :class:`ToolCall`、
+        **不执行任何** ``on_tool_call`` 回调，因此插件的 ``block`` / veto /
+        门控异常同样不生效；``ask`` 才执行下一段描述的审批三态与 fail-closed。
+
         审批指纹绑定「工具名 + 参数」，并用后即焚：批准只对完全相同的一次
         调用有效。
 
@@ -513,6 +795,8 @@ class ExtensionRuntime:
         Returns:
             ToolCallVerdict.
         """
+        if self.permission_mode == "full":
+            return ToolCallVerdict("allow")
         if not self._tool_call:
             return ToolCallVerdict("allow")
 

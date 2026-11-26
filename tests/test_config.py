@@ -445,3 +445,70 @@ llm_backends:
     )
 
     assert AgentConfig.from_yaml(config_path).browser_tools == "auto"
+
+
+def _write_workflow_config(tmp_path, body: str):
+    path = tmp_path / "workflow.yaml"
+    path.write_text(
+        f"""
+default_backend: default
+llm_backends:
+  default:
+    provider: openai
+    api_key: sk-test
+    api_base: https://api.openai.com/v1
+    model: gpt-test
+{body}
+""",
+        encoding="utf-8",
+    )
+    return AgentConfig.from_yaml(path)
+
+
+def test_permission_and_hot_reload_defaults(tmp_path) -> None:
+    config = _write_workflow_config(tmp_path, "")
+
+    assert config.permission_mode == "full"
+    assert config.extensions_hot_reload is True
+    assert config.extensions_core_restart is True
+
+
+def test_permission_and_hot_reload_are_parsed(tmp_path) -> None:
+    config = _write_workflow_config(
+        tmp_path,
+        """
+permissions:
+  mode: ask
+extensions:
+  hot_reload: false
+  core_restart: "false"
+""",
+    )
+
+    assert config.permission_mode == "ask"
+    assert config.extensions_hot_reload is False
+    assert config.extensions_core_restart is False
+
+
+def test_invalid_permission_mode_falls_back_to_ask(tmp_path) -> None:
+    config = _write_workflow_config(
+        tmp_path,
+        """
+permissions:
+  mode: yolo
+""",
+    )
+
+    assert config.permission_mode == "ask"
+
+
+def test_permission_mode_reads_env(monkeypatch) -> None:
+    monkeypatch.setenv("ZA_PERMISSION_MODE", "ask")
+    monkeypatch.setenv("ZA_HOT_RELOAD", "0")
+    monkeypatch.setenv("ZA_CORE_RESTART", "false")
+
+    config = AgentConfig.from_env()
+
+    assert config.permission_mode == "ask"
+    assert config.extensions_hot_reload is False
+    assert config.extensions_core_restart is False

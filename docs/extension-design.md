@@ -200,12 +200,12 @@ def setup(ctx):
 | 字段 | 生效方式 |
 | --- | --- |
 | `sandbox` | 热重载时随 registry 重建立即生效 |
-| `enabled` / `home` | 需要重启进程 |
+| `enabled` / `home` | 下一轮 turn 边界自动应用（§15.1） |
 
 生命周期与卸载：`ZeroAgent.close()` 调用 `ExtensionRuntime.release()`，
 撤销插件工具、门控与提示词块，并执行卸载回调（关闭 MCP 子进程）；可重复调用。
 CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有 `atexit` 兜底。
-不提供插件的运行时热加载/热卸载（改插件代码仍需重启）。
+插件在每轮同步中热加载/热卸载（§15.1），改代码无需重启进程。
 
 ### 6.6 `ctx` 接口（对外唯一契约）
 
@@ -290,6 +290,47 @@ CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有
 
 ## 八、审批与恢复
 
+### 8.0 权限模式（`permissions.mode`）
+
+| 模式 | 人类参与 | `confirm` / `ApprovalRequired` | `block` / 插件 veto / 门控异常 |
+| --- | --- | --- | --- |
+| `ask` | 有 | 暂停任务，等用户批准 | 拒绝 |
+| `full`（默认） | 无 | **不执行** | **不执行**（含门控异常） |
+
+`full` 就是关掉整层门控：`ExtensionRuntime.evaluate_tool_call` 在方法入口直接
+返回 `allow`，不构造 `ToolCall`、`on_tool_call` 回调**一次都不跑**。危险 shell、
+`effects` 声明缺失、写入目标不可判定、插件主动 veto、门控抛异常在 `full` 下都
+不再拒绝。`ask` 保留原有的审批三态与 fail-closed（门控异常即拒绝）。
+`permission_gate` 只负责给出 `confirm` / `block`，不感知模式。
+
+运行时切换：`/permissions [ask|full]`（只影响当前进程，不写回 YAML）。
+
+**底线层（两种模式都生效，不弹审批）**：`zero_agent/core/safety.py` 在
+`file_write` / `file_patch` 的入口做一次写入判定，命中即返回错误，不进入门控、
+也没有「同意」选项。保护范围是**不可逆破坏**，不是行为管控：
+
+- 系统与工具链：`/System`、`/Library`、`/Applications`、`/usr`、`/bin`、`/sbin`、
+  `/etc`、`/private/var/{db,vm}`、`/dev`、`/boot`、`/Volumes`、`/opt/homebrew`、
+  `/usr/local`。
+- 凭据与安全配置：`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.kube`、`~/.docker`、
+  `~/.password-store`、`~/.config/gh`、`~/.netrc`、`~/.git-credentials`、
+  `~/Library/Keychains`。
+- 用户重要数据：`~/Documents`、`~/Desktop`、`~/Downloads`、`~/Pictures`、
+  `~/Movies`、`~/Music`、`~/Library/Mobile Documents`（iCloud Drive）。
+- 任何 `.git` 目录（hooks/config/refs 被改写等价于植入持久化后门）。
+
+仓库源码、workspace、临时目录都不在保护范围内，`file_write` 照常写：**自我升级
+不受影响**。用 `safety.protected_paths` 追加、`safety.allow_paths` 解禁（例如把
+`~/Downloads` 交给 agent 管）。`code_run` 在沙箱**未真正生效**时（`off`、平台
+不支持、探测失败）额外用 `shell_policy` 做静态兜底：格式化、写块设备、关机、
+fork 炸弹、workspace 之外的递归删除都被拒；沙箱生效时不做这一步，命令保持自由。
+
+**威胁模型提醒**：`full` 下 agent 可以不经批准修改 `<home>/extensions/` 与仓库
+源码，而插件热加载（第十五节）与核心热重启会在**同一个会话的下一轮**生效。
+也就是说「模型写插件/核心代码 → 进程内任意代码执行」这条链在默认配置下是通的，
+且 `permission_gate` 完全不执行。这是 `full` 的已知代价；需要人工把关时把
+`permissions.mode` 切回 `ask`，需要机器级隔离时用 `extensions.sandbox`。
+
 ### 8.1 触发场景
 
 - agent 修改 skill / 插件代码 / `mcp.json`。
@@ -363,13 +404,18 @@ CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有
 
 上一版曾承诺“写护栏不可绕过”，这不成立，予以撤回。实际分三层：
 
+默认 `permissions.mode: full`：下表中的「审批」与「策略层」只在 `ask` 模式生效
+（`full` 下 `evaluate_tool_call` 直接放行）。但**底线层与沙箱层与模式无关**，
+永远生效。
+
 | 层 | 手段 | 能挡住什么 | 挡不住什么 |
 | --- | --- | --- | --- |
-| 策略层 | 工具调用门控 + 审批 | 模型通过标准工具越权 | 插件在进程内直接写文件 |
+| 策略层（`ask`） | 工具调用门控 + 审批 | 模型通过标准工具越权 | 插件在进程内直接写文件 |
+| 底线层（常开） | `zero_agent/core/safety.py`：`file_write`/`file_patch` 拒绝系统目录、凭据、用户重要数据与 `.git`；`code_run` 在沙箱未生效时退回 `shell_policy` 静态判定 | 不可逆的系统损坏与重要数据丢失 | `code_run` 里间接删除（`python -c`）；已被 `safety.allow_paths` 解禁的路径 |
 | 流程层 | 注册归属、审批指纹、日志 | 误操作与重复执行 | 恶意代码 |
-| 沙箱层（可选，已提供） | `extensions.sandbox` 包装 `code_run`，写入限制在 workspace 与临时目录 | 命令执行时的越界写盘 | 平台差异；Linux 需可用 bwrap；硬链接与白名单外的可写目录仍可绕；降级即失去保护 |
+| 沙箱层（可选，已提供） | `extensions.sandbox` 包装 `code_run`，写入限制在 workspace 与临时目录 | 命令执行时的越界写盘 | 平台差异；Linux 需可用 bwrap；硬链接与白名单外的可写目录仍可绕；降级即失去保护（此时由底线层静态判定兜底） |
 
-文档与提示词中描述的应是**协作规则**，不是强制隔离。需要强制隔离时，走第三层。
+文档与提示词中描述的应是**协作规则**，不是强制隔离。需要强制隔离时，走沙箱层。
 
 **沙箱层的已知局限**（务必写进威胁模型，不要当成强隔离）：
 
@@ -423,7 +469,7 @@ extensions:
 
 生效时机：`sandbox` 随 registry 重建即时生效（配置热重载会触发）；
 `protected_writes` 在每次配置热重载后刷新到运行时（策略层按新列表判定）；
-`enabled` 与 `home` 变更需要重启进程。
+`enabled` 与 `home` 变更在下一轮 turn 边界的同步中自动应用（§15.1）。
 
 配置值解析：`enabled` 接受 `true/false` 与 `"true"/"false"`（字符串 `"false"`
 不会被当成真值）；`protected_writes` 传单个字符串时按一项处理；`sandbox` 缺省为 `auto`，
@@ -544,13 +590,18 @@ extensions:
 | V1 | 新增一个外部 skill 目录 | 无需改代码即出现在提示词索引中 |
 | V2 | 删除 `~/.zeroagent/` 全部内容 | 核心工具集与循环照常工作 |
 | V3 | 插件在 `setup` 中抛异常 | 仅该插件跳过，启动成功 |
-| V4 | 门控插件自身异常 | 对应工具调用被阻断（fail-closed） |
+| V4 | 门控插件自身异常 | `ask` 下该工具调用被阻断（fail-closed）；`full` 下门控不执行 |
 | V5 | 插件注册同名工具后卸载 | 内置工具恢复 |
 | V6 | `mcp.json` 中单个 server 配置错误 | 其余 server 正常，启动成功 |
 | V7 | 未配置 MCP | 不导入 MCP SDK |
-| V8 | 修改 skill 文件 | 需人类同意；默认只对当次变更有效，`permission_gate` 另有路径级批量授权（同任务 + 同路径 + TTL 内不重复询问） |
+| V8 | 修改 skill 文件 | `ask` 下需人类同意，默认只对当次变更有效，`permission_gate` 另有路径级批量授权（同任务 + 同路径 + TTL 内不重复询问）；`full` 下直接放行 |
 | V9 | SOP 与 skill 同名同主题冲突 | 以 SOP 为准，skill 作为参考 |
 | V10 | 切换工具语言触发 registry 重建 | 插件注册被重新应用，工具不消失 |
+| V11 | 修改/新增/删除 `extensions/*.py` 或 `extensions/<pkg>/`（含包内任意 `*.py`） | 下一轮自动加载/重载/卸载，`setup` 不重复执行 |
+| V12 | 修改 `mcp.json` | 下一轮重建 MCP 客户端，工具集随配置变化 |
+| V13 | 修改 `zero_agent/**/*.py` | 先做语法 + 子进程 import 校验，写检查点后 `os.execv` 热重启并自动续跑；同任务 10 分钟内最多 5 次，超限标记 `hot_restart_loop` |
+| V14 | 写入 `~/Documents`、`/etc`、`~/.ssh`、任意 `.git` | 两种模式下都被拒（`safety.py` 底线，无「同意」选项）；写仓库源码、workspace、临时目录照常成功 |
+| V15 | `sandbox: off` 时执行 `mkfs` / `rm -rf ~/Documents` | 被 `shell_policy` 静态兜底拒绝；沙箱生效时不走这层，命令保持自由 |
 
 ## 十四、风险与未决问题
 
@@ -561,9 +612,101 @@ extensions:
 | 门控误伤 | 门控过严会阻断正常任务 | 门控结果可观测（日志 + 事件），先宽后紧 |
 | 审批疲劳 | 过多确认会让用户点“同意”成习惯 | 按路径策略批量授权（`scope` + TTL + 任务绑定），只对高风险单次确认 |
 | MCP 工具过多 | `tools/list` 的结果全部注册进 registry，tools schema 会随 server 工具数线性膨胀（**当前未缓解**） | 仅配置实际需要的 server；后续可做按需展开 |
+| 写插件即执行 | `full`（默认）+ 每轮插件同步：模型写 `<home>/extensions/*.py` 后下一轮即被导入，等价进程内任意代码执行（`full` 下 `permission_gate` 完全不执行，没有任何门控能拦；`safety.py` 底线只拦系统/凭据/数据/`.git`，不拦仓库源码与插件） | 需要人类把关时设 `permissions.mode: ask`；需要隔离时用 `extensions.sandbox`；不要把 `ZA_DESKTOP_BRIDGE_TOKEN` 之类凭据放进环境变量 |
+| 核心代码热重启无监督 | `os.execv` 后新进程若在启动阶段崩溃，没有看护进程会重新拉起，检查点留在磁盘上等人处理 | 重启前的 `validate_core`（语法 + 子进程 import）先挡掉大部分；预算 10 分钟 5 次防重启循环 |
+| 每次 turn 的签名成本 | `core_signature` 全量 stat `zero_agent/**/*.py`（本地约 137 文件、~120 ms），桌面多会话叠加 | 命中变化才重启；后续可换目录级 watch |
 
 未决问题：
 
 - 是否需要 `/ext` 之类的 REPL 命令查看已加载插件与冲突？（倾向需要，但不在首版）
 - 插件是否需要版本约束与依赖声明？（首版按纯 Python 处理，不做额外约定）
 - 是否支持项目级扩展（`.zeroagent/`）：目前先只做用户级 `~/.zeroagent/`，避免概念分裂。
+
+## 十五、热更新与热重启
+
+目标：运行中改 skill / SOP / 插件 / `mcp.json` / config / 核心 Python 代码，都不需要人工审批或手动重启进程。
+
+这些能力写进系统提示词的 `<self_modification>` 块（`zero_agent/core/self_prompt.py`）：
+skills / SOP / plugins / `mcp.json` / 核心代码的**真实路径**、生效时机（下一轮 vs 热重启）、
+当前 `permissions.mode` 与 `sandbox` 语义、以及常开的底线（系统目录、凭据、用户数据、
+`.git` 不可写）。模型不需要猜路径，也不会在改完之后才发现被拦。
+
+路径全部在运行时解析，仓库里不含任何机器特定的绝对路径：`extensions.home` 缺省为
+`~/.zeroagent`、config 里的相对路径基于配置文件目录、核心代码目录取自包自身位置。
+提示词只用可移植记号：项目内路径渲染成 `<project>/...`（例如
+`<project>/zero_agent/**/*.py`、`<project>/memory/sops/*.md`），家目录下的其它路径
+渲染成 `~/...`。这些记号在工具侧真能用，不是装饰：
+
+| 记号 | 解析为 | 支持位置 |
+| --- | --- | --- |
+| `<project>` / `<repo>` | 项目根（`config.yaml` 所在目录） | `file_read/write/patch` 的 `path`、`code_run` 的 `script_path`/`cwd` |
+| `<workspace>` / `<workdir>` | `workspace_dir` | 同上 |
+| `<home>` | 当前用户家目录（`os.path.expanduser("~")`） | 同上 |
+| `$ZA_PROJECT_ROOT` / `$ZA_WORKSPACE_DIR` | 同上的 shell 形式 | `code_run` 子进程环境变量 |
+
+因此同一份代码换用户、换机器都能直接跑；`tests/test_portability.py` 会扫描
+`zero_agent/`、`config.example.yaml`、`docs/` 与 `tests/`，禁止 `/Users/<name>`、
+`/home/<name>` 这类字面量回归，并验证记号展开、shell 环境变量与提示词渲染。
+
+### 15.1 每轮同步（`reload_workflow`）
+
+`AgentLoop` 在每次 turn 边界调用 `ZeroAgent.reload_workflow()`：
+
+| 对象 | 判定 | 动作 |
+| --- | --- | --- |
+| `config.yaml` | mtime 变化 | 原子重载配置、重建 LLM client 与 registry，扩展运行时换绑新 config |
+| `extensions.enabled/home/browser` | 拓扑三元组变化 | 换 home、卸/装内置扩展（`browser` 变化强制重装 `browser_tools`）、按需重载全部插件 |
+| 插件 | 入口文件（单文件）或包目录内每个 `*.py` 的 `mtime_ns + size` 摘要变化 | 执行 teardown、撤销注册、清 `sys.modules` 与 `pyc`、重新 `setup` |
+| `mcp.json` | `mtime_ns + size` 变化 | 重跑 `mcp_client.setup`（关旧子进程、拉新 server） |
+| 核心代码 | `zero_agent/**/*.py` 全量摘要变化 | 校验 → 写检查点 → `os.execv` |
+
+只同步有变化的东西：签名未变时一次 turn 只做一轮 stat。`extensions.hot_reload: false` 时插件与 MCP 不参与，config 与核心代码仍生效。
+
+两条容易踩空的细节：
+
+- **内置扩展的代码改动也会被重新执行。** `mcp_client` / `skills_index` /
+  `browser_tools` 走 `ExtensionRuntime.load_builtin_module`：清掉该模块的 `pyc`
+  后 `importlib.reload`，否则 `import_module` 只是从 `sys.modules` 取回旧对象，
+  源码改动永远读不到。拓扑变化（`enabled/home/browser`）触发的重装同样走这条路，
+  所以“重装即重读代码”。
+- **失败的插件不会每轮重试。** 插件签名在尝试加载**之前**记录，`setup` 抛异常
+  也留档：同一份坏代码只尝试一次，文件改动或 `/update workflow`（`force=True`）
+  才重试。排错流程因此是「改文件 → 自动重试」或「改完 `/update workflow`」。
+- **底线层不挡自我升级。** 仓库源码、workspace、临时目录都不在
+  `zero_agent/core/safety.py` 的保护清单里，`file_write` 照常写核心代码；
+  被拒的只是系统目录、凭据、用户重要数据与 `.git` 元数据。git 操作走
+  `code_run`（沙箱内），因此“改代码 → 重启”与“推远端”两条路都保留。
+
+### 15.2 核心热重启
+
+1. `validate_core()`：先 `compile()` 每个核心模块（语法），再起一个短命子进程
+   `import zero_agent, zero_agent.core.agent, zero_agent.runners.cli`（import 期错误）。
+   失败则本签名记为 blocked，不再每轮重试，直到下一次文件变化。
+2. `save_checkpoint(status="running", restart=True)`：history、`pending_messages`、
+   handler working / history_info、task contract、evidence ledger、等待状态、
+   模式上下文（task/func 的续跑参数）、重启时间戳。**只在有运行中任务
+   （`_is_running_task` 或 `_pending_task_state`）时写**：空闲时没有可续跑的
+   对话，写检查点只会让新进程恢复出一段陈旧历史。空闲重启的报告里因此没有
+   `checkpoint_path`；有任务但写不了检查点（如未配置 `sessions_dir`）才返回
+   `core_restart_error == "checkpoint_failed"` 并拒绝重启。
+3. CLI 直接 `os.execv`；桌面 bridge 把 exec 排到事件循环 0.3s 之后，先给前端
+   一条 `bridge-log`。没有检查点时（空闲重启）不设 `ZA_RESUME_CHECKPOINT`，
+   CLI 提示语也说清「当前没有运行中任务，不恢复对话」。
+4. 新进程启动时恢复：CLI 读 `ZA_RESUME_CHECKPOINT`，桌面扫描
+   `sessions/checkpoints/*.json`（`source=desktop`）——`running` 的自动续跑，
+   `waiting` 的恢复成待答问题。
+5. 预算：同一任务 10 分钟内最多 5 次自动重启（`checkpoint.RESTART_BUDGET_*`），
+   超限停止自动续跑并标记 `hot_restart_loop`，检查点删除。
+6. exec 失败（不支持的平台机制、权限问题）：桌面 bridge 用检查点重建会话
+   运行时并提示用户「发送任意消息即可继续」，不会留下指向已关闭 agent 的会话。
+
+### 15.3 检查点约定
+
+- 存放：`<sessions_dir>/checkpoints/<session_id>.json`，目录 `0700`、文件 `0600`，
+  写入走临时文件 + `fsync` + `os.replace`。
+- 版本：`version` 不匹配直接忽略。
+- history 逐条做 JSON 往返，序列化不了的条目丢弃并告警（不用 `default=str`
+  兜底，否则多模态内容会被字符串化后回灌给模型接口）。
+- `pending_messages`（已构造但未落进 history 的请求）按最长重叠合并，避免
+  重启后整段对话重复。
+- `/new`、会话删除、任务正常结束都会清检查点；只有热重启路径保留 `running` 检查点。

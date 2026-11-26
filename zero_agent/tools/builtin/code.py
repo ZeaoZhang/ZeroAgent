@@ -19,15 +19,31 @@ from importlib import resources
 from typing import Any, Dict, Generator, List, Optional
 
 from zero_agent.core.config import AgentConfig
+from zero_agent.core.safety import command_denial
 from zero_agent.core.types import StepAction, StepOutcome
 from zero_agent.tools.registry import ToolRegistry
-from zero_agent.utils.files import resolve_workspace_path
+from zero_agent.utils.files import expand_tool_path, project_root, resolve_workspace_path
 from zero_agent.utils.text import smart_format
 
 
 _logger = logging.getLogger("zero_agent.tools.code")
 _VALID_CODE_TYPES = {"python", "py", "powershell", "bash", "sh", "shell", "ps1", "pwsh"}
 _INLINE_SCRIPT_WARN_CHARS = 4096
+
+
+def _sandbox_active(
+    root: str,
+    mode: str,
+    extra_roots: List[str],
+) -> bool:
+    """Return True when the sandbox really wraps commands for this machine."""
+
+    try:
+        from zero_agent.extensions.sandbox import will_apply
+
+        return will_apply(root, mode, extra_roots)
+    except Exception:  # noqa: BLE001 - 探测失败按不可用处理（走静态兜底）
+        return False
 
 
 def _t(zh: str, en: str, lang: str) -> str:
@@ -390,16 +406,19 @@ def _make_code_run_handler(config: AgentConfig):
             timeout = int(args.get("timeout", 60))
         except Exception:
             timeout = 60
-        cwd = os.path.normpath(os.path.join(
-            config.workspace_dir, args.get("cwd", "./"),
-        ))
+        workspace_root = str(config.workspace_dir)
+        # 提示词用 ``<workspace>/...`` 之类的可移植前缀，cwd 参数必须能解析
+        raw_cwd = expand_tool_path(str(args.get("cwd", "./")), workspace_root)
+        cwd = os.path.normpath(os.path.join(workspace_root, raw_cwd))
         maxlen = 10000 // max(args.get("_tool_num", 1), 1)
         stop_signal = getattr(handler, "code_stop_signal", None)
 
-        subprocess_env = None
+        # 路径前缀在 shell 里也能用：显式导出两个根，避免脚本里硬编码主机路径
+        subprocess_env = os.environ.copy()
+        subprocess_env["ZA_PROJECT_ROOT"] = project_root()
+        subprocess_env["ZA_WORKSPACE_DIR"] = workspace_root
         registry_path = getattr(config, "_desktop_subagent_registry_path", None)
         if registry_path:
-            subprocess_env = os.environ.copy()
             from zero_agent.utils.subagent_registry import (
                 PARENT_AGENT_ID_ENV,
                 REGISTRY_ENV,
@@ -421,6 +440,23 @@ def _make_code_run_handler(config: AgentConfig):
         except Exception:  # noqa: BLE001 - 沙箱模块不可用不应影响执行
             sandbox_mode = ""
 
+        extra_roots = list(getattr(config, "extra_write_roots", []) or [])
+        if not _sandbox_active(workspace_root, sandbox_mode, extra_roots):
+            # 沙箱没真正生效：退回静态兜底，挡住格式化/写块设备/关机/fork 炸弹
+            # 与 workspace 之外的递归删除。沙箱生效时不做这一步，保持命令自由。
+            denial = command_denial(
+                {"script": code, "script_path": args.get("script_path")},
+                workspace_root,
+            )
+            if denial:
+                message = f"已拒绝执行：{denial}"
+                yield f"[Status] ERR {message}\n"
+                return StepOutcome(
+                    {"status": "error", "msg": message},
+                    next_prompt="\n",
+                    action=StepAction.CONTINUE,
+                )
+
         return (yield from code_run(
             code=code,
             code_type=code_type,
@@ -430,8 +466,8 @@ def _make_code_run_handler(config: AgentConfig):
             stop_signal=stop_signal,
             env=subprocess_env,
             sandbox_mode=sandbox_mode,
-            sandbox_root=str(config.workspace_dir),
-            sandbox_extra_roots=list(getattr(config, "extra_write_roots", []) or []),
+            sandbox_root=workspace_root,
+            sandbox_extra_roots=extra_roots,
         ))
 
     def _handler(

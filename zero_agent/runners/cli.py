@@ -16,6 +16,8 @@ import time as _time
 import uuid
 from typing import Optional
 
+from zero_agent.core import checkpoint as checkpoint_store
+from zero_agent.core import hot_restart
 from zero_agent.core.agent import ZeroAgent
 from zero_agent.core.config import AgentConfig, default_config_path, load_default_config
 from zero_agent.core.exceptions import ExtensionBootstrapError, LLMError
@@ -122,6 +124,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    # 热重启是 exec 同一进程：保留原会话 ID；新进程分配独立 ID。
+    if not os.environ.get("ZA_RESUME_CHECKPOINT"):
+        os.environ["ZA_AGENT_SESSION_ID"] = f"cli-{uuid.uuid4().hex[:12]}"
+
     # --func/--task bg 模式：不带 --nobg 时，重新以 --nobg 启动自身并退出
     functional_mode = args.func or args.task
     if functional_mode and not args.nobg:
@@ -146,7 +152,12 @@ def main(argv: Optional[list[str]] = None) -> None:
             cmd += ["--no-user-tools"]
         if args.llm_no is not None:
             cmd += ["--llm-no", str(args.llm_no)]
+        if getattr(args, "permission_mode", None):
+            cmd += ["--permission-mode", args.permission_mode]
         cmd.append("--nobg")
+        child_env = os.environ.copy()
+        for key in ("ZA_RESUME_CHECKPOINT", "ZA_AGENT_SESSION_ID", "ZA_HOT_RESTART"):
+            child_env.pop(key, None)
         task_dir = os.path.abspath(os.path.expanduser(args.task)) if args.task else ""
         stderr_target = _sp.DEVNULL
         stderr_file = None
@@ -165,6 +176,7 @@ def main(argv: Optional[list[str]] = None) -> None:
                 stderr=stderr_target,
                 start_new_session=True,
                 close_fds=True,
+                env=child_env,
             )
         finally:
             if stderr_file is not None:
@@ -176,6 +188,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     config = _load_config(args)
     if args.nolog:
         config.log_dir = None
+    config._checkpoint_session_id = os.environ["ZA_AGENT_SESSION_ID"]
+    config._checkpoint_source = "cli"
 
     # 创建 agent
     try:
@@ -196,27 +210,48 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # 记录配置路径以支持热重载
     agent.set_config_path(getattr(config, "_source_path", None))
+    agent.set_hot_restart_hook(lambda reason: _cli_hot_restart(agent, reason))
+    resume_prompt, waiting_question = _restore_restart_checkpoint(agent)
+    if waiting_question:
+        print(f"\n[Waiting] {waiting_question}")
+
+    if waiting_question and not resume_prompt and not (
+        args.reflect is None and args.func is None and args.task is None
+        and args.input is None
+    ):
+        # 非交互模式没有答复入口：打印待答问题后退出，避免盲目重跑。
+        agent.close()
+        return
 
     try:
         if args.reflect:
             # Reflect 反射模式
             if args.llm_no is not None:
                 agent.next_llm(args.llm_no)
-            _run_reflect(agent, args.reflect, _parse_reflect_args(args.reflect_arg))
+            _run_reflect(
+                agent,
+                args.reflect,
+                _parse_reflect_args(args.reflect_arg),
+                resume_prompt=resume_prompt,
+            )
         elif args.func:
             if args.llm_no is not None:
                 agent.next_llm(args.llm_no)
-            _run_func_mode(agent, args.func, args.history)
+            _run_func_mode(agent, args.func, args.history, resume_prompt=resume_prompt)
         elif args.task:
             if args.llm_no is not None:
                 agent.next_llm(args.llm_no)
-            _run_task_mode(agent, args.task, args.history)
+            _run_task_mode(agent, args.task, args.history, resume_prompt=resume_prompt)
         elif args.input:
             # 一次性任务模式
-            _run_oneshot(agent, args.input)
+            _run_oneshot(agent, resume_prompt or args.input)
         else:
             # 交互 REPL 模式
-            _run_repl(agent)
+            _run_repl(
+                agent,
+                resume_prompt=resume_prompt,
+                waiting_question=waiting_question,
+            )
     finally:
         # 退出前释放扩展（MCP 子进程）；幂等，atexit 还会兜底一次
         agent.close()
@@ -301,6 +336,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="纯函数模式: 读取 PROMPT_FILE，执行一次 agent 任务，输出 <stem>.out.txt",
     )
     parser.add_argument(
+        "--permission-mode",
+        choices=("ask", "full"),
+        default=None,
+        help="工具门控模式：ask 需要审批，full 绕过全部扩展门控",
+    )
+    parser.add_argument(
         "--nobg",
         action="store_true",
         default=False,
@@ -355,6 +396,8 @@ def _load_config(args: argparse.Namespace) -> AgentConfig:
         config.workspace_dir = args.workspace
     if args.max_turns is not None:
         config.max_turns = args.max_turns
+    if getattr(args, "permission_mode", None):
+        config.permission_mode = args.permission_mode
     if args.verbose:
         config.verbose = True
     elif args.quiet:
@@ -362,6 +405,72 @@ def _load_config(args: argparse.Namespace) -> AgentConfig:
 
     config._source_path = config_path  # type: ignore[attr-defined]
     return config
+
+
+def _restore_restart_checkpoint(
+    agent: ZeroAgent,
+) -> tuple[Optional[str], Optional[str]]:
+    """Restore the checkpoint referenced by ``ZA_RESUME_CHECKPOINT``.
+
+    Returns:
+        ``(resume_prompt, waiting_question)``; both None when there is nothing
+        to resume.
+    """
+    path = os.environ.pop("ZA_RESUME_CHECKPOINT", "")
+    if not path:
+        return None, None
+    data = checkpoint_store.load(path)
+    if not data:
+        return None, None
+    if checkpoint_store.restart_budget_exhausted(data):
+        print(
+            f"\n[hot-restart] {int(checkpoint_store.RESTART_BUDGET_WINDOW // 60)} "
+            f"分钟内已热重启 {checkpoint_store.RESTART_BUDGET_LIMIT} 次，"
+            "疑似重启循环；已停止自动续跑，请检查核心代码后手动重试。",
+            file=sys.stderr,
+        )
+        agent.clear_checkpoint()
+        return None, None
+    if not agent.restore_checkpoint(data):
+        return None, None
+    pending = agent.pending_task_state
+    if (
+        data.get("status") == "waiting"
+        and pending is not None
+        and pending.waiting_kind != "restart"
+    ):
+        return None, pending.waiting_prompt()[0]
+    return agent.take_restart_prompt(), None
+
+
+def _cli_hot_restart(agent: ZeroAgent, reason: str) -> None:
+    """Save a checkpoint and exec a fresh interpreter for the same task."""
+
+    path = ""
+    if agent.restart_checkpoint_armed and agent.last_checkpoint_path:
+        path = str(agent.last_checkpoint_path)
+    if not path:
+        saved = agent.save_checkpoint(status="running", restart=True)
+        path = str(saved) if saved is not None else ""
+    if path:
+        os.environ["ZA_RESUME_CHECKPOINT"] = path
+    else:
+        os.environ.pop("ZA_RESUME_CHECKPOINT", None)
+    os.environ["ZA_HOT_RESTART"] = "1"
+    agent.close()
+    if path:
+        print("\n[hot-restart] 核心代码已变化，正在热重启并自动续跑…", file=sys.stderr)
+    else:
+        print(
+            "\n[hot-restart] 核心代码已变化，正在热重启"
+            "（当前没有运行中任务，不恢复对话）…",
+            file=sys.stderr,
+        )
+    try:
+        hot_restart.restart_process()
+    except Exception as exc:  # noqa: BLE001 - exec 失败必须给出可操作信息
+        print(f"[hot-restart] 重启失败: {exc}", file=sys.stderr)
+        raise SystemExit(75) from exc
 
 
 def _run_oneshot(agent: ZeroAgent, task: str) -> None:
@@ -377,16 +486,33 @@ def _run_oneshot(agent: ZeroAgent, task: str) -> None:
         sys.exit(1)
 
 
-def _run_repl(agent: ZeroAgent) -> None:
+def _run_repl(
+    agent: ZeroAgent,
+    *,
+    resume_prompt: Optional[str] = None,
+    waiting_question: Optional[str] = None,
+) -> None:
     """交互 REPL 模式：循环读取用户输入并执行.
 
     Args:
         agent: ZeroAgent 实例.
+        resume_prompt: 热重启后的自动续跑提示.
+        waiting_question: 恢复出的待答问题（下一次输入即答复）.
     """
     # 启用 readline 以支持历史记录和行编辑
     _setup_readline()
 
     _print_welcome(agent)
+
+    if resume_prompt:
+        try:
+            terminal = _consume_prompt(agent, resume_prompt, _display_chunk)
+            _display_terminal(terminal)
+        except KeyboardInterrupt:
+            agent.abort()
+            print("\n[Interrupted]")
+    elif waiting_question:
+        print(f"\n[Waiting] {waiting_question}\n")
 
     while True:
         try:
@@ -711,6 +837,7 @@ def _new_session(agent: ZeroAgent) -> None:
     agent.handler.history_info = []
     agent.handler._empty_ct = 0
     agent.clear_pending_task()
+    agent.clear_checkpoint()
     print("  新会话已开始（后端配置保留）")
 
 
@@ -766,11 +893,22 @@ def _set_subagent_tracking_status(
     append_subagent_event(os.environ.get(REGISTRY_ENV, ""), dict(record))
 
 
-def _run_task_mode(agent: ZeroAgent, io_dir: str, history_file: Optional[str] = None) -> None:
+def _run_task_mode(
+    agent: ZeroAgent,
+    io_dir: str,
+    history_file: Optional[str] = None,
+    resume_prompt: Optional[str] = None,
+) -> None:
     """Run one task and report start/finish to a parent desktop session."""
     record = _start_subagent_tracking(agent, io_dir)
     try:
-        _run_task_mode_impl(agent, io_dir, history_file, record)
+        _run_task_mode_impl(
+            agent,
+            io_dir,
+            history_file,
+            record,
+            resume_prompt=resume_prompt,
+        )
     except SystemExit as exc:
         code = exc.code
         if code in (None, 0):
@@ -791,6 +929,7 @@ def _run_task_mode_impl(
     io_dir: str,
     history_file: Optional[str] = None,
     subagent_record: Optional[dict] = None,
+    resume_prompt: Optional[str] = None,
 ) -> None:
     """文件 I/O 批量模式：GA 兼容的持续子 agent 协作.
 
@@ -808,42 +947,55 @@ def _run_task_mode_impl(
     import json as _json
     from zero_agent.utils.files import consume_file
 
-    # 加载历史
-    if history_file and os.path.isfile(history_file):
-        with open(history_file, encoding="utf-8") as f:
-            agent.client.history = _json.loads(f.read())
-
-    # 输入发现: input.txt 优先, 回退 input.md
-    input_txt = os.path.join(io_dir, "input.txt")
-    input_md = os.path.join(io_dir, "input.md")
-    if os.path.isfile(input_txt):
-        input_path = input_txt
-    elif os.path.isfile(input_md):
-        input_path = input_md
+    if resume_prompt:
+        # 检查点已恢复 history / handler；不要再用 --history 或 input.txt 覆盖
+        raw = resume_prompt
+        round_value = int(agent.checkpoint_context.get("round", 0) or 0)
+        nround: int | str = "" if round_value == 0 else round_value
+        print(f"[Task Mode] 热重启续跑（round={round_value}）")
     else:
-        print(f"[Error] 输入文件不存在: {input_txt} 或 {input_md}")
-        sys.exit(1)
+        # 加载历史
+        if history_file and os.path.isfile(history_file):
+            with open(history_file, encoding="utf-8") as f:
+                agent.client.history = _json.loads(f.read())
 
-    with open(input_path, encoding="utf-8") as f:
-        raw = f.read().strip()
+        # 输入发现: input.txt 优先, 回退 input.md
+        input_txt = os.path.join(io_dir, "input.txt")
+        input_md = os.path.join(io_dir, "input.md")
+        if os.path.isfile(input_txt):
+            input_path = input_txt
+        elif os.path.isfile(input_md):
+            input_path = input_md
+        else:
+            print(f"[Error] 输入文件不存在: {input_txt} 或 {input_md}")
+            sys.exit(1)
 
-    if not raw:
-        print("[Error] 输入文件为空")
-        sys.exit(1)
+        with open(input_path, encoding="utf-8") as f:
+            raw = f.read().strip()
 
+        if not raw:
+            print("[Error] 输入文件为空")
+            sys.exit(1)
+
+        nround = ""
+        print(f"[Task Mode] 读取任务: {input_path}")
     # 设置 task_dir 为 io_dir 以启用文件干预 (_keyinfo/_intervene/_stop)
     agent.task_dir = io_dir
 
-    print(f"[Task Mode] 读取任务: {input_path}")
     print(f"[Task Mode] 任务: {raw[:100]}...")
 
-    nround: int | str = ""
     failed = False
     while True:
         if isinstance(nround, int):
             outfile = os.path.join(io_dir, f"output{nround}.txt")
         else:
             outfile = os.path.join(io_dir, "output.txt")
+
+        agent.checkpoint_context = {
+            "mode": "task",
+            "io_dir": io_dir,
+            "round": nround if isinstance(nround, int) else 0,
+        }
 
         output_lines: list[str] = []
 
@@ -913,34 +1065,48 @@ def _run_task_mode_impl(
         nround = 1 if not isinstance(nround, int) else nround + 1
 
 
-def _run_func_mode(agent: ZeroAgent, prompt_file: str, history_file: Optional[str] = None) -> None:
+def _run_func_mode(
+    agent: ZeroAgent,
+    prompt_file: str,
+    history_file: Optional[str] = None,
+    resume_prompt: Optional[str] = None,
+) -> None:
     """纯函数模式: 读取 PROMPT_FILE, 运行一次 agent 任务, 写 <stem>.out.txt.
 
     Args:
         agent: ZeroAgent 实例.
         prompt_file: 提示词文件路径.
         history_file: 可选的对话历史 JSON 文件路径.
+        resume_prompt: 热重启后的续跑提示（跳过文件与历史读取）.
     """
     import os
     import json as _json
 
-    # 加载历史
-    if history_file and os.path.isfile(history_file):
-        with open(history_file, encoding="utf-8") as f:
-            agent.client.history = _json.loads(f.read())
+    if resume_prompt:
+        prompt = resume_prompt
+        out_path = str(
+            agent.checkpoint_context.get("out_path")
+            or os.path.splitext(prompt_file)[0] + ".out.txt"
+        )
+    else:
+        # 加载历史
+        if history_file and os.path.isfile(history_file):
+            with open(history_file, encoding="utf-8") as f:
+                agent.client.history = _json.loads(f.read())
 
-    if not os.path.isfile(prompt_file):
-        print(f"[Error] 提示词文件不存在: {prompt_file}")
-        sys.exit(1)
+        if not os.path.isfile(prompt_file):
+            print(f"[Error] 提示词文件不存在: {prompt_file}")
+            sys.exit(1)
 
-    with open(prompt_file, encoding="utf-8") as f:
-        prompt = f.read()
+        with open(prompt_file, encoding="utf-8") as f:
+            prompt = f.read()
+
+        out_path = os.path.splitext(prompt_file)[0] + ".out.txt"
 
     # 设置 peer_hint = False, task_dir = None (无干预文件)
     agent.config.peer_hint = False
     agent.task_dir = None
-
-    out_path = os.path.splitext(prompt_file)[0] + ".out.txt"
+    agent.checkpoint_context = {"mode": "func", "out_path": out_path}
 
     output_lines: list[str] = []
 
@@ -1028,18 +1194,27 @@ def _parse_reflect_args(values: list[str] | None) -> dict[str, str]:
     return parsed
 
 
-def _run_reflect(agent: ZeroAgent, module_path: str, init_args: Optional[dict[str, str]] = None) -> None:
+def _run_reflect(
+    agent: ZeroAgent,
+    module_path: str,
+    init_args: Optional[dict[str, str]] = None,
+    resume_prompt: Optional[str] = None,
+) -> None:
     """Reflect 反射模式: 周期性检查并执行任务.
 
     Args:
         agent: ZeroAgent 实例.
         module_path: reflect 模块文件路径.
         init_args: 传给 reflect 模块 init() 的参数.
+        resume_prompt: 热重启后的续跑提示（先恢复当前任务）.
     """
     from zero_agent.runners.reflect_runner import ReflectRunner
 
     runner = ReflectRunner(agent, module_path)
     try:
+        if resume_prompt:
+            terminal = _consume_prompt(agent, resume_prompt, _display_chunk)
+            _display_terminal(terminal)
         runner.run_loop(init_args or {})
     except KeyboardInterrupt:
         print("\n[Reflect interrupted]")

@@ -2858,7 +2858,7 @@ const LOCAL_SLASH_COMMANDS = [
   { cmd: '/new', argHint: '', description: '新建会话' },
   { cmd: '/clear', argHint: '', description: '清空当前会话显示' },
   { cmd: '/stop', argHint: '', description: '取消当前请求' },
-  { cmd: '/restart', argHint: '', description: '重启 bridge' },
+  { cmd: '/restart', argHint: '', description: '热重启内核（自动续跑）' },
   { cmd: '/settings', argHint: '', description: '打开设置' },
   { cmd: '/model', argHint: '', description: '选择模型' },
   { cmd: '/theme', argHint: 'light|dark|auto', description: '切换主题' },
@@ -3103,7 +3103,7 @@ async function handleSlash(cmd) {
       if (await cancelPrompt()) showSystem('Stop requested.');
       break;
     case 'restart':
-      await restartBridge();
+      await restartBridge({ restartBackend: true });
       break;
     case 'settings':
       showSystem('/settings has been removed. Use /llm to switch models or edit config.yaml directly.');
@@ -4040,7 +4040,26 @@ async function ensureBridgeSession(sess) {
 }
 
 async function restartBridge(options = {}) {
-  const { remapSessions = false } = options;
+  const { remapSessions = false, restartBackend = false } = options;
+  if (restartBackend) {
+    setStatus('warn', 'Restarting kernel…');
+    state.bridgeReady = false;
+    state.restartingBridge = true;
+    state.bridgeNoticeMessage = showSystem('Kernel hot restarting…');
+    await window.zeroAgent.rpc('system/restart', {}).catch(() => null);
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const status = await window.zeroAgent.checkStatus().catch(() => null);
+      if (status?.ok) {
+        await window.zeroAgent.startBridge(getActiveConfig().llmNo || 0);
+        markBridgeReady('Kernel restarted.');
+        return;
+      }
+    }
+    markBridgeReady('Kernel restart timeout; reconnect manually.');
+    return;
+  }
   setStatus('warn', 'Restarting…');
   state.bridgeReady = false;
   state.restartingBridge = true;
@@ -4921,6 +4940,11 @@ const imagePreviews = document.getElementById('image-previews');
     applyTheme();
     await window.zeroAgent.saveConfig(cfg);
     showSystem(`Theme → ${next}`);
+  });
+
+  // ─── Kernel Hot Restart ─────────────────────────────────────────────────
+  $('restart-core-btn')?.addEventListener('click', () => {
+    void restartBridge({ restartBackend: true });
   });
 
   // ─── Keyboard Shortcuts ─────────────────────────────────────────────────

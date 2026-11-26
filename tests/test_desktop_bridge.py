@@ -605,6 +605,7 @@ def test_create_app_exposes_desktop_http_contract() -> None:
     }
 
     assert ("GET", "/status") in routes
+    assert ("POST", "/system/restart") in routes
     assert ("GET", "/channels") in routes
     assert ("POST", "/channels/{channel_id}/start") in routes
     assert ("POST", "/channels/{channel_id}/stop") in routes
@@ -662,6 +663,28 @@ async def _open_test_client(
     )))
     await client.start_server()
     return client
+
+
+@pytest.mark.asyncio
+async def test_system_restart_endpoint_requests_hot_restart(monkeypatch):
+    calls: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        desktop_bridge.manager,
+        "request_hot_restart",
+        lambda reason, reset_budget=False: calls.append((reason, reset_budget)),
+    )
+    client = await _open_test_client()
+    try:
+        response = await client.post(
+            "/system/restart",
+            headers={"Authorization": "Bearer secret"},
+        )
+        payload = await response.json()
+        assert response.status == 200
+        assert payload == {"ok": True, "restarting": True}
+        assert calls == [("manual", True)]
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio

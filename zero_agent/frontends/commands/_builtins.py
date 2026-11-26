@@ -64,6 +64,7 @@ def handle_new(args: str, agent: "ZeroAgent") -> str:
     agent.handler.history_info = []
     agent.handler._empty_ct = 0
     agent.clear_pending_task()
+    agent.clear_checkpoint()
     return "  新会话已开始（后端配置保留）"
 
 
