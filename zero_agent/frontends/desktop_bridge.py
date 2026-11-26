@@ -2419,6 +2419,105 @@ def normalize_prompt(prompt: Any, images: Optional[list] = None):
     return final_prompt, image_ids
 
 
+class _TeeStream:
+    """Duplicate a text stream to the console and the bridge log file."""
+
+    def __init__(self, stream: Any, handle: Any) -> None:
+        self.__dict__["_stream"] = stream
+        self.__dict__["_handle"] = handle
+
+    def write(self, data: str) -> int:
+        try:
+            written = self.__dict__["_stream"].write(data)
+        except Exception:  # noqa: BLE001 - 控制台不可用不得影响日志
+            written = len(data)
+        try:
+            self.__dict__["_handle"].write(data)
+            self.__dict__["_handle"].flush()
+        except Exception:  # noqa: BLE001 - 日志不可写不得影响运行
+            pass
+        return written
+
+    def flush(self) -> None:
+        for key in ("_stream", "_handle"):
+            try:
+                self.__dict__[key].flush()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def isatty(self) -> bool:
+        try:
+            return bool(self.__dict__["_stream"].isatty())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def fileno(self) -> int:
+        return self.__dict__["_stream"].fileno()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.__dict__["_stream"], name)
+
+
+_BRIDGE_LOG_HANDLE: Any = None
+
+
+def configure_bridge_logging(sessions_dir: str) -> str:
+    """Mirror stdout / stderr / bridge-log events into ``desktop_bridge.log``.
+
+    桌面端此前只有 UI 内的 ``bridge-log`` 事件，进程的 print / traceback 全部随
+    Tauri 的管道消失，出问题无法事后排查。这里把三者落到
+    ``<sessions_dir>/desktop_bridge.log``（超过 5 MiB 轮转一次）。
+
+    Args:
+        sessions_dir: 会话目录（与 sessions.sqlite3 同级）.
+
+    Returns:
+        日志文件路径；不可写时返回空串.
+    """
+    global _BRIDGE_LOG_HANDLE
+    if _BRIDGE_LOG_HANDLE is not None:
+        return str(Path(sessions_dir) / "desktop_bridge.log")
+    path = Path(sessions_dir).expanduser() / "desktop_bridge.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size > 5_000_000:
+            path.replace(path.with_name("desktop_bridge.log.1"))
+        handle = open(path, "a", encoding="utf-8", buffering=1)
+    except OSError as exc:
+        print(f"bridge log unavailable: {exc}", file=sys.stderr)
+        return ""
+    _BRIDGE_LOG_HANDLE = handle
+    sys.stdout = _TeeStream(sys.stdout, handle)
+    sys.stderr = _TeeStream(sys.stderr, handle)
+    handle.write(
+        f"\n=== bridge start {time.strftime('%Y-%m-%d %H:%M:%S')} "
+        f"pid={os.getpid()} ===\n"
+    )
+    previous_hook = sys.excepthook
+
+    def _excepthook(exc_type, exc, tb):
+        try:
+            handle.write("".join(traceback.format_exception(exc_type, exc, tb)))
+            handle.flush()
+        except Exception:  # noqa: BLE001
+            pass
+        previous_hook(exc_type, exc, tb)
+
+    sys.excepthook = _excepthook
+    return str(path)
+
+
+def log_bridge_event(text: str) -> None:
+    """Append one ``bridge-log`` payload (what the UI shows) to the log file."""
+    handle = _BRIDGE_LOG_HANDLE
+    if handle is None:
+        return
+    try:
+        handle.write(f"[bridge-log] {text}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 manager = AgentManager()
 
 
@@ -2432,6 +2531,8 @@ class WsHub:
         self.loop: Optional[asyncio.AbstractEventLoop] = None
 
     def emit(self, obj: dict):
+        if isinstance(obj, dict) and obj.get("type") == "bridge-log":
+            log_bridge_event(str(obj.get("payload", "")))
         if self.loop and self.loop.is_running():
             asyncio.run_coroutine_threadsafe(self._broadcast(obj), self.loop)
 
@@ -3359,6 +3460,13 @@ def create_app(
 if __name__ == "__main__":
     host = os.environ.get("BRIDGE_HOST", "127.0.0.1")
     port = int(os.environ.get("BRIDGE_PORT", "14168"))
+    try:
+        bridge_log = configure_bridge_logging(manager.sessions_dir)
+    except Exception as exc:  # noqa: BLE001 - 日志失败不得阻断桌面端
+        bridge_log = ""
+        print(f"configure bridge logging failed: {exc}", file=sys.stderr)
+    if bridge_log:
+        print(f"bridge log: {bridge_log}", file=sys.stderr)
     security = load_bridge_security(host, port)
     adopt_bridge_token(security)
     url = f"http://{host}:{port}/"
