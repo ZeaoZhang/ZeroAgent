@@ -17,7 +17,13 @@ from zero_agent.bots import channel_control
 BOT_CONFIG_ENV = "ZA_BOT_CONFIG_PATH"
 _CONFIG_ENV = "ZA_CONFIG_PATH"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_TOKEN_FILE = Path.home() / ".wxbot" / "token.json"
+
+
+def _token_file() -> Path:
+    """Resolve the WeChat token path at call time (HOME may differ per run)."""
+    return Path.home() / ".wxbot" / "token.json"
+
+
 _ENV_REFERENCE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 
 
@@ -140,7 +146,7 @@ def load_keys() -> dict:
 
 def _wechat_configured() -> bool:
     try:
-        document = _read_document(_TOKEN_FILE)
+        document = _read_document(_token_file())
     except ChannelConfigError:
         return False
     return bool(str(document.get("bot_token") or "").strip())
