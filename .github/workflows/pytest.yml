@@ -27,7 +27,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes gettext
           ./scripts/compile_prompt_catalogs.sh
-          pip install -e ".[ui,test]"
+          pip install -e ".[ui,test,browser]"
 
       - name: Run tests
         run: pytest tests/ -v --tb=short
