@@ -225,6 +225,9 @@ class AgentConfig:
         browser_tools: 浏览器工具加载模式 "auto" | "on" | "off"；默认 auto，
             仅在 [browser] 可选运行时可用时注册.
         sandbox_mode: code_run 的进程沙箱模式 "off" | "auto" | "macos" | "linux".
+        permission_mode: 工具门控模式 "ask" | "full"；full 绕过全部扩展门控.
+        extensions_hot_reload: 每轮自动同步 plugin / mcp.json 变化.
+        extensions_core_restart: 核心 Python 代码变化后自动热重启.
     """
 
     llm_backends: dict[str, LLMBackendConfig] = field(default_factory=dict)
@@ -248,6 +251,9 @@ class AgentConfig:
     extra_write_roots: list[str] = field(default_factory=list)
     browser_tools: str = "auto"
     sandbox_mode: str = "auto"
+    permission_mode: str = "full"
+    extensions_hot_reload: bool = True
+    extensions_core_restart: bool = True
 
     @property
     def resolved_language(self) -> str:
@@ -435,6 +441,11 @@ class AgentConfig:
         language = os.environ.get("ZA_LANG", "auto")
         peer_hint = os.environ.get("ZA_PEER_HINT", "").lower() in ("1", "true", "yes", "on")
         litellm_model_cost_map = os.environ.get("ZA_LITELLM_MODEL_COST_MAP") or None
+        permission_mode = _parse_permission_mode(
+            os.environ.get("ZA_PERMISSION_MODE") or None,
+        )
+        hot_reload = _as_bool(os.environ.get("ZA_HOT_RELOAD") or None, True)
+        core_restart = _as_bool(os.environ.get("ZA_CORE_RESTART") or None, True)
 
         config = cls(
             llm_backends={
@@ -456,6 +467,9 @@ class AgentConfig:
             language=language,
             peer_hint=peer_hint,
             litellm_model_cost_map=litellm_model_cost_map,
+            permission_mode=permission_mode,
+            extensions_hot_reload=hot_reload,
+            extensions_core_restart=core_restart,
         )
         config._resolve_paths(os.getcwd())
         return config
@@ -465,6 +479,11 @@ class AgentConfig:
         """Build AgentConfig from parsed YAML data."""
         data = data or {}
         extensions_data = data.get("extensions") or {}
+        if not isinstance(extensions_data, dict):
+            extensions_data = {}
+        permissions_data = data.get("permissions") or {}
+        if not isinstance(permissions_data, dict):
+            permissions_data = {}
         backends: dict[str, LLMBackendConfig] = {}
         env_pattern = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
         for name, cfg in data.get("llm_backends", {}).items():
@@ -507,6 +526,13 @@ class AgentConfig:
                 extensions_data.get("browser", "auto"),
             ),
             sandbox_mode=_parse_sandbox_mode(extensions_data.get("sandbox")),
+            permission_mode=_parse_permission_mode(permissions_data.get("mode")),
+            extensions_hot_reload=_as_bool(
+                extensions_data.get("hot_reload"), True,
+            ),
+            extensions_core_restart=_as_bool(
+                extensions_data.get("core_restart"), True,
+            ),
         )
 
 
@@ -542,6 +568,30 @@ def _parse_browser_tools_mode(value: object) -> str:
         value,
     )
     return "auto"
+
+
+def _parse_permission_mode(value: object) -> str:
+    """解析 ``permissions.mode``.
+
+    缺省是全权限模式；非法值回退 ``ask``（安全侧），并留下告警，避免
+    ``permissions: {mode: fulll}`` 静默变成绕过审批。
+
+    Args:
+        value: 配置值.
+
+    Returns:
+        ``ask`` 或 ``full``.
+    """
+    if value is None:
+        return "full"
+    normalized = str(value).strip().lower()
+    if normalized in {"ask", "full"}:
+        return normalized
+    _logger.warning(
+        "permissions.mode 期望 ask/full，收到 %r，已按 ask 处理",
+        value,
+    )
+    return "ask"
 
 
 def _parse_sandbox_mode(value: object) -> str:

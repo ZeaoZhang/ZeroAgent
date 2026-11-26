@@ -110,6 +110,8 @@
     switch (method) {
       case 'app/status':
         return http('/status');
+      case 'system/restart':
+        return http('/system/restart', { method: 'POST', body: params || {} });
       case 'app/config/get':
         return http('/config');
       case 'app/config/save':

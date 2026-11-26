@@ -46,7 +46,13 @@ def _registry() -> ToolRegistry:
 
 
 def _runtime(home: Path, registry: ToolRegistry | None = None) -> ExtensionRuntime:
-    return ExtensionRuntime(registry=registry or _registry(), home=home)
+    from types import SimpleNamespace
+
+    return ExtensionRuntime(
+        registry=registry or _registry(),
+        home=home,
+        config=SimpleNamespace(permission_mode="ask"),
+    )
 
 
 def _write(path: Path, text: str) -> None:
@@ -540,6 +546,7 @@ class TestHardening:
             memory_dir=str(memory_dir),
             workspace_dir=str(tmp_path / "ws"),
             extensions_protected_writes=[],
+            permission_mode="ask",
         )
         runtime = ExtensionRuntime(
             registry=_registry(),

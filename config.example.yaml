@@ -23,15 +23,27 @@ memory_dir: ./memory
 sessions_dir: ./workspace/sessions
 log_dir: null
 
+# Tool-gating permission mode.
+# ask  — high-risk calls and protected writes pause for human approval.
+# full — bypass every extension tool-call gate (including third-party blocks).
+permissions:
+  mode: full          # ask | full
+
 # Extension system (plugins / skills / MCP).
 # Plugins live in <home>/extensions/, skills in <home>/skills/,
 # MCP servers in <home>/mcp.json. Default home is ~/.zeroagent.
 extensions:
   enabled: true
+  # Detect plugin / mcp.json / topology changes at every turn.
+  hot_reload: true
+  # Validate and hot-restart the process when core Python code changes.
+  core_restart: true
   home: ~/.zeroagent
-  # Extra paths that require human approval before the agent writes them.
-  # Writes under ~/.zeroagent/{skills,extensions,mcp.json} are already protected:
-  # the agent pauses and asks the user; approval is bound to the exact call, and
+  # Extra paths that require human approval before the agent writes them
+  # (ask mode only; full mode bypasses extension gates).
+  # Writes under ~/.zeroagent/{skills,extensions,mcp.json} are already protected
+  # in ask mode: the agent pauses and asks the user; approval is bound to the
+  # exact call, and
   # permission_gate adds a per-task, per-path scope so repeated edits to the same
   # file are not re-asked within 600 seconds. Writes inside workspace_dir are
   # never gated.
@@ -46,7 +58,8 @@ extensions:
   # contract: if that sandbox is unavailable the command is refused instead of
   # running unisolated. Set "off" to accept the risk explicitly.
   # Takes effect on config reload (registry rebuild); protected_writes is refreshed
-  # on every reload; enabled/home need a restart.
+  # on every reload; enabled/home are re-applied at the next turn boundary
+  # (hot_reload).
   # 注意：YAML 1.1 会把未加引号的 off/on 解析成布尔，建议写成 "off"。
   sandbox: "auto"
 

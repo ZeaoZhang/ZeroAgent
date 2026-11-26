@@ -48,7 +48,11 @@ def _write(path: Path, text: str) -> Path:
 
 
 def _runtime(home: Path, registry: ToolRegistry | None = None) -> ExtensionRuntime:
-    return ExtensionRuntime(registry=registry or _make_registry(), home=home)
+    return ExtensionRuntime(
+        registry=registry or _make_registry(),
+        home=home,
+        config=SimpleNamespace(permission_mode="ask"),
+    )
 
 
 def _tool_result(handler, args: dict):
@@ -372,7 +376,10 @@ class TestBuiltins:
         runtime = ExtensionRuntime(
             registry=_make_registry(),
             home=tmp_path,
-            config=SimpleNamespace(workspace_dir=str(workspace)),
+            config=SimpleNamespace(
+                workspace_dir=str(workspace),
+                permission_mode="ask",
+            ),
         )
         permission_gate.setup(ExtensionContext("permission_gate", runtime))
 

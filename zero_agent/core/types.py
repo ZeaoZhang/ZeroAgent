@@ -61,7 +61,9 @@ class PendingTaskState:
     contract: TaskContract
     ledger: EvidenceLedger
     plan_verify_status: str
-    waiting_kind: Literal["ask_user", "plan_partial_acceptance", "approval"]
+    waiting_kind: Literal[
+        "ask_user", "plan_partial_acceptance", "approval", "restart"
+    ]
     waiting_data: dict[str, Any] = field(default_factory=dict)
 
 @dataclass(frozen=True)

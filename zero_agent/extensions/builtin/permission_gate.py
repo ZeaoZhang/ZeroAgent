@@ -327,6 +327,14 @@ def _content_summary(args: Dict[str, Any]) -> str:
     return "（无内容字段）"
 
 
+def _permission_mode(runtime: Any) -> str:
+    """Return the runtime gating mode, defaulting to full for bare runtimes."""
+
+    config = getattr(runtime, "config", None)
+    value = str(getattr(config, "permission_mode", "full") or "full").strip().lower()
+    return value if value in {"ask", "full"} else "ask"
+
+
 def _resolve_write_path(path: str, runtime: Any) -> str:
     """按文件工具的写入口径解析路径.
 
@@ -367,6 +375,8 @@ def setup(ctx: Any) -> None:
         Returns:
             None 放行；ExtensionVeto 拒绝；ApprovalRequired 请求审批.
         """
+        if _permission_mode(ctx.runtime) == "full":
+            return None
         args: Dict[str, Any] = call.args or {}
         workspace = _workspace(ctx.runtime)
         effects = _effects(call)

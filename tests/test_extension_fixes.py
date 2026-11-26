@@ -57,7 +57,11 @@ def _registry() -> ToolRegistry:
 
 
 def _runtime(home: Path, registry: ToolRegistry | None = None) -> ExtensionRuntime:
-    return ExtensionRuntime(registry=registry or _registry(), home=home)
+    return ExtensionRuntime(
+        registry=registry or _registry(),
+        home=home,
+        config=SimpleNamespace(permission_mode="ask"),
+    )
 
 
 def _write(path: Path, text: str) -> None:
@@ -307,6 +311,7 @@ class TestShellScope:
             memory_dir=str(tmp_path / "mem"),
             workspace_dir=str(workspace),
             extensions_protected_writes=[],
+            permission_mode="ask",
         )
         runtime = ExtensionRuntime(registry=_registry(), home=home, config=config)
         permission_gate.setup(ExtensionContext("permission_gate", runtime))
@@ -374,6 +379,7 @@ class TestProtectedPrefixScope:
             memory_dir=str(tmp_path / "mem"),
             workspace_dir=str(workspace),
             extensions_protected_writes=list(extra),
+            permission_mode="ask",
         )
         runtime = ExtensionRuntime(registry=_registry(), home=home, config=config)
         permission_gate.setup(ExtensionContext("permission_gate", runtime))
@@ -504,6 +510,7 @@ class TestEnabledSemantics:
             sessions_dir=str(tmp_path / "sessions"),
             extensions_home=str(home),
             extensions_enabled=enabled,
+            permission_mode="ask",
         )
         return ZeroAgent(config)
 
@@ -566,6 +573,7 @@ class TestCustomHandlerRegistry:
             memory_dir=str(tmp_path / "mem"),
             sessions_dir=str(tmp_path / "sessions"),
             extensions_home=str(home),
+            permission_mode="ask",
         )
         own_registry = ToolRegistry()
         own_registry.register(_tool("only_tool"))

@@ -64,11 +64,18 @@ def _make_mock_agent():
     # Simulate abort.
     agent.abort.return_value = None
 
-    # Simulate reload_config.
+    # Simulate reload_config / reload_workflow.
     agent.reload_config.return_value = True
-
-    # Simulate _register_builtin_plugins.
-    agent._register_builtin_plugins.return_value = None
+    agent.reload_workflow.return_value = {
+        "config": True,
+        "topology": False,
+        "plugins": {"loaded": [], "reloaded": [], "removed": [], "failed": {}},
+        "mcp": False,
+        "core_restart": "",
+        "core_restart_error": "",
+    }
+    agent.config.permission_mode = "full"
+    agent.set_permission_mode.side_effect = lambda mode: mode
 
     return agent
 
@@ -257,7 +264,7 @@ class TestBuiltinDescriptions:
 
     BUILTIN_NAMES = {
         "help", "exit", "new", "save", "llms", "resume", "stop",
-        "tools", "session", "continue", "update", "goal",
+        "tools", "session", "continue", "update", "goal", "permissions",
     }
 
     def test_all_builtins_have_descriptions(self):
@@ -402,11 +409,23 @@ class TestHandleCommandNonSession:
         mock_agent.reload_config.assert_called_once()
         assert "已重新加载" in result or "未变更" in result
 
-    def test_update_plugins(self, mock_agent):
-        """'/update plugins' reloads plugins."""
-        result = handle_command("/update plugins", mock_agent)
-        mock_agent._register_builtin_plugins.assert_called_once()
-        assert "已重新加载" in result
+    def test_update_workflow_syncs(self, mock_agent):
+        """'/update workflow' forces a full workflow sync."""
+        result = handle_command("/update workflow", mock_agent)
+        mock_agent.reload_workflow.assert_called_once_with(force=True)
+        assert "workflow 已同步" in result
+        assert "core_restart" in result
+
+    def test_permissions_shows_current_mode(self, mock_agent):
+        """'/permissions' without args reports the live mode."""
+        result = handle_command("/permissions", mock_agent)
+        assert "full" in result
+
+    def test_permissions_switches_mode(self, mock_agent):
+        """'/permissions ask' delegates to set_permission_mode."""
+        result = handle_command("/permissions ask", mock_agent)
+        mock_agent.set_permission_mode.assert_called_once_with("ask")
+        assert "ask" in result
 
 
 # ── /plan registry ─────────────────────────────────────────────────────

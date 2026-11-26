@@ -131,10 +131,33 @@ class AgentLoop:
                 turn += 1
                 yield {"turn": turn}
 
-                if self._agent is not None and turn % 5 == 0:
-                    if self._agent.reload_config():
-                        self.client = self._agent.client
-                        self.handler.client = self.client
+                if self._agent is not None:
+                    reload_workflow = getattr(self._agent, "reload_workflow", None)
+                    if callable(reload_workflow):
+                        note = getattr(self._agent, "note_pending_messages", None)
+                        if callable(note):
+                            note(messages)
+                        report = reload_workflow()
+                        if report.get("core_restart_error"):
+                            yield f"[hot-restart] {report['core_restart_error']}\n"
+                        if report.get("core_restart") == "requested":
+                            # 进程即将被 exec 替换：不要发起一次注定作废的 LLM 请求。
+                            terminal = TerminalEvent(
+                                status=TerminalStatus.CANCELLED,
+                                reason="hot_restart",
+                                turn=turn,
+                            )
+                            break
+                        if report.get("config") or report.get("tools_changed"):
+                            self.client = self._agent.client
+                            self.handler.client = self.client
+                            self.tools_schema = self._agent.registry.generate_openai_schema()
+                    else:
+                        # 兼容仅实现 reload_config 的旧式 agent 适配层
+                        reload_config = getattr(self._agent, "reload_config", None)
+                        if callable(reload_config) and reload_config():
+                            self.client = self._agent.client
+                            self.handler.client = self.client
 
                 if self.verbose:
                     yield f"\n\n**LLM Running (Turn {turn}) ...**\n\n"
@@ -189,6 +212,11 @@ class AgentLoop:
                     cleaned = self._clean_content(response.content)
                     if cleaned:
                         yield cleaned + "\n"
+
+                clear_pending = getattr(self._agent, "clear_pending_messages", None)
+                if callable(clear_pending):
+                    # 请求已进入 history；清空快照，避免 checkpoint 重复存储
+                    clear_pending()
 
                 interruption = classify_interruption(response)
                 if interruption is not None:
