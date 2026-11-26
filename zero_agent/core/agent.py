@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import atexit
 import copy
-import importlib
 import logging
 import os
 import re
@@ -1416,13 +1415,14 @@ class ZeroAgent:
         """创建扩展运行时并加载插件与内置扩展.
 
         ``extensions_enabled=false`` 只关闭外部插件与能力类扩展，安全门仍然生效。
-        ``permissions.mode`` 只决定是否**暂停等人审批**：``full``（默认）下
-        ``confirm`` 由运行时自动放行，而 ``block``（危险命令、声明缺失、
-        门控异常）依旧拒绝。因此不存在“静默失去全部写入保护”的配置项，
-        真正的强制隔离仍然只有 ``extensions.sandbox``。
+        ``permissions.mode`` 决定是否执行工具调用门控这一层：``full``（默认）下
+        ``evaluate_tool_call`` 直接返回 ``allow``，**完全不执行**任何 ``on_tool_call``
+        回调——危险 shell、effects 声明缺失、插件 veto、门控异常都不再生效；
+        ``ask`` 才启用审批三态与 fail-closed。真正的强制隔离只有
+        ``extensions.sandbox``（``code_run`` 的进程沙箱）。
 
         安全类扩展或运行时本身安装失败时抛 :class:`ExtensionBootstrapError`，
-        绝不在没有写入保护的情况下继续启动。外部插件与能力类扩展的失败仍只
+        绝不在 ``ask`` 缺了门控来源的情况下继续启动。外部插件与能力类扩展的失败仍只
         记录日志，不影响启动。
 
         Returns:
@@ -1488,6 +1488,7 @@ class ZeroAgent:
         name: str,
         module_path: str,
         is_safety: bool,
+        reinstall: bool = False,
     ) -> bool:
         """Install one builtin extension; safety failures are fatal.
 
@@ -1496,6 +1497,9 @@ class ZeroAgent:
             name: 内置扩展归属名.
             module_path: 可导入的模块路径.
             is_safety: True 时安装失败抛 :class:`ExtensionBootstrapError`.
+            reinstall: True 时重新执行模块代码（拓扑变化触发的重装），
+                使内置扩展的源码改动在不重启的前提下生效；首次安装无需
+                重执行，``sys.modules`` 里就是刚导入的代码.
 
         Returns:
             True 表示安装成功.
@@ -1503,7 +1507,7 @@ class ZeroAgent:
         from zero_agent.extensions.context import ExtensionContext
 
         try:
-            module = importlib.import_module(module_path)
+            module = runtime.load_builtin_module(module_path, reexecute=reinstall)
             teardown = module.setup(ExtensionContext(name, runtime))
             if callable(teardown):
                 runtime.register_teardown(name, teardown)
@@ -1546,9 +1550,12 @@ class ZeroAgent:
         for name, module_path, is_safety in targets:
             if name in installed and name not in force_names:
                 continue
+            reinstall = name in installed
             if name in set(runtime.installed_builtins):
                 runtime.unload_owner(name)
-            self._install_builtin_extension(runtime, name, module_path, is_safety)
+            self._install_builtin_extension(
+                runtime, name, module_path, is_safety, reinstall=reinstall,
+            )
 
     # ---- 拓扑（plugins / home / browser）与工作流热更新 -----------------
 
@@ -1669,7 +1676,12 @@ class ZeroAgent:
             ``plugins``（loaded/reloaded/removed/failed）、``mcp``、
             ``tools_changed``，以及 ``core_restart``——``""`` 表示无重启，
             ``"blocked"`` 表示校验失败（错误在 ``core_restart_error``），
-            ``"requested"`` 表示检查点已写好、``_hot_restart_hook`` 已被调用.
+            ``"requested"`` 表示 ``_hot_restart_hook`` 已被调用.
+
+            重启细节：``checkpoint_path`` 只在**有运行中任务**时出现；
+            ``core_restart_error == "checkpoint_failed"`` 只在“有任务但写不了
+            检查点（如未配置 ``sessions_dir``）”时出现。空闲时照常请求重启，
+            但不写检查点、重启后不恢复对话。
         """
         report: dict[str, Any] = {
             "config": False,
@@ -1718,14 +1730,20 @@ class ZeroAgent:
                 report["core_restart"] = "blocked"
                 report["core_restart_error"] = error
             else:
-                path = self.save_checkpoint(status="running", restart=True)
-                if path is None:
+                resumable = bool(self._is_running_task or self._pending_task_state)
+                path = (
+                    self.save_checkpoint(status="running", restart=True)
+                    if resumable
+                    else None
+                )
+                if resumable and path is None:
                     report["core_restart"] = "blocked"
                     report["core_restart_error"] = "checkpoint_failed"
                 else:
                     self._core_signature = signature
                     report["core_restart"] = "requested"
-                    report["checkpoint_path"] = str(path)
+                    if path is not None:
+                        report["checkpoint_path"] = str(path)
                     self._hot_restart_hook("core_changed")
         elif allow_core_restart:
             # 未启用重启、没有 hook 或本次签名已被判定为 blocked：

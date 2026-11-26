@@ -267,6 +267,10 @@ class ExtensionRuntime:
     def sync_plugins(self, force: bool = False) -> Dict[str, Any]:
         """把已加载插件同步到磁盘现状（新增 / 变化 / 删除）.
 
+        签名在尝试加载**之前**记录（``unload_owner`` 会清掉签名，因此放在
+        卸载之后）：同一份坏代码只尝试一次，文件改动或 ``force=True``（手动
+        ``/update workflow``）才会重试。
+
         Args:
             force: True 时无条件重载所有已发现插件（手动 ``/update workflow``）.
 
@@ -299,14 +303,16 @@ class ExtensionRuntime:
             path, is_package = discovered[name]
             loaded = name in self._loaded
             signature = self._plugin_signature(path, is_package)
-            if not force and loaded and self._signatures.get(name) == signature:
+            if not force and self._signatures.get(name) == signature:
                 continue
             if loaded and not self.unload_owner(name):
                 loaded = False
+            # 失败也记录签名：坏插件不会每轮重试（unload_owner 会清签名，
+            # 所以必须放在卸载之后）。
+            self._signatures[name] = signature
             try:
                 with _IMPORT_LOCK:
                     self._load_one(name, path, is_package)
-                self._signatures[name] = signature
             except (Exception, SystemExit) as exc:  # noqa: BLE001 - 插件失败不得阻断启动
                 report["failed"][name] = str(exc)
                 _logger.warning("%s %s 失败，已跳过: %s",
@@ -409,11 +415,56 @@ class ExtensionRuntime:
         """
         self._builtin_modules[name] = module
 
+    @staticmethod
+    def load_builtin_module(module_path: str, *, reexecute: bool = True) -> Any:
+        """Load *module_path*, optionally re-executing an imported module.
+
+        两点原因让它不等于 ``importlib.import_module``：
+
+        1. 已导入的模块由 ``sys.modules`` 直接返回，``import_module`` 永远
+           拿不到文件改动——内置扩展的代码热重载必须走 ``importlib.reload``。
+        2. SourceFileLoader 的 pyc 校验是秒级 mtime + size；同一秒内改写且
+           长度不变的文件会命中旧字节码，因此重载前先删掉该模块的 pyc
+           （与 :func:`_import_plugin` 同一理由）。
+
+        ``reexecute=False`` 用于进程内的**首次**安装：此时 ``sys.modules`` 里的
+        对象就是刚导入的代码，再执行一遍纯属浪费，还会丢掉测试对模块属性的替换。
+
+        Args:
+            module_path: 可导入的模块路径（如 ``zero_agent.extensions...``）.
+            reexecute: 已导入时是否重新执行模块代码.
+
+        Returns:
+            已执行的模块对象.
+
+        Raises:
+            ImportError: 模块无法导入或 ``reload`` 执行失败.
+        """
+        module = sys.modules.get(module_path)
+        if module is None:
+            return importlib.import_module(module_path)
+        if not reexecute:
+            return module
+        filename = getattr(module, "__file__", None)
+        if filename:
+            source = Path(filename)
+            for pyc in (source.parent / "__pycache__").glob(f"{source.stem}.*.py[co]"):
+                try:
+                    pyc.unlink()
+                except OSError:
+                    pass
+        return importlib.reload(module)
+
     def reload_builtin(self, name: str, module_path: str) -> bool:
         """Re-run one builtin extension's ``setup`` after unloading it.
 
         导入在卸载之前完成（导入失败不破坏现有注册）；``setup`` 失败时用旧
         模块重新安装一次，保证安全类扩展不会因为一次失败的重载而彻底消失。
+
+        模块走 :meth:`load_builtin_module`，因此内置扩展的源码改动会被重新
+        执行。已知边界：``importlib.reload`` 复用同一个模块对象，回滚分支里的
+        ``previous.setup(...)`` 执行的是重载后的代码；``setup`` 失败通常由它
+        读到的数据（如坏的 ``mcp.json``）导致，回滚效果与改动前一致。
 
         Args:
             name: 内置扩展归属名.
@@ -426,7 +477,7 @@ class ExtensionRuntime:
             Exception: 模块导入或 setup 失败（已撤销半成品注册并尽力回滚）.
         """
         with _IMPORT_LOCK:
-            module = importlib.import_module(module_path)
+            module = self.load_builtin_module(module_path)
             previous = self._builtin_modules.get(name)
             self.unload_owner(name)
             try:
@@ -727,6 +778,10 @@ class ExtensionRuntime:
         返回 ``ctx.confirm(...)`` 要求人类批准。**fail-closed**：门控自身异常
         时返回拒绝，而不是放行。
 
+        模式语义：``full`` 直接返回 ``allow``，**不构造** :class:`ToolCall`、
+        **不执行任何** ``on_tool_call`` 回调，因此插件的 ``block`` / veto /
+        门控异常同样不生效；``ask`` 才执行下一段描述的审批三态与 fail-closed。
+
         审批指纹绑定「工具名 + 参数」，并用后即焚：批准只对完全相同的一次
         调用有效。
 
@@ -740,6 +795,8 @@ class ExtensionRuntime:
         Returns:
             ToolCallVerdict.
         """
+        if self.permission_mode == "full":
+            return ToolCallVerdict("allow")
         if not self._tool_call:
             return ToolCallVerdict("allow")
 
@@ -791,11 +848,6 @@ class ExtensionRuntime:
                 )
 
         if approval_fingerprint_value:
-            # full 模式只是免去人类参与：门控给出的「需要审批」自动放行，
-            # 但确定性拒绝（危险命令、声明缺失、插件 veto、门控异常）仍然生效，
-            # 这些是 fail-closed 不变量，与是否有人审核无关。
-            if self.permission_mode == "full":
-                return ToolCallVerdict("allow")
             if self.consume_approval(
                 approval_fingerprint_value,
                 task_id=task_id,

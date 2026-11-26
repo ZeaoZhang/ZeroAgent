@@ -14,10 +14,9 @@
 
 审批只覆盖「工具名 + 参数完全一致」的那一次调用（见设计文档第八节）。
 
-``permissions.mode: full`` 只免去人类参与：本扩展给出的 ``confirm`` 由运行时
-自动放行，而 ``block``（危险 shell、声明缺失、目标不可判定）仍然拒绝——它们是
-fail-closed 不变量，与是否有人审核无关。开关在运行时（
-``ExtensionRuntime.evaluate_tool_call``），本扩展不感知模式。
+``permissions.mode: full`` 下运行时不会调用本扩展：``ExtensionRuntime.evaluate_tool_call``
+在 ``full`` 直接返回 ``allow``，因此本扩展给出的 ``confirm`` 与 ``block``
+（危险 shell、声明缺失、目标不可判定）只在 ``ask`` 下生效。本扩展不感知模式。
 
 路径判断使用 ``realpath + 平台大小写归一 + commonpath``（见 ``path_policy``），
 与文件工具实际写入的目标口径一致，避免大小写不敏感文件系统、相对路径和软链接

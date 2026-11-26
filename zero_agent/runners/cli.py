@@ -458,7 +458,14 @@ def _cli_hot_restart(agent: ZeroAgent, reason: str) -> None:
         os.environ.pop("ZA_RESUME_CHECKPOINT", None)
     os.environ["ZA_HOT_RESTART"] = "1"
     agent.close()
-    print("\n[hot-restart] 核心代码已变化，正在热重启并自动续跑…", file=sys.stderr)
+    if path:
+        print("\n[hot-restart] 核心代码已变化，正在热重启并自动续跑…", file=sys.stderr)
+    else:
+        print(
+            "\n[hot-restart] 核心代码已变化，正在热重启"
+            "（当前没有运行中任务，不恢复对话）…",
+            file=sys.stderr,
+        )
     try:
         hot_restart.restart_process()
     except Exception as exc:  # noqa: BLE001 - exec 失败必须给出可操作信息

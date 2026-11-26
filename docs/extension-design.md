@@ -200,12 +200,12 @@ def setup(ctx):
 | 字段 | 生效方式 |
 | --- | --- |
 | `sandbox` | 热重载时随 registry 重建立即生效 |
-| `enabled` / `home` | 需要重启进程 |
+| `enabled` / `home` | 下一轮 turn 边界自动应用（§15.1） |
 
 生命周期与卸载：`ZeroAgent.close()` 调用 `ExtensionRuntime.release()`，
 撤销插件工具、门控与提示词块，并执行卸载回调（关闭 MCP 子进程）；可重复调用。
 CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有 `atexit` 兜底。
-不提供插件的运行时热加载/热卸载（改插件代码仍需重启）。
+插件在每轮同步中热加载/热卸载（§15.1），改代码无需重启进程。
 
 ### 6.6 `ctx` 接口（对外唯一契约）
 
@@ -295,21 +295,22 @@ CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有
 | 模式 | 人类参与 | `confirm` / `ApprovalRequired` | `block` / 插件 veto / 门控异常 |
 | --- | --- | --- | --- |
 | `ask` | 有 | 暂停任务，等用户批准 | 拒绝 |
-| `full`（默认） | 无 | **直接放行** | **仍然拒绝** |
+| `full`（默认） | 无 | **不执行** | **不执行**（含门控异常） |
 
-`full` 的语义是「不需要人类参与审核」，不是「关掉门控」：危险 shell、
-`effects` 声明缺失、写入目标不可判定、插件主动 veto、门控抛异常这些
-确定性拒绝是 fail-closed 不变量，与有没有人点「同意」无关。开关在
-`ExtensionRuntime.evaluate_tool_call`，`permission_gate` 只负责给出
-`confirm` / `block`，不感知模式。
+`full` 就是关掉整层门控：`ExtensionRuntime.evaluate_tool_call` 在方法入口直接
+返回 `allow`，不构造 `ToolCall`、`on_tool_call` 回调**一次都不跑**。危险 shell、
+`effects` 声明缺失、写入目标不可判定、插件主动 veto、门控抛异常在 `full` 下都
+不再拒绝。`ask` 保留原有的审批三态与 fail-closed（门控异常即拒绝）。
+`permission_gate` 只负责给出 `confirm` / `block`，不感知模式。
 
 运行时切换：`/permissions [ask|full]`（只影响当前进程，不写回 YAML）。
 
 **威胁模型提醒**：`full` 下 agent 可以不经批准修改 `<home>/extensions/`，
 而插件热加载（第十五节）会在**同一个会话的下一轮**导入它。也就是说
-「模型写插件 → 进程内任意代码执行」这条链在默认配置下是通的。这是
-`full` 的已知代价；需要强制隔离时用 `extensions.sandbox`，或把
-`permissions.mode` 切回 `ask`。
+「模型写插件 → 进程内任意代码执行」这条链在默认配置下是通的，且
+`permission_gate` 完全不执行。这是 `full` 的已知代价；因此 `full` 下的
+唯一强隔离是 `extensions.sandbox`（`code_run` 的进程沙箱），需要人工把关时
+把 `permissions.mode` 切回 `ask`。
 
 ### 8.1 触发场景
 
@@ -385,8 +386,8 @@ CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有
 上一版曾承诺“写护栏不可绕过”，这不成立，予以撤回。实际分三层：
 
 默认 `permissions.mode: full`：下表中的「审批」只在 `ask` 模式成立。`full` 下
-策略层只剩确定性拒绝（危险 shell、声明缺失、目标不可判定），写入范围与受保护
-路径都不再暂停——要恢复人工把关就把模式切回 `ask`。
+策略层整体不生效（`evaluate_tool_call` 直接放行），写入范围与受保护路径都不再
+暂停或拒绝；要恢复人工把关就把模式切回 `ask`。
 
 | 层 | 手段 | 能挡住什么 | 挡不住什么 |
 | --- | --- | --- | --- |
@@ -448,7 +449,7 @@ extensions:
 
 生效时机：`sandbox` 随 registry 重建即时生效（配置热重载会触发）；
 `protected_writes` 在每次配置热重载后刷新到运行时（策略层按新列表判定）；
-`enabled` 与 `home` 变更需要重启进程。
+`enabled` 与 `home` 变更在下一轮 turn 边界的同步中自动应用（§15.1）。
 
 配置值解析：`enabled` 接受 `true/false` 与 `"true"/"false"`（字符串 `"false"`
 不会被当成真值）；`protected_writes` 传单个字符串时按一项处理；`sandbox` 缺省为 `auto`，
@@ -569,7 +570,7 @@ extensions:
 | V1 | 新增一个外部 skill 目录 | 无需改代码即出现在提示词索引中 |
 | V2 | 删除 `~/.zeroagent/` 全部内容 | 核心工具集与循环照常工作 |
 | V3 | 插件在 `setup` 中抛异常 | 仅该插件跳过，启动成功 |
-| V4 | 门控插件自身异常 | 对应工具调用被阻断（fail-closed） |
+| V4 | 门控插件自身异常 | `ask` 下该工具调用被阻断（fail-closed）；`full` 下门控不执行 |
 | V5 | 插件注册同名工具后卸载 | 内置工具恢复 |
 | V6 | `mcp.json` 中单个 server 配置错误 | 其余 server 正常，启动成功 |
 | V7 | 未配置 MCP | 不导入 MCP SDK |
@@ -589,7 +590,7 @@ extensions:
 | 门控误伤 | 门控过严会阻断正常任务 | 门控结果可观测（日志 + 事件），先宽后紧 |
 | 审批疲劳 | 过多确认会让用户点“同意”成习惯 | 按路径策略批量授权（`scope` + TTL + 任务绑定），只对高风险单次确认 |
 | MCP 工具过多 | `tools/list` 的结果全部注册进 registry，tools schema 会随 server 工具数线性膨胀（**当前未缓解**） | 仅配置实际需要的 server；后续可做按需展开 |
-| 写插件即执行 | `full`（默认）+ 每轮插件同步：模型写 `<home>/extensions/*.py` 后下一轮即被导入，等价进程内任意代码执行 | 需要人类把关时设 `permissions.mode: ask`；需要隔离时用 `extensions.sandbox`；不要把 `ZA_DESKTOP_BRIDGE_TOKEN` 之类凭据放进环境变量 |
+| 写插件即执行 | `full`（默认）+ 每轮插件同步：模型写 `<home>/extensions/*.py` 后下一轮即被导入，等价进程内任意代码执行（`full` 下 `permission_gate` 完全不执行，没有任何门控能拦） | 需要人类把关时设 `permissions.mode: ask`；需要隔离时用 `extensions.sandbox`；不要把 `ZA_DESKTOP_BRIDGE_TOKEN` 之类凭据放进环境变量 |
 | 核心代码热重启无监督 | `os.execv` 后新进程若在启动阶段崩溃，没有看护进程会重新拉起，检查点留在磁盘上等人处理 | 重启前的 `validate_core`（语法 + 子进程 import）先挡掉大部分；预算 10 分钟 5 次防重启循环 |
 | 每次 turn 的签名成本 | `core_signature` 全量 stat `zero_agent/**/*.py`（本地约 137 文件、~120 ms），桌面多会话叠加 | 命中变化才重启；后续可换目录级 watch |
 
@@ -617,6 +618,17 @@ extensions:
 
 只同步有变化的东西：签名未变时一次 turn 只做一轮 stat。`extensions.hot_reload: false` 时插件与 MCP 不参与，config 与核心代码仍生效。
 
+两条容易踩空的细节：
+
+- **内置扩展的代码改动也会被重新执行。** `mcp_client` / `skills_index` /
+  `browser_tools` 走 `ExtensionRuntime.load_builtin_module`：清掉该模块的 `pyc`
+  后 `importlib.reload`，否则 `import_module` 只是从 `sys.modules` 取回旧对象，
+  源码改动永远读不到。拓扑变化（`enabled/home/browser`）触发的重装同样走这条路，
+  所以“重装即重读代码”。
+- **失败的插件不会每轮重试。** 插件签名在尝试加载**之前**记录，`setup` 抛异常
+  也留档：同一份坏代码只尝试一次，文件改动或 `/update workflow`（`force=True`）
+  才重试。排错流程因此是「改文件 → 自动重试」或「改完 `/update workflow`」。
+
 ### 15.2 核心热重启
 
 1. `validate_core()`：先 `compile()` 每个核心模块（语法），再起一个短命子进程
@@ -624,9 +636,14 @@ extensions:
    失败则本签名记为 blocked，不再每轮重试，直到下一次文件变化。
 2. `save_checkpoint(status="running", restart=True)`：history、`pending_messages`、
    handler working / history_info、task contract、evidence ledger、等待状态、
-   模式上下文（task/func 的续跑参数）、重启时间戳。
+   模式上下文（task/func 的续跑参数）、重启时间戳。**只在有运行中任务
+   （`_is_running_task` 或 `_pending_task_state`）时写**：空闲时没有可续跑的
+   对话，写检查点只会让新进程恢复出一段陈旧历史。空闲重启的报告里因此没有
+   `checkpoint_path`；有任务但写不了检查点（如未配置 `sessions_dir`）才返回
+   `core_restart_error == "checkpoint_failed"` 并拒绝重启。
 3. CLI 直接 `os.execv`；桌面 bridge 把 exec 排到事件循环 0.3s 之后，先给前端
-   一条 `bridge-log`。
+   一条 `bridge-log`。没有检查点时（空闲重启）不设 `ZA_RESUME_CHECKPOINT`，
+   CLI 提示语也说清「当前没有运行中任务，不恢复对话」。
 4. 新进程启动时恢复：CLI 读 `ZA_RESUME_CHECKPOINT`，桌面扫描
    `sessions/checkpoints/*.json`（`source=desktop`）——`running` 的自动续跑，
    `waiting` 的恢复成待答问题。

@@ -1,4 +1,4 @@
-"""全权限模式：full 免去人类审批，但确定性拦截仍然生效."""
+"""全权限模式：full 直接放行全部工具调用，不执行任何 on_tool_call 门控."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from zero_agent.core.config import AgentConfig, normalize_permission_mode
 from zero_agent.extensions.builtin import permission_gate
 from zero_agent.extensions.context import ExtensionContext
-from zero_agent.extensions.events import ToolCall
 from zero_agent.extensions.runtime import ExtensionRuntime
 from zero_agent.tools.registry import ToolDefinition, ToolRegistry
 
@@ -67,16 +66,16 @@ def test_full_mode_skips_protected_write_approval(tmp_path: Path) -> None:
     assert verdict.is_allow
 
 
-def test_full_mode_keeps_dangerous_shell_block(tmp_path: Path) -> None:
+def test_full_mode_bypasses_dangerous_shell_block(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path, "full")
     permission_gate.setup(ExtensionContext("permission_gate", runtime))
 
     verdict = runtime.evaluate_tool_call("code_run", {"script": "rm -rf /"})
 
-    assert verdict.is_block
+    assert verdict.is_allow
 
 
-def test_full_mode_keeps_missing_declaration_block(tmp_path: Path) -> None:
+def test_full_mode_bypasses_missing_declaration(tmp_path: Path) -> None:
     registry = ToolRegistry()
     registry.register(ToolDefinition(
         name="opaque_run",
@@ -92,10 +91,10 @@ def test_full_mode_keeps_missing_declaration_block(tmp_path: Path) -> None:
     )
     permission_gate.setup(ExtensionContext("permission_gate", runtime))
 
-    assert runtime.evaluate_tool_call("opaque_run", {}).is_block
+    assert runtime.evaluate_tool_call("opaque_run", {}).is_allow
 
 
-def test_full_mode_keeps_third_party_veto(tmp_path: Path) -> None:
+def test_full_mode_bypasses_third_party_veto(tmp_path: Path) -> None:
     _write(
         tmp_path / "extensions" / "blocker.py",
         (
@@ -110,7 +109,7 @@ def test_full_mode_keeps_third_party_veto(tmp_path: Path) -> None:
 
     verdict = runtime.evaluate_tool_call("file_write", {"path": "x", "content": "y"})
 
-    assert verdict.is_block
+    assert verdict.is_allow
 
 
 def test_full_mode_downgrades_third_party_approval(tmp_path: Path) -> None:
@@ -173,16 +172,19 @@ def test_runtime_without_config_defaults_to_ask(tmp_path: Path) -> None:
     ).needs_approval
 
 
-def test_gate_callback_still_reports_approval_in_full_mode(tmp_path: Path) -> None:
-    # 模式开关只在运行时：门控本身仍然给出 confirm，便于审计与测试
+def test_full_mode_does_not_invoke_any_gate(tmp_path: Path) -> None:
+    seen: list[str] = []
     runtime = _runtime(tmp_path, "full")
-    permission_gate.setup(ExtensionContext("permission_gate", runtime))
-    _owner, guard = runtime._tool_call[-1]
-    call = ToolCall(
-        tool_name="file_write",
-        args={"path": str(tmp_path / "skills" / "a.md"), "content": "x"},
-        owner="",
-        definition=runtime.registry.get("file_write"),
-    )
 
-    assert guard(call) is not None
+    def boom(call):
+        seen.append(call.tool_name)
+        raise RuntimeError("gate must not run")
+
+    runtime.subscribe_tool_call("third_party", boom)  # 先注册，任何门控执行都会先炸
+    permission_gate.setup(ExtensionContext("permission_gate", runtime))
+
+    assert runtime.evaluate_tool_call("code_run", {"script": "rm -rf /"}).is_allow
+    assert runtime.evaluate_tool_call(
+        "file_write", {"path": "/etc/passwd", "content": "x"},
+    ).is_allow
+    assert seen == []

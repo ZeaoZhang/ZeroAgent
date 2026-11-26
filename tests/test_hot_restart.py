@@ -166,6 +166,37 @@ class TestPluginHotReload:
         _write(package / "helper.py", "unused = 2\n")
         assert runtime.sync_plugins()["reloaded"] == ["pkg"]
 
+    def test_broken_plugin_is_not_retried_until_changed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from types import SimpleNamespace
+
+        home = tmp_path / "home"
+        _write(
+            home / "extensions" / "broken.py",
+            "def setup(ctx):\n    raise RuntimeError('boom')\n",
+        )
+        runtime = ExtensionRuntime(
+            registry=ToolRegistry(), home=home,
+            config=SimpleNamespace(permission_mode="ask"),
+        )
+        attempts: list[str] = []
+        real_load_one = runtime._load_one
+
+        def counting(name, path, is_package):
+            attempts.append(name)
+            return real_load_one(name, path, is_package)
+
+        monkeypatch.setattr(runtime, "_load_one", counting)
+
+        assert runtime.sync_plugins()["failed"], "首次应尝试并失败"
+        assert runtime.sync_plugins()["failed"] == {}
+        assert len(attempts) == 1
+
+        _write(home / "extensions" / "broken.py", "def setup(ctx):\n    return None\n")
+        assert runtime.sync_plugins()["loaded"] == ["broken"]
+        assert len(attempts) == 2
+
 
 class TestMcpHotReload:
     def test_reconfigure_points_to_new_server(self, tmp_path: Path) -> None:
@@ -357,6 +388,47 @@ class TestReloadWorkflow:
         finally:
             agent.close()
 
+    def test_idle_core_change_restarts_without_checkpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        agent = TestCheckpoint()._agent(tmp_path)
+        try:
+            calls: list[str] = []
+            agent.set_hot_restart_hook(lambda reason: calls.append(reason))
+            agent._core_signature = "old"
+            monkeypatch.setattr(hot_restart, "core_signature", lambda root=None: "changed")
+            monkeypatch.setattr(hot_restart, "validate_core", lambda root=None: (True, ""))
+
+            report = agent.reload_workflow()
+
+            assert report["core_restart"] == "requested"
+            assert "checkpoint_path" not in report
+            assert calls == ["core_changed"]
+            assert checkpoint_store.list_checkpoints(agent.config.sessions_dir) == []
+        finally:
+            agent.close()
+
+    def test_running_task_without_sessions_dir_still_blocks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        agent = TestCheckpoint()._agent(tmp_path)
+        try:
+            agent._is_running_task = True
+            agent.config.sessions_dir = ""
+            calls: list[str] = []
+            agent.set_hot_restart_hook(lambda reason: calls.append(reason))
+            agent._core_signature = "old"
+            monkeypatch.setattr(hot_restart, "core_signature", lambda root=None: "changed")
+            monkeypatch.setattr(hot_restart, "validate_core", lambda root=None: (True, ""))
+
+            report = agent.reload_workflow()
+
+            assert report["core_restart"] == "blocked"
+            assert report["core_restart_error"] == "checkpoint_failed"
+            assert calls == []
+        finally:
+            agent.close()
+
     def test_run_entry_does_not_consume_core_change(
         self,
         tmp_path: Path,
@@ -502,6 +574,26 @@ class TestExtensionTopology:
             assert "skills_index" in agent.extensions.installed_builtins
         finally:
             agent.close()
+
+    def test_load_builtin_module_reexecutes_edited_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import sys
+
+        pkg = tmp_path / "zafake_reload"
+        pkg.mkdir()
+        _write(pkg / "__init__.py", "")
+        _write(pkg / "m.py", "VALUE = 1\n")
+        monkeypatch.syspath_prepend(str(tmp_path))
+        try:
+            assert ExtensionRuntime.load_builtin_module("zafake_reload.m").VALUE == 1
+            # 同长度改写：只有 pyc 失效才能读到 2
+            _write(pkg / "m.py", "VALUE = 2\n")
+            assert ExtensionRuntime.load_builtin_module("zafake_reload.m").VALUE == 2
+            assert sys.modules["zafake_reload.m"].VALUE == 2
+        finally:
+            sys.modules.pop("zafake_reload.m", None)
+            sys.modules.pop("zafake_reload", None)
 
 
 class TestDesktopResume:
@@ -815,12 +907,20 @@ class TestExtensionTopologyBrowser:
     ) -> None:
         from zero_agent.core.config import AgentConfig, LLMBackendConfig
         from zero_agent.core.agent import ZeroAgent
-        from zero_agent.extensions.builtin import browser_tools
 
-        calls: list[str] = []
-        monkeypatch.setattr(
-            browser_tools, "setup", lambda ctx: calls.append(ctx.name),
-        )
+        # 不能替换 browser_tools.setup 来观察：重装会重新执行模块代码，
+        # 属性替换会被 reload 抹掉。这里观察安装次数与 reinstall 标记。
+        installs: list[bool] = []
+        real_install = ZeroAgent._install_builtin_extension
+
+        def spy(self, runtime, name, module_path, is_safety, reinstall=False):
+            if name == "browser_tools":
+                installs.append(reinstall)
+            return real_install(
+                self, runtime, name, module_path, is_safety, reinstall=reinstall,
+            )
+
+        monkeypatch.setattr(ZeroAgent, "_install_builtin_extension", spy)
         config = AgentConfig(
             llm_backends={
                 "d": LLMBackendConfig(
@@ -838,14 +938,18 @@ class TestExtensionTopologyBrowser:
         agent = ZeroAgent(config)
         try:
             assert "browser_tools" not in agent.extensions.installed_builtins
+            assert installs == []
 
             agent.config.browser_tools = "auto"
             assert agent.reload_workflow()["topology"] is True
-            assert calls == ["browser_tools"]
+            assert "browser_tools" in agent.extensions.installed_builtins
+            # 首次安装不重执行模块：sys.modules 里就是当前代码
+            assert installs == [False]
 
             agent.config.browser_tools = "on"
             assert agent.reload_workflow()["topology"] is True
-            assert calls == ["browser_tools", "browser_tools"]
+            # 重装必须重执行模块，否则内置扩展的源码改动读不到
+            assert installs == [False, True]
         finally:
             agent.close()
 

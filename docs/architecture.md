@@ -101,10 +101,11 @@ LLM 返回 tool_calls → ToolRegistry.dispatch()
 加载之后并不固化：`AgentLoop` 在每个 turn 边界调用 `ZeroAgent.reload_workflow()`，
 按内容签名同步 config / 插件（含目录插件包内任意 `*.py`）/ `mcp.json` /
 `extensions.{enabled,home,browser}`。核心代码（`zero_agent/**/*.py`）变化时先做
-语法与子进程 import 校验，再写检查点并 `os.execv` 热重启，新进程从检查点
-恢复 history、working memory、task contract 与证据账本后续跑（预算 10 分钟 5 次）。
-权限门控的 `permissions.mode` 只影响「是否需要人类审批」：`full`（默认）自动
-放行 `confirm`，确定性 `block` 仍然生效。
+语法与子进程 import 校验，再 `os.execv` 热重启；有运行中任务时先写检查点，新进程
+从检查点恢复 history、working memory、task contract 与证据账本后续跑（预算 10 分钟
+5 次），空闲时直接重启、不恢复对话。
+权限门控的 `permissions.mode` 决定是否执行这一层：`full`（默认）不执行任何
+`on_tool_call` 门控，`ask` 才启用审批与拦截。强制隔离只有 `extensions.sandbox`。
 
 三类扩展点（语义不同，不可混用）：
 

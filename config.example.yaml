@@ -25,10 +25,10 @@ log_dir: null
 
 # Tool-gating permission mode.
 # ask  — high-risk calls and protected writes pause for human approval.
-# full — auto-approve everything that would otherwise wait for a human
-#        (permission_gate confirm / plugin confirm). Deterministic refusals
-#        (dangerous shell patterns, undeclared effects, plugin vetoes, gate
-#        errors) still block; they are fail-closed invariants, not approvals.
+# full — bypasses every tool-call gate: permission_gate confirm/block, the
+#        dangerous-shell and effects-declaration checks, plugin vetoes and gate
+#        errors. No on_tool_call callback runs at all; only
+#        `extensions.sandbox` isolates code execution.
 permissions:
   mode: full          # ask | full
 
