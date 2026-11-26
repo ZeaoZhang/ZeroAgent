@@ -33,6 +33,21 @@ def _home(config: Any) -> str:
     return os.path.join(os.path.expanduser("~"), ".zeroagent")
 
 
+def _display(path: str) -> str:
+    """Show a path relative to ``~`` when it lives under the current home.
+
+    提示词里不出现任何机器特定的绝对家目录：同一条提示词在换用户、换机器后
+    仍然是可读且可用的（工具侧会把 ``~`` 展开回绝对路径）。
+    """
+    home = os.path.expanduser("~")
+    if path == home:
+        return "~"
+    prefix = home + os.sep
+    if path.startswith(prefix):
+        return "~" + path[len(home):]
+    return path
+
+
 def _mode_note_zh(config: Any) -> str:
     if str(getattr(config, "permission_mode", "full")) == "full":
         return "门控层不执行：写入与执行直接生效，不需要等待审批"
@@ -56,12 +71,12 @@ def build(config: Any, lang: str = "zh") -> str:
         提示词块文本，包含真实路径与当前模式.
     """
     home = _home(config)
-    skills = os.path.join(home, "skills")
-    plugins = os.path.join(home, "extensions")
-    mcp_json = os.path.join(home, "mcp.json")
+    skills = _display(os.path.join(home, "skills"))
+    plugins = _display(os.path.join(home, "extensions"))
+    mcp_json = _display(os.path.join(home, "mcp.json"))
     memory = _resolve(getattr(config, "memory_dir", "")) or "./memory"
-    sops = os.path.join(memory, "sops")
-    core_root = str(Path(hot_restart.__file__).resolve().parents[1])
+    sops = _display(os.path.join(memory, "sops"))
+    core_root = _display(str(Path(hot_restart.__file__).resolve().parents[1]))
     sandbox = str(getattr(config, "sandbox_mode", "auto") or "auto")
     mode = str(getattr(config, "permission_mode", "full") or "full")
     enabled = bool(getattr(config, "extensions_enabled", True))

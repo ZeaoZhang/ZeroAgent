@@ -631,6 +631,13 @@ skills / SOP / plugins / `mcp.json` / 核心代码的**真实路径**、生效�
 当前 `permissions.mode` 与 `sandbox` 语义、以及常开的底线（系统目录、凭据、用户数据、
 `.git` 不可写）。模型不需要猜路径，也不会在改完之后才发现被拦。
 
+路径全部在运行时解析，仓库里不含任何机器特定的绝对路径：`extensions.home` 缺省为
+`~/.zeroagent`、config 里的相对路径基于配置文件目录、核心代码目录取自包自身位置。
+提示词里位于家目录下的路径渲染成 `~/...`（工具侧 `resolve_file_path` 会展开 `~`），
+因此同一份代码换用户、换机器都能直接跑；`tests/test_portability.py` 会扫描
+`zero_agent/`、`config.example.yaml`、`docs/` 与 `tests/`，禁止 `/Users/<name>`、
+`/home/<name>` 这类字面量回归。
+
 ### 15.1 每轮同步（`reload_workflow`）
 
 `AgentLoop` 在每次 turn 边界调用 `ZeroAgent.reload_workflow()`：

@@ -21,10 +21,12 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any, Iterable, List
 
 #: 系统与运行时目录：写入（含删除、替换）会搞崩或损坏 OS / 工具链.
-SYSTEM_ROOTS: tuple[str, ...] = (
+#: POSIX 清单在 macOS / Linux 上都成立；不存在的路径只是永远不命中，不影响可移植性.
+_POSIX_SYSTEM_ROOTS: tuple[str, ...] = (
     "/System",
     "/Library",
     "/Applications",
@@ -41,6 +43,23 @@ SYSTEM_ROOTS: tuple[str, ...] = (
     "/opt/homebrew",
     "/usr/local",
 )
+
+
+def _system_roots() -> tuple[str, ...]:
+    """Return the platform's system roots (no machine-specific literals)."""
+
+    roots: List[str] = list(_POSIX_SYSTEM_ROOTS)
+    if os.name == "nt":
+        for variable in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
+            value = os.environ.get(variable)
+            if value:
+                roots.append(value)
+    elif sys.platform.startswith("linux"):
+        roots.extend(("/proc", "/sys"))
+    return tuple(dict.fromkeys(roots))
+
+
+SYSTEM_ROOTS = _system_roots()
 
 #: 凭据与安全配置：篡改等于交出账号或留下后门.
 SECRET_ROOTS: tuple[str, ...] = (

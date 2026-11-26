@@ -367,7 +367,7 @@ def resolve_file_path(path: str, config: AgentConfig) -> str:
     ``utils.files.resolve_workspace_path``，两者语义不同，不要混用。
 
     Args:
-        path: 原始路径.
+        path: 原始路径（支持 ``~`` 展开）.
         config: Agent 配置.
 
     Returns:
@@ -375,6 +375,9 @@ def resolve_file_path(path: str, config: AgentConfig) -> str:
     """
     if not path:
         return ""
+    # ``~`` 在 POSIX 下不是绝对路径：不先展开会被当成 workspace 下的相对路径，
+    # 变成 ``<workspace>/~/...``。模型常按提示词里的 ``~/...`` 写，必须展开。
+    path = os.path.expanduser(path)
     if os.path.isabs(path):
         return path
     normalized = os.path.normpath(path)
