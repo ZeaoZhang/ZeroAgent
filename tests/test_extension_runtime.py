@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -367,10 +368,21 @@ class TestBuiltins:
         assert verdict.fingerprint
 
     def test_permission_gate_allows_workspace_write(self, tmp_path: Path) -> None:
-        runtime = _runtime(tmp_path)
+        workspace = tmp_path / "ws"
+        runtime = ExtensionRuntime(
+            registry=_make_registry(),
+            home=tmp_path,
+            config=SimpleNamespace(workspace_dir=str(workspace)),
+        )
         permission_gate.setup(ExtensionContext("permission_gate", runtime))
 
-        assert _gate_reason(runtime, "file_write", {"path": "/tmp/notes.txt"}) is None
+        assert _gate_reason(
+            runtime, "file_write", {"path": str(workspace / "notes.txt")},
+        ) is None
+        # A path outside every known root still needs an explicit human decision.
+        assert _gate_reason(
+            runtime, "file_write", {"path": str(tmp_path / "outside.txt")},
+        ) is not None
 
 
 class TestRelease:

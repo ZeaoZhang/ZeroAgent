@@ -180,6 +180,9 @@ class TestToolRegistry:
             "update_working_checkpoint",
             "ask_user",
             "start_long_term_update",
+            "enter_plan_mode",
+            "add_done_hook",
+            "memory_profile",
         }
         assert "search_web" not in names
         assert "vision" not in names

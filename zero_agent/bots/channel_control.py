@@ -38,13 +38,28 @@ class ChannelDefinition:
 
 
 _CHANNELS = (
-    ChannelDefinition("wechat", "微信", "wechat", "wechat_app.py", ()),
+    ChannelDefinition(
+        "wechat",
+        "微信",
+        "wechat",
+        "wechat_app.py",
+        ("wechat_allowed_users",),
+        (
+            ChannelField(
+                "wechat_allowed_users",
+                "Allowed Users",
+                "list",
+                True,
+                "WECHAT_ALLOWED_USERS",
+            ),
+        ),
+    ),
     ChannelDefinition(
         "wecom",
         "企业微信",
         "wecom",
         "wecom_app.py",
-        ("wecom_bot_id", "wecom_secret"),
+        ("wecom_bot_id", "wecom_secret", "wecom_allowed_users"),
         (
             ChannelField("wecom_bot_id", "Bot ID", "text", True, "WECOM_BOT_ID"),
             ChannelField("wecom_secret", "Secret", "secret", True, "WECOM_SECRET"),
@@ -58,7 +73,8 @@ _CHANNELS = (
                 "wecom_allowed_users",
                 "Allowed Users",
                 "list",
-                env_name="WECOM_ALLOWED_USERS",
+                True,
+                "WECOM_ALLOWED_USERS",
             ),
         ),
     ),
@@ -67,7 +83,7 @@ _CHANNELS = (
         "钉钉",
         "dingtalk",
         "dingtalk_app.py",
-        ("dingtalk_client_id", "dingtalk_client_secret"),
+        ("dingtalk_client_id", "dingtalk_client_secret", "dingtalk_allowed_users"),
         (
             ChannelField(
                 "dingtalk_client_id",
@@ -87,7 +103,8 @@ _CHANNELS = (
                 "dingtalk_allowed_users",
                 "Allowed Users",
                 "list",
-                env_name="DINGTALK_ALLOWED_USERS",
+                True,
+                "DINGTALK_ALLOWED_USERS",
             ),
         ),
     ),
@@ -96,7 +113,7 @@ _CHANNELS = (
         "QQ",
         "qq",
         "qq_app.py",
-        ("qq_app_id", "qq_app_secret"),
+        ("qq_app_id", "qq_app_secret", "qq_allowed_users"),
         (
             ChannelField("qq_app_id", "App ID", "text", True, "QQ_APP_ID"),
             ChannelField("qq_app_secret", "App Secret", "secret", True, "QQ_APP_SECRET"),
@@ -104,7 +121,8 @@ _CHANNELS = (
                 "qq_allowed_users",
                 "Allowed Users",
                 "list",
-                env_name="QQ_ALLOWED_USERS",
+                True,
+                "QQ_ALLOWED_USERS",
             ),
         ),
     ),
@@ -113,7 +131,7 @@ _CHANNELS = (
         "飞书",
         "feishu",
         "feishu_app.py",
-        ("fs_app_id", "fs_app_secret"),
+        ("fs_app_id", "fs_app_secret", "fs_allowed_users"),
         (
             ChannelField("fs_app_id", "App ID", "text", True, "FS_APP_ID"),
             ChannelField("fs_app_secret", "App Secret", "secret", True, "FS_APP_SECRET"),
@@ -121,7 +139,8 @@ _CHANNELS = (
                 "fs_allowed_users",
                 "Allowed Users",
                 "list",
-                env_name="FS_ALLOWED_USERS",
+                True,
+                "FS_ALLOWED_USERS",
             ),
         ),
     ),
@@ -147,7 +166,7 @@ _CHANNELS = (
         "Discord",
         "discord",
         "discord_app.py",
-        ("discord_bot_token",),
+        ("discord_bot_token", "discord_allowed_users"),
         (
             ChannelField(
                 "discord_bot_token",
@@ -160,7 +179,8 @@ _CHANNELS = (
                 "discord_allowed_users",
                 "Allowed Users",
                 "list",
-                env_name="DISCORD_ALLOWED_USERS",
+                True,
+                "DISCORD_ALLOWED_USERS",
             ),
         ),
     ),
@@ -296,7 +316,13 @@ def missing_configuration(
 ) -> tuple[str, ...]:
     """Return names of required values that are not configured."""
     if definition.id == "wechat":
-        return () if _wechat_token_present() else ("wechat_bot_token",)
+        if not _wechat_token_present():
+            return ("wechat_bot_token",)
+        if keys is None:
+            from zero_agent.bots.common import load_keys
+
+            keys = load_keys()
+        return () if keys.get("wechat_allowed_users") else ("wechat_allowed_users",)
     if keys is None:
         from zero_agent.bots.common import load_keys
 

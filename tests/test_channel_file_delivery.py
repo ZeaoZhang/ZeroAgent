@@ -286,6 +286,25 @@ def test_feishu_uploads_generated_images_and_documents(tmp_path, monkeypatch):
     assert sorted(item[1]["msg_type"] for item in sent) == ["file", "image"]
 
 
+def test_feishu_empty_allow_list_is_not_public(monkeypatch):
+    module = _channel_module("feishu_app", "lark_oapi")
+
+    for configured, allowed, public in (
+        ([], set(), False),
+        (["u1"], {"u1"}, False),
+        (["*"], {"*"}, True),
+    ):
+        monkeypatch.setattr(
+            module, "load_keys",
+            lambda configured=configured: {"fs_allowed_users": configured},
+        )
+        monkeypatch.setattr(module, "bot_config_source", lambda: "test")
+        _app_id, _secret, got_allowed, got_public, _source = module._feishu_config()
+
+        assert got_allowed == allowed
+        assert got_public is public
+
+
 @pytest.mark.asyncio
 async def test_discord_sends_generated_file_as_attachment(tmp_path):
     module = _channel_module("discord_app", "discord")

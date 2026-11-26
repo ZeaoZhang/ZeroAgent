@@ -150,11 +150,25 @@ import tempfile, shutil, zipfile, glob
 from collections import defaultdict
 
 def _existing_sessions(l4_dir):
-    """Read session names already in all_histories.txt."""
+    """Read session names already archived (all_histories.txt + monthly zips)."""
+    names = set()
     hist_path = os.path.join(l4_dir, 'all_histories.txt')
-    if not os.path.exists(hist_path): return set()
-    with open(hist_path, 'r', encoding='utf-8') as f:
-        return {l.strip().replace('SESSION: ', '') for l in f if l.startswith('SESSION: ')}
+    if os.path.exists(hist_path):
+        with open(hist_path, 'r', encoding='utf-8') as f:
+            names.update(l.strip().replace('SESSION: ', '')
+                         for l in f if l.startswith('SESSION: '))
+    # A session may exist only inside a monthly zip (for example when
+    # all_histories.txt was lost). Trusting only the text index made the
+    # archiver rewrite the same member on every pass.
+    for zpath in glob.glob(os.path.join(l4_dir, '*.zip')):
+        try:
+            with zipfile.ZipFile(zpath) as zf:
+                names.update(os.path.splitext(name)[0]
+                             for name in zf.namelist()
+                             if name.endswith('.txt'))
+        except (OSError, zipfile.BadZipFile) as exc:
+            print(f"  SKIP unreadable archive {zpath}: {exc}")
+    return names
 
 def batch_process(src, l4_dir=None, dry_run=True):
     """Batch compress + extract history + archive. dry_run=True is safe default."""
@@ -170,6 +184,12 @@ def batch_process(src, l4_dir=None, dry_run=True):
 
     tmp_dir = tempfile.mkdtemp(prefix='cs_batch_')
     results, skipped, errors = [], [], []
+    # Why each raw file was not archived; Phase 4 prints these verbatim.
+    reasons: dict[str, str] = {}
+    # Every raw file compresses into its own directory: two logs covering the
+    # same minute range produce the same session name and would otherwise
+    # overwrite each other before the duplicate is detected.
+    seen_sessions = set(existing)
 
     import time
     cutoff = time.time() - 7200  # skip files modified within 2h
@@ -178,17 +198,20 @@ def batch_process(src, l4_dir=None, dry_run=True):
     for fp in raw_files:
         fname = os.path.basename(fp)
         if os.path.getmtime(fp) > cutoff:
-            skipped.append((fname, 'recent(<2h)')); continue
+            skipped.append((fname, 'recent(<2h)')); reasons[fname] = 'recent(<2h)'; continue
         try:
-            dst, info = compress_session(fp, tmp_dir)
+            per_file_dir = os.path.join(tmp_dir, f"f{len(results) + len(skipped) + len(errors):05d}")
+            os.makedirs(per_file_dir, exist_ok=True)
+            dst, info = compress_session(fp, per_file_dir)
             if dst is None:
-                skipped.append((fname, info)); continue
+                skipped.append((fname, info)); reasons[fname] = str(info); continue
             sn = os.path.splitext(os.path.basename(dst))[0]
-            if sn in existing:
-                skipped.append((fname, f'dup:{sn}')); os.remove(dst); continue
+            if sn in seen_sessions:
+                skipped.append((fname, f'dup:{sn}')); reasons[fname] = f'dup:{sn}'; os.remove(dst); continue
+            seen_sessions.add(sn)
             results.append((sn, dst, extract_history(dst), info, fp))
         except Exception as e:
-            errors.append((fname, str(e)))
+            errors.append((fname, str(e))); reasons[fname] = f'error: {e}'
     results.sort(key=lambda x: x[0])
 
     print(f"\nP1: {len(results)} new, {len(skipped)} skip, {len(errors)} err")
@@ -211,33 +234,48 @@ def batch_process(src, l4_dir=None, dry_run=True):
 
     # Phase 3: Archive to monthly zips
     by_month = defaultdict(list)
-    for sn, cpath, _, info, _ in results:
+    for sn, cpath, _, info, fp in results:
         year = info.get('year', '2026') if isinstance(info, dict) else '2026'
-        by_month[f"{year}-{sn[:2]}"].append((sn, cpath))
+        by_month[f"{year}-{sn[:2]}"].append((sn, cpath, fp))
+    archived_raw: set = set()
     for mk, items in sorted(by_month.items()):
         zpath = os.path.join(l4_dir, f"{mk}.zip")
         mode = 'a' if os.path.exists(zpath) else 'w'
+        written = 0
         with zipfile.ZipFile(zpath, mode, zipfile.ZIP_DEFLATED) as zf:
             names = set(zf.namelist()) if mode == 'a' else set()
-            for sn, cp in items:
-                if f"{sn}.txt" not in names: zf.write(cp, f"{sn}.txt")
-        print(f"  {mk}.zip: +{len(items)}")
+            for sn, cp, fp in items:
+                if f"{sn}.txt" in names: continue
+                zf.write(cp, f"{sn}.txt")
+                names.add(f"{sn}.txt")
+                # Only a member actually written (and committed on close) may
+                # authorise deleting the raw log.
+                archived_raw.add(fp)
+                written += 1
+        print(f"  {mk}.zip: +{written}")
 
-    # Phase 4: Delete raw files
-    to_del = [rp for *_, rp in results]
-    for fname, reason in skipped:
-        if 'recent' in reason: continue  # active session still being written
-        m = [f for f in raw_files if os.path.basename(f) == fname]
-        if m: to_del.append(m[0])
+    # Phase 4: Delete only raw files that really reached an archive.
     deleted = 0
-    for rp in to_del:
-        try: os.remove(rp); deleted += 1
-        except Exception: pass
-    print(f"Deleted {deleted}/{len(to_del)} raw files")
+    for rp in archived_raw:
+        try:
+            os.remove(rp)
+            deleted += 1
+        except OSError as exc:
+            print(f"  DELETE FAILED {rp}: {exc}")
+            reasons[os.path.basename(rp)] = f'delete failed: {exc}'
+    retained = sorted(
+        os.path.basename(fp) for fp in raw_files if fp not in archived_raw
+    )
+    print(f"Deleted {deleted}/{len(archived_raw)} archived raw files")
+    if retained:
+        print(f"Retained {len(retained)} raw files:")
+        for fname in retained:
+            print(f"  RETAIN {fname}: {reasons.get(fname, 'not archived')}")
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
     report = {'processed': len(results), 'skipped': len(skipped),
-              'errors': len(errors), 'new_sessions': len(results), 'deleted_raw': deleted}
+              'errors': len(errors), 'new_sessions': len(results),
+              'deleted_raw': deleted, 'retained_raw': retained}
     print(f"\nDone: {report}")
     return report
 

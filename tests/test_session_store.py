@@ -372,3 +372,36 @@ def test_incomplete_supported_schema_is_rejected_without_repair(tmp_path):
             )
         }
     assert tables == {"schema_meta"}
+
+
+def test_app_state_roundtrip_and_delete(store):
+    assert store.get_app_state("pending_turns:sess-a") is None
+    assert store.get_app_state("pending_turns:sess-a", default="fallback") == "fallback"
+
+    store.set_app_state("pending_turns:sess-a", json.dumps([{"prompt": "hi"}]))
+    store.set_app_state("pending_turns:sess-a", "[]")
+    store.set_app_state("active_turn:sess-a", "1")
+
+    assert store.get_app_state("pending_turns:sess-a") == "[]"
+    assert store.get_app_state("active_turn:sess-a") == "1"
+
+    store.delete_app_state("pending_turns:sess-a")
+    store.delete_app_state("active_turn:sess-a")
+
+    assert store.get_app_state("pending_turns:sess-a") is None
+    assert store.get_app_state("active_turn:sess-a") is None
+
+
+def test_app_state_survives_reopen(tmp_path):
+    path = tmp_path / "sessions.sqlite3"
+    first = SessionStore(path)
+    first.initialize()
+    first.set_app_state("active_turn:sess-b", "1")
+    first.close()
+
+    reopened = SessionStore(path)
+    reopened.initialize()
+    try:
+        assert reopened.get_app_state("active_turn:sess-b") == "1"
+    finally:
+        reopened.close()

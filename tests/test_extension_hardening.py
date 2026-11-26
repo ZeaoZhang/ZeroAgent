@@ -538,3 +538,76 @@ class TestLinuxSandboxBindsTempDir:
         assert "--bind" in argv
         assert argv.count("--bind") >= 1
         assert str(tmp_path.resolve()) in argv
+
+
+class TestWriteScopeConfinement:
+    def test_symlinked_workspace_write_is_allowed(self, tmp_path: Path) -> None:
+        """A workspace reached through a symlink still counts as inside."""
+        real = tmp_path / "ws-real"
+        real.mkdir()
+        link = tmp_path / "ws"
+        link.symlink_to(real, target_is_directory=True)
+        config = AgentConfig(
+            workspace_dir=str(link),
+            memory_dir=str(tmp_path / "mem"),
+        )
+        registry = ToolRegistry.with_builtins(config)
+        runtime = ExtensionRuntime(
+            registry=registry, home=tmp_path / "home", config=config,
+        )
+        permission_gate.setup(ExtensionContext("permission_gate", runtime))
+
+        verdict = runtime.evaluate_tool_call(
+            "file_write", {"path": str(link / "notes.txt"), "content": "x"},
+        )
+
+        assert not verdict.needs_approval
+        assert not verdict.is_block
+
+    def test_write_outside_workspace_requires_approval(self, tmp_path: Path) -> None:
+        runtime = _builtin_runtime(tmp_path)
+        outside = tmp_path / "outside.txt"
+
+        verdict = runtime.evaluate_tool_call(
+            "file_write", {"path": str(outside), "content": "x"},
+        )
+
+        assert verdict.needs_approval
+        assert "workspace 之外" in verdict.reason
+        assert str(outside) in verdict.reason
+
+    def test_write_inside_workspace_is_allowed(self, tmp_path: Path) -> None:
+        runtime = _builtin_runtime(tmp_path)
+        inside = Path(runtime.config.workspace_dir) / "notes.txt"
+
+        verdict = runtime.evaluate_tool_call(
+            "file_write", {"path": str(inside), "content": "x"},
+        )
+
+        assert not verdict.needs_approval
+        assert not verdict.is_block
+
+    def test_write_inside_memory_dir_is_allowed(self, tmp_path: Path) -> None:
+        runtime = _builtin_runtime(tmp_path)
+        memory_file = Path(runtime.config.memory_dir) / "L1_insight.md"
+
+        verdict = runtime.evaluate_tool_call(
+            "file_write", {"path": str(memory_file), "content": "x"},
+        )
+
+        assert not verdict.needs_approval
+        assert not verdict.is_block
+
+    def test_extra_write_root_is_allowed(self, tmp_path: Path) -> None:
+        """reflect 模块声明的报告目录不需要人工审批."""
+        runtime = _builtin_runtime(tmp_path)
+        extra = tmp_path / "reports"
+        extra.mkdir()
+        runtime.config.extra_write_roots = [str(extra)]
+
+        verdict = runtime.evaluate_tool_call(
+            "file_write", {"path": str(extra / "r.md"), "content": "x"},
+        )
+
+        assert not verdict.needs_approval
+        assert not verdict.is_block

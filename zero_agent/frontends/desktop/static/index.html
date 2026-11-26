@@ -74,6 +74,12 @@
               <circle cx="10" cy="18" r="2" fill="var(--bg)" />
             </svg>
           </button>
+          <button id="memory-settings-btn" class="icon-btn" title="用户画像" aria-label="编辑用户画像" aria-expanded="false">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/>
+              <path d="M8 7h8M8 11h8M8 15h5"/>
+            </svg>
+          </button>
           <button id="toggle-right-drawer-alt" class="icon-btn" title="Toggle agents" aria-label="Toggle agents sidebar">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="3"/>
@@ -154,6 +160,28 @@
         </div>
         <div class="modal-body">
           <div id="model-list" class="model-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- User Profile Modal -->
+    <div id="memory-settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="memory-settings-title">
+      <div class="modal-backdrop" data-close-memory-settings></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <div>
+            <h3 id="memory-settings-title">用户画像</h3>
+            <p class="modal-subtitle">这里的内容会注入每个任务的系统提示词。请只保存长期有效的偏好、关系和承诺。</p>
+          </div>
+          <button class="icon-btn" id="close-memory-settings" title="关闭" aria-label="关闭用户画像">✕</button>
+        </div>
+        <div class="modal-body">
+          <div id="memory-settings-error" class="msg-error hidden" role="alert" aria-live="polite"></div>
+          <textarea id="memory-profile-input" class="memory-profile-input" rows="14" spellcheck="false"></textarea>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn ghost" id="memory-settings-cancel">取消</button>
+          <button type="button" class="btn primary" id="memory-settings-save">保存</button>
         </div>
       </div>
     </div>

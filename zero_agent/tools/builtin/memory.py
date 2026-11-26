@@ -106,6 +106,35 @@ def register_memory_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         effects=("memory",),
     ))
 
+    registry.register(ToolDefinition(
+        name="memory_profile",
+        description=_t(
+            "管理用户画像：记录/删除用户明确陈述的长期偏好、关系或承诺。"
+            "不要写入一次性状态、猜测或密钥。",
+            "Manage the user profile: add/remove durable preferences, relationships, "
+            "or commitments the user explicitly stated.",
+            lang,
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["add", "remove", "list"]},
+                "section": {
+                    "type": "string",
+                    "enum": ["Preferences", "Relationships", "Commitments"],
+                    "default": "Preferences",
+                },
+                "text": {"type": "string"},
+            },
+            "required": ["action"],
+        },
+        handler=_make_memory_profile_handler(config),
+        evidence_kind="memory",
+        category="memory",
+        promotes_task_state=False,
+        effects=("memory",),
+    ))
+
 
 def _make_update_working_checkpoint_handler(config: AgentConfig):
     """创建 update_working_checkpoint 的 ToolHandler 适配器."""
@@ -172,4 +201,123 @@ def _make_start_long_term_update_handler(config: AgentConfig):
         prompt += memory_ctx
 
         return StepOutcome(result, next_prompt=prompt, action=StepAction.CONTINUE)
+    return _handler
+
+
+_PROFILE_SECTIONS = ("Preferences", "Relationships", "Commitments")
+
+
+def _profile_manager(config: AgentConfig, handler: Any) -> MemoryManager:
+    """Reuse the live agent's memory manager so paths and language match."""
+    manager = getattr(getattr(handler, "parent", None), "memory", None)
+    if isinstance(manager, MemoryManager):
+        manager.init_memory()
+        return manager
+    fresh = MemoryManager(
+        memory_dir=config.memory_dir,
+        workspace_dir=config.workspace_dir,
+        language=config.resolved_language,
+    )
+    fresh.init_memory()
+    return fresh
+
+
+def _profile_line(text: str) -> str:
+    return f"- {text}"
+
+
+def _insert_profile_line(profile: str, section: str, text: str) -> str:
+    """Insert one bullet under ``## <section>`` without duplicating it there.
+
+    The same line may legitimately appear under different sections (a
+    preference and a commitment can share wording), so dedupe is scoped to the
+    target block instead of the whole file.
+    """
+    line = _profile_line(text)
+    lines = profile.splitlines()
+    heading = f"## {section}"
+    try:
+        start = lines.index(heading)
+    except ValueError:
+        suffix = "" if profile.endswith("\n") or not profile else "\n"
+        return f"{profile}{suffix}\n{heading}\n\n{line}\n"
+    insert_at = len(lines)
+    for index in range(start + 1, len(lines)):
+        if lines[index].startswith("## "):
+            insert_at = index
+            break
+    block = lines[start + 1:insert_at]
+    if any(raw.strip() == line for raw in block):
+        return profile
+    while block and not block[-1].strip():
+        block.pop()
+    if not block:
+        block = [""]
+    block.append(line)
+    rebuilt = lines[:start + 1] + block + [""] + lines[insert_at:]
+    text_out = "\n".join(rebuilt).rstrip("\n") + "\n"
+    return text_out
+
+
+def _remove_profile_line(profile: str, section: str, text: str) -> str | None:
+    """Remove the first matching bullet under ``## <section>``.
+
+    Returns:
+        Updated profile, or None when the section or the line is absent.
+    """
+    line = _profile_line(text)
+    lines = profile.splitlines()
+    heading = f"## {section}"
+    try:
+        start = lines.index(heading)
+    except ValueError:
+        return None
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if lines[index].startswith("## "):
+            end = index
+            break
+    for index in range(start + 1, end):
+        if lines[index].strip() == line:
+            del lines[index]
+            return "\n".join(lines).rstrip("\n") + "\n"
+    return None
+
+
+def _make_memory_profile_handler(config: AgentConfig):
+    """创建 memory_profile 的 ToolHandler 适配器."""
+    def _handler(
+        args: Dict[str, Any],
+        _response: Any,
+        handler: Any,
+    ) -> Generator[str, None, dict]:
+        action = str(args.get("action") or "").strip().lower()
+        text = str(args.get("text") or "").strip()
+        section = str(args.get("section") or "Preferences").strip()
+        try:
+            manager = _profile_manager(config, handler)
+            if action == "list":
+                yield "[Info] Read user profile.\n"
+                return {"status": "success", "profile": manager.read_user_profile()}
+            if action not in {"add", "remove"}:
+                return {"status": "error", "msg": f"unknown action: {action}"}
+            if section not in _PROFILE_SECTIONS:
+                return {"status": "error", "msg": f"unknown section: {section}"}
+            if not text:
+                return {"status": "error", "msg": "text is required"}
+            profile = manager.read_user_profile()
+            if action == "add":
+                updated = _insert_profile_line(profile, section, text)
+                manager.write_user_profile(updated)
+                yield f"[Info] Added to {section}.\n"
+                return {"status": "success", "added": True}
+            if action == "remove":
+                updated = _remove_profile_line(profile, section, text)
+                if updated is None:
+                    return {"status": "error", "msg": "line not found"}
+                manager.write_user_profile(updated)
+                yield f"[Info] Removed from user profile.\n"
+                return {"status": "success", "removed": True}
+        except Exception as exc:  # noqa: BLE001 - 工具错误必须回报给模型
+            return {"status": "error", "msg": str(exc)}
     return _handler

@@ -350,3 +350,59 @@ def test_channel_modules_import_when_bot_extras_are_installed() -> None:
 def test_browser_runtime_modules_are_packaged() -> None:
     assert importlib.util.find_spec("zero_agent.browser.tm_webdriver")
     assert importlib.util.find_spec("zero_agent.browser.simphtml")
+
+
+def test_shared_bot_helpers_are_declared_as_a_package() -> None:
+    packages = _pyproject()["tool"]["setuptools"]["packages"]
+
+    assert "zero_agent.bots.shared" in packages
+
+
+def test_vendor_and_asset_files_ship_with_the_wheel() -> None:
+    package_data = _pyproject()["tool"]["setuptools"]["package-data"]
+
+    frontend = package_data["zero_agent.frontends"]
+    assets = package_data["zero_agent.assets"]
+
+    assert "desktop/static/vendor/katex/*" in frontend
+    assert "user_profile.md" in assets
+
+
+def test_wheel_contains_runtime_modules_and_vendor_assets(tmp_path) -> None:
+    """The built wheel must import cleanly, not just install its modules."""
+    import subprocess
+    import sys
+    import zipfile
+
+    wheel_dir = tmp_path / "wheels"
+    wheel_dir.mkdir()
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            ".",
+            "--no-deps",
+            "--no-build-isolation",
+            "-w",
+            str(wheel_dir),
+        ],
+        cwd=str(ROOT),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    wheels = sorted(wheel_dir.glob("zero_agent-*.whl"))
+    assert wheels, "pip wheel produced no wheel"
+
+    with zipfile.ZipFile(wheels[0]) as archive:
+        names = set(archive.namelist())
+
+    for expected in (
+        "zero_agent/bots/shared/continue_cmd.py",
+        "zero_agent/frontends/desktop/static/vendor/katex/katex.min.js",
+        "zero_agent/assets/user_profile.md",
+    ):
+        assert expected in names, expected

@@ -46,6 +46,10 @@ let messagesEl, inputEl, sendBtn, sessionListEl, sessionTitleEl, statusBadge, st
 let errorBanner, commandPaletteEl, leftDrawer, rightDrawer, agentList;
 let modelStatus, currentModelEl, tokenUsageEl, modelPickerModal, modelList;
 let channelSettingsModal, channelListEl, channelSettingsBtn;
+let memorySettingsModal, memorySettingsBtn, memoryProfileInput, memorySettingsError;
+let memorySettingsSaveBtn;
+// Guards against writing a stale (or failed) load back over the real profile.
+let memoryProfileLoadId = 0;
 let channelConfigModal, channelConfigTitle, channelConfigForm, channelConfigError;
 let wechatQrPanel, wechatQrImage, wechatQrStatus;
 let diagnosticsLogEl, diagnosticsPanel;
@@ -3977,6 +3981,53 @@ function toggleChannelSettings() {
   else closeChannelSettings();
 }
 
+function _setMemoryProfileLoaded(loaded) {
+  if (memorySettingsSaveBtn) memorySettingsSaveBtn.disabled = !loaded;
+}
+
+async function openMemorySettings() {
+  if (!memorySettingsModal) return;
+  memorySettingsModal.classList.remove('hidden');
+  memorySettingsBtn?.setAttribute('aria-expanded', 'true');
+  memorySettingsError?.classList.add('hidden');
+  const loadId = ++memoryProfileLoadId;
+  if (memoryProfileInput) memoryProfileInput.value = '';
+  // Saving before a successful read would write an empty/stale profile back.
+  _setMemoryProfileLoaded(false);
+  try {
+    const result = await window.zeroAgent.rpc('memory/profile/get', {});
+    if (loadId !== memoryProfileLoadId) return;
+    memoryProfileInput.value = result.profile || '';
+    _setMemoryProfileLoaded(true);
+  } catch (err) {
+    if (loadId !== memoryProfileLoadId) return;
+    memorySettingsError.textContent = formatRequestError(err, '读取用户画像');
+    memorySettingsError.classList.remove('hidden');
+    _setMemoryProfileLoaded(false);
+  }
+}
+
+function closeMemorySettings() {
+  // Any in-flight load belongs to the previous opening: drop its result.
+  memoryProfileLoadId += 1;
+  _setMemoryProfileLoaded(false);
+  memorySettingsModal?.classList.add('hidden');
+  memorySettingsBtn?.setAttribute('aria-expanded', 'false');
+}
+
+async function saveMemoryProfile() {
+  if (!memoryProfileInput) return;
+  if (memorySettingsSaveBtn?.disabled) return;
+  try {
+    await window.zeroAgent.rpc('memory/profile/save', { profile: memoryProfileInput.value });
+    closeMemorySettings();
+    showSystem('用户画像已保存，下一个任务生效。');
+  } catch (err) {
+    memorySettingsError.textContent = formatRequestError(err, '保存用户画像');
+    memorySettingsError.classList.remove('hidden');
+  }
+}
+
 async function ensureBridgeSession(sess) {
   if (!sess) throw new Error('No active session.');
   if (sess.bridgeSessionId) return sess.bridgeSessionId;
@@ -4098,7 +4149,10 @@ window.zeroAgent.onBridgeError((err) => {
     }
   }
 
-  if (err.type === 'no-config') {
+  if (err.type === 'auth') {
+    setStatus('err', '需要重新认证');
+    showError('认证已失效，请从桌面应用重新打开 ZeroAgent。', undefined, undefined, { skipDiagnostic: true });
+  } else if (err.type === 'no-config') {
     showError('未找到 ZeroAgent 配置，请先完成配置。', '打开配置', async () => {
       await window.zeroAgent.openConfig();
     }, { skipDiagnostic: true });
@@ -4109,7 +4163,7 @@ window.zeroAgent.onBridgeError((err) => {
   }
 });
 
-window.zeroAgent.onBridgeClosed((info) => {
+window.zeroAgent.onBridgeClosed(async (info) => {
   addDiagnostic('warn', 'Bridge closed', info);
   if (state.restartingBridge) {
     setStatus('warn', 'Restarting…');
@@ -4122,6 +4176,18 @@ window.zeroAgent.onBridgeClosed((info) => {
       clearAssistantDraft(sess);
       setBusy(false, null, sess);
     }
+  }
+  const status = await window.zeroAgent.checkStatus().catch(() => null);
+  if (status && status.ok) {
+    const config = await window.zeroAgent.getConfig().catch((err) => err);
+    if (config && (config.status === 401 || config.status === 403)) {
+      setStatus('err', '需要重新认证');
+      showError('认证已失效，请从桌面应用重新打开 ZeroAgent。', undefined, undefined, { skipDiagnostic: true });
+      return;
+    }
+    setStatus('warn', 'Bridge 重连中…');
+    window.zeroAgent.startBridge().catch(() => {});
+    return;
   }
   setStatus('err', 'Bridge stopped');
   showError('ZeroAgent 服务连接已断开，请检查 bridge 是否运行。', '重启服务', () => restartBridge(), { skipDiagnostic: true });
@@ -4575,6 +4641,12 @@ const imagePreviews = document.getElementById('image-previews');
   channelSettingsModal = $('channel-settings-modal');
   channelListEl = $('channel-list');
   channelSettingsBtn = $('channel-settings-btn');
+  memorySettingsModal = $('memory-settings-modal');
+  memorySettingsBtn = $('memory-settings-btn');
+  memoryProfileInput = $('memory-profile-input');
+  memorySettingsError = $('memory-settings-error');
+  memorySettingsSaveBtn = $('memory-settings-save');
+  _setMemoryProfileLoaded(false);
   channelConfigModal = $('channel-config-modal');
   channelConfigTitle = $('channel-config-title');
   channelConfigForm = $('channel-config-form');
@@ -4701,6 +4773,11 @@ const imagePreviews = document.getElementById('image-previews');
 
   // ─── Channel Settings ───────────────────────────────────────────────────
   channelSettingsBtn?.addEventListener('click', toggleChannelSettings);
+  memorySettingsBtn?.addEventListener('click', openMemorySettings);
+  $('close-memory-settings')?.addEventListener('click', closeMemorySettings);
+  $('memory-settings-cancel')?.addEventListener('click', closeMemorySettings);
+  $('memory-settings-save')?.addEventListener('click', saveMemoryProfile);
+  memorySettingsModal?.querySelector('.modal-backdrop')?.addEventListener('click', closeMemorySettings);
   $('close-channel-settings')?.addEventListener('click', closeChannelSettings);
   $('channel-settings-done')?.addEventListener('click', closeChannelSettings);
   $('refresh-channel-settings')?.addEventListener('click', () => loadChannelStatuses());

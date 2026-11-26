@@ -143,19 +143,31 @@ def _interactive_configure() -> None:
     default_ws = str(project_root() / "workspace")
     workspace = _prompt("工作目录", default=default_ws)
 
-    # 步骤 6: 生成并写入配置
+    # 步骤 6: 生成并写入配置（预览不得回显真实 key）
     print()
-    config = _build_config_yaml(provider, api_key, api_base, model, workspace)
+    preview = _build_config_yaml(
+        provider, _mask_secret(api_key), api_base, model, workspace
+    )
     print("\n即将生成的配置:")
     print("-" * 40)
-    print(config)
+    print(preview)
     print("-" * 40)
 
     confirm = _prompt("\n保存配置? (Y/n)", default="Y").lower()
     if confirm in ("", "y", "yes"):
-        _write_config(config)
+        _write_config(
+            _build_config_yaml(provider, api_key, api_base, model, workspace)
+        )
     else:
         print("已取消")
+
+
+def _mask_secret(value: str) -> str:
+    """Mask a secret for on-screen previews."""
+    text = str(value or "")
+    if len(text) <= 8:
+        return "***"
+    return f"{text[:4]}…{text[-4:]}"
 
 
 def _select_model(available_models: list[str], provider: str) -> str:

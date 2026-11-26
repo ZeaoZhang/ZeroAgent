@@ -8,15 +8,34 @@
   let cachedBridgeReady = null;
   const bridgeBase = `${location.protocol}//${location.hostname}:14168`;
   const wsBase = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:14168/ws`;
-  const bridgeToken = consumeBootstrapToken();
+  const TOKEN_STORAGE_KEY = 'za_bridge_token';
+  const bridgeToken = loadBridgeToken();
 
-  function consumeBootstrapToken() {
+  // Cookies are sent by host, not origin, so any local service on another port
+  // would receive the bridge token. sessionStorage is origin-scoped: it
+  // survives a reload and stays invisible to other ports.
+  function loadBridgeToken() {
     const hash = window.location.hash || '';
-    if (!hash) return '';
-    const params = new URLSearchParams(hash.slice(1));
-    const token = params.get('token') || '';
+    let token = '';
+    if (hash) {
+      token = new URLSearchParams(hash.slice(1)).get('token') || '';
+    }
+    try {
+      if (token) {
+        window.sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
+        clearBootstrapHash();
+        return token;
+      }
+      return window.sessionStorage.getItem(TOKEN_STORAGE_KEY) || '';
+    } catch (_) {
+      // 存储被禁用时保留 hash，当前页面仍可用
+      return token;
+    }
+  }
+
+  function clearBootstrapHash() {
+    if (!window.location.hash) return;
     window.history.replaceState(null, document.title, `${window.location.pathname}${window.location.search}`);
-    return token;
   }
 
   function on(channel, cb) {
@@ -105,6 +124,10 @@
         return http('/scheduler');
       case 'scheduler/start':
         return http('/scheduler/start', { method: 'POST', body: params || {} });
+      case 'memory/profile/get':
+        return http('/memory/profile');
+      case 'memory/profile/save':
+        return http('/memory/profile', { method: 'POST', body: { profile: params.profile || '' } });
       case 'channels/list':
         return http('/channels');
       case 'channels/start': {
@@ -244,19 +267,21 @@
     }
   }
 
+  // <img>/<a> cannot send Authorization headers: media URLs carry the token in
+  // the query. Without a token there is no authenticated URL to hand out.
+  function mediaUrl(kind, sessionId, filePath) {
+    if (!bridgeToken || !sessionId || !filePath) return '';
+    const params = { path: String(filePath), token: bridgeToken };
+    return `${bridgeBase}/session/${encodeURIComponent(sessionId)}/${kind}?${new URLSearchParams(params)}`;
+  }
+
   window.zeroAgent = {
     bridgeUrl: bridgeBase,
     platform: navigator.platform.toLowerCase().includes('mac') ? 'darwin' : 'win32',
-    sessionImageUrl: (sessionId, filePath) => {
-      if (!bridgeToken || !sessionId || !filePath) return '';
-      const query = new URLSearchParams({ path: String(filePath), token: bridgeToken });
-      return `${bridgeBase}/session/${encodeURIComponent(sessionId)}/image?${query}`;
-    },
-    sessionFileUrl: (sessionId, filePath) => {
-      if (!bridgeToken || !sessionId || !filePath) return '';
-      const query = new URLSearchParams({ path: String(filePath), token: bridgeToken });
-      return `${bridgeBase}/session/${encodeURIComponent(sessionId)}/file?${query}`;
-    },
+    sessionImageUrl: (sessionId, filePath) =>
+      mediaUrl('image', sessionId, filePath),
+    sessionFileUrl: (sessionId, filePath) =>
+      mediaUrl('file', sessionId, filePath),
     startBridge: async () => { connectWs(); return http('/status'); },
     stopBridge: async () => ({ ok: true }),
     checkStatus: () => rpc('app/status', {}),
@@ -282,6 +307,17 @@
     onOpenSearch: (cb) => on('open-search', cb)
   };
 
-  connectWs();
-  http('/status').then(status => emit('bridge-ready', status)).catch(err => emit('bridge-error', { type: 'http-error', message: err.message || String(err) }));
+  // Readiness must mean "authenticated": /status is public, so announcing it
+  // without a token reported a broken bridge as ready.
+  if (!bridgeToken) {
+    emit('bridge-error', {
+      type: 'auth',
+      message: 'Bridge token missing; reopen ZeroAgent from the desktop app.',
+    });
+  } else {
+    connectWs();
+    http('/status')
+      .then(status => emit('bridge-ready', status))
+      .catch(err => emit('bridge-error', { type: 'http-error', message: err.message || String(err) }));
+  }
 })();

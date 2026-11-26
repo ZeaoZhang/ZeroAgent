@@ -124,3 +124,52 @@ def test_snapshot_contains_metadata_only(monkeypatch, tmp_path):
     ]
     assert all("value" not in field for field in snapshot["fields"])
     assert "file-token" not in json.dumps(snapshot)
+
+
+def test_wechat_allow_list_is_configurable_and_required(monkeypatch, tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("bots: {}\n", encoding="utf-8")
+    token_file = tmp_path / ".wxbot" / "token.json"
+    token_file.parent.mkdir()
+    token_file.write_text(json.dumps({"bot_token": "wx-token"}), encoding="utf-8")
+    monkeypatch.setenv("ZA_CONFIG_PATH", str(config))
+    monkeypatch.delenv("WECHAT_ALLOWED_USERS", raising=False)
+    monkeypatch.setattr(
+        "zero_agent.bots.channel_control.Path.home", lambda: tmp_path, raising=False
+    )
+    monkeypatch.setattr(
+        "zero_agent.bots.channel_config.Path.home", lambda: tmp_path, raising=False
+    )
+
+    snapshot = channel_config_snapshot("wechat")
+
+    assert snapshot["configured"] is False
+    assert snapshot["tokenConfigured"] is True
+    assert [field["key"] for field in snapshot["fields"]] == ["wechat_allowed_users"]
+
+    updated = update_channel_config("wechat", {"wechat_allowed_users": ["wxid-1"]})
+
+    assert updated["configured"] is True
+    written = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert written["bots"] == {"wechat_allowed_users": ["wxid-1"]}
+    assert load_keys()["wechat_allowed_users"] == ["wxid-1"]
+
+
+def test_wechat_config_rejects_other_fields(monkeypatch, tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("bots: {}\n", encoding="utf-8")
+    monkeypatch.setenv("ZA_CONFIG_PATH", str(config))
+
+    with pytest.raises(ChannelConfigError):
+        update_channel_config("wechat", {"wechat_bot_token": "x"})
+
+    assert yaml.safe_load(config.read_text(encoding="utf-8")) == {"bots": {}}
+
+
+def test_wechat_allow_list_reads_environment_override(monkeypatch, tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("bots:\n  wechat_allowed_users: ['wxid-1']\n", encoding="utf-8")
+    monkeypatch.setenv("ZA_CONFIG_PATH", str(config))
+    monkeypatch.setenv("WECHAT_ALLOWED_USERS", "wxid-2")
+
+    assert load_keys()["wechat_allowed_users"] == ["wxid-2"]

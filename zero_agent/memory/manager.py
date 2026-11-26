@@ -11,8 +11,10 @@ MemoryManager: 管理文件式分层记忆（L0-L4），提供系统提示词增
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +23,42 @@ from zero_agent.core.exceptions import ConfigError
 
 _ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
 _SOP_SEED_DIR = _ASSETS_DIR / "memory_seed" / "sops"
+
+
+# Hashes of previously shipped SOP seeds. A user file whose content still
+# matches one of these was never edited, so a newer seed may replace it;
+# anything else is a user edit and must be preserved. Keeping the old text
+# would leave instructions pointing at removed tools (for example
+# code_run(inline_eval=True)).
+_LEGACY_SEED_SHA256: dict[str, frozenset[str]] = {
+    "plan_sop.md": frozenset({
+        "6296938674f7755ebbab18680769d8a3ca397138a828bb53289f037bc4b0437c",
+        "2d5e3810511b02bf01413c308db756761928adb06b2dc37f45846b27b24c4894",  # 48f8fba
+    }),
+    "autonomous_operation_sop.md": frozenset({
+        "7ea8a52d727028eccda0ca23a34d9e99ce55458c6c84faeb3340b5ca4d4a2d0b",
+    }),
+    "memory_management_sop.md": frozenset({
+        "4013f3318adc695588389c4b18053932a237778015c4989e8d63fa8e648eebd7",
+        "fb8a38b1cf5c10a10d937783139ef493a4f252092f08edc0564deac23fc668e0",  # 4af395b
+    }),
+}
+
+
+def _file_sha256(path: Path) -> str:
+    """Return the hex digest of a file, or "" when it cannot be read."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _is_unmodified_legacy_seed(relative: str, current: Path) -> bool:
+    """True when ``current`` still equals a previously shipped seed."""
+    legacy = _LEGACY_SEED_SHA256.get(relative)
+    if not legacy:
+        return False
+    return _file_sha256(current) in legacy
 
 
 def _asset_text(name: str) -> str:
@@ -82,10 +120,62 @@ class MemoryManager:
             with open(l1_path, "w", encoding="utf-8") as f:
                 f.write(template)
 
+        # 用户画像：注入系统提示词的长期偏好/关系/承诺
+        if not os.path.exists(self.profile_path):
+            with open(self.profile_path, "w", encoding="utf-8") as f:
+                f.write(_asset_text("user_profile.md"))
+
         # L4: 历史会话存档目录
         l4_dir = os.path.join(self.memory_dir, "L4_raw_sessions")
         os.makedirs(l4_dir, exist_ok=True)
         self._seed_sops()
+
+    @property
+    def profile_path(self) -> str:
+        """用户画像文件路径."""
+        return os.path.join(self.memory_dir, "user_profile.md")
+
+    def read_user_profile(self) -> str:
+        """读取用户画像；文件缺失时返回空字符串."""
+        try:
+            with open(self.profile_path, "r", encoding="utf-8", errors="replace") as f:
+                return f.read()
+        except OSError:
+            return ""
+
+    def write_user_profile(self, text: str) -> None:
+        """原子写入用户画像，并做基本安全检查.
+
+        Args:
+            text: 完整画像文本.
+
+        Raises:
+            ValueError: 非字符串、含 NUL 或超过 32 KiB.
+        """
+        if not isinstance(text, str):
+            raise ValueError("profile must be a string")
+        if "\x00" in text:
+            raise ValueError("profile must not contain NUL")
+        if len(text.encode("utf-8")) > 32768:
+            raise ValueError("profile exceeds 32 KiB")
+        os.makedirs(self.memory_dir, exist_ok=True)
+        # Unique temp name: the agent tool and the desktop save path can write
+        # concurrently, and a shared "<profile>.tmp" truncates the other writer.
+        fd, tmp = tempfile.mkstemp(
+            prefix=".user_profile.", suffix=".tmp", dir=self.memory_dir,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self.profile_path)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
     def get_global_memory_context(self) -> str:
         """构建系统提示词中的记忆上下文部分.
@@ -114,6 +204,14 @@ class MemoryManager:
             except (OSError, UnicodeDecodeError):
                 pass
 
+        profile = self.read_user_profile().strip()
+        if profile:
+            prompt += "\n[User Profile]\n"
+            prompt += profile[:4000]
+            if len(profile) > 4000:
+                prompt += "\n…(truncated; read user_profile.md for full text)"
+            prompt += "\n"
+
         return prompt
 
     def _lang_suffix(self) -> str:
@@ -134,6 +232,9 @@ class MemoryManager:
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
             if not dst.exists():
+                shutil.copy2(src, dst)
+                continue
+            if _is_unmodified_legacy_seed(rel.as_posix(), dst):
                 shutil.copy2(src, dst)
 
     def get_sop_path(self, sop_name: str) -> Optional[str]:

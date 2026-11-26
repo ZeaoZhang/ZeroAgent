@@ -128,7 +128,7 @@ llm_backends:
 
 `config.yaml` 可以同时包含 `llm_backends` 和可选的 `bots:` 配置。机器人配置也可以单独放在 `ZA_BOT_CONFIG_PATH` 指定的 YAML 或 JSON 文件中；相对路径以项目根目录为基准。环境变量始终覆盖文件中的机器人字段。
 
-`TG_ALLOWED_USERS` 通过环境变量传入时使用逗号分隔（例如 `1001,1002`）；示例中的空 YAML 列表仅在不启动 Telegram 渠道时有效。
+每个渠道都必须在 `bots.<channel>_allowed_users`（或对应环境变量）中至少配置一个平台用户 ID；空列表表示「谁都不许」而不是「所有人」。确需公开时显式写 `"*"`；环境变量形式用逗号分隔（例如 `TG_ALLOWED_USERS=1001,1002`）。微信群聊、Discord guild、QQ 群、钉钉群、企业微信群默认不响应，需设置 `ZA_ALLOW_GROUP_CHATS=1` 开启。微信 bot token 仍保存在 `~/.wxbot/token.json`，`wechat_allowed_users` 只控制访问。
 
 前端“渠道配置”弹窗只显示字段是否已配置，不会回显已有的 token、secret 等敏感值。可编辑字段留空会保留原值；由环境变量管理的字段不能在弹窗中修改。
 

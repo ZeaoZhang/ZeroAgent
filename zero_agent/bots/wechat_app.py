@@ -36,7 +36,7 @@ from zero_agent.core.agent import ZeroAgent
 from zero_agent.runners.agent_runner import AgentRunner
 from zero_agent.bots.channel_config import ChannelConfigError
 from zero_agent.bots.common import load_keys
-from zero_agent.bots.common import channel_is_linked
+from zero_agent.bots.common import channel_is_linked, public_access, require_runtime
 from zero_agent.bots.common import (
     PROMPT_CAPABILITY_FILE_DELIVERY,
     resolve_output_files,
@@ -50,6 +50,7 @@ from zero_agent.bots.common import (
 )
 
 _KEYS = {}
+ALLOWED = set()
 
 # 清除代理环境变量 (避免影响微信长轮询 SSL)
 for _k in ("HTTPS_PROXY", "https_proxy"):
@@ -529,6 +530,9 @@ def on_message(bot: WxBotClient, msg):
         return
     text = bot.extract_text(msg).strip()
     uid = msg.get("from_user_id", "")
+    if not public_access(ALLOWED) and uid not in ALLOWED:
+        print(f"[WX] unauthorized: {uid}", file=sys.__stdout__)
+        return
     ctx = msg.get("context_token", "")
     media_paths = _dl_media(msg.get("item_list", []))
     if not text and not media_paths:
@@ -678,6 +682,12 @@ if __name__ == "__main__":
     except ChannelConfigError:
         print("[Bot] channel configuration is unavailable; check the active config file.")
         sys.exit(1)
+    ALLOWED = {
+        str(x).strip()
+        for x in _KEYS.get("wechat_allowed_users", [])
+        if str(x).strip()
+    }
+    require_runtime(runner, "WeChat", wechat_allowed_users=ALLOWED)
     bot = WxBotClient()
     if _do_relogin or not bot.token:
         if not interactive:

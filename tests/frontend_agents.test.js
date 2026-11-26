@@ -205,6 +205,7 @@ async function adapterTests() {
   const ctx = { window: windowObj, location: windowObj.location, document: {}, navigator: { platform: 'MacIntel' }, WebSocket: FakeWebSocket, URLSearchParams, console, fetch: async (url, init = {}) => { calls.push({ url, init }); return { ok: true, status: 200, statusText: 'OK', text: async () => '{}' }; } };
   ctx.globalThis = ctx;
   vm.runInNewContext(fs.readFileSync(adapterPath, 'utf8'), ctx, { filename: adapterPath });
+  await new Promise((resolve) => setTimeout(resolve, 0));
   calls.length = 0;
   await windowObj.zeroAgent.rpc('session/agents', { sessionId: 'bridge/a' });
   assert.equal(calls[0].url, 'http://127.0.0.1:14168/session/bridge%2Fa/agents');

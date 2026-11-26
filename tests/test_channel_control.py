@@ -22,10 +22,21 @@ def test_channel_definitions_are_stable():
         "telegram",
         "discord",
     ]
-    assert channel_control.channel_definition("telegram").required_keys == (
-        "tg_bot_token",
-        "tg_allowed_users",
-    )
+    expected_required = {
+        "wechat": ("wechat_allowed_users",),
+        "wecom": ("wecom_bot_id", "wecom_secret", "wecom_allowed_users"),
+        "dingtalk": (
+            "dingtalk_client_id",
+            "dingtalk_client_secret",
+            "dingtalk_allowed_users",
+        ),
+        "qq": ("qq_app_id", "qq_app_secret", "qq_allowed_users"),
+        "feishu": ("fs_app_id", "fs_app_secret", "fs_allowed_users"),
+        "telegram": ("tg_bot_token", "tg_allowed_users"),
+        "discord": ("discord_bot_token", "discord_allowed_users"),
+    }
+    for channel_id, keys in expected_required.items():
+        assert channel_control.channel_definition(channel_id).required_keys == keys
 
 
 def test_link_state_defaults_to_true_and_round_trips(monkeypatch, tmp_path):
@@ -79,6 +90,26 @@ def test_required_configuration_is_checked_without_exposing_values():
     ) is False
     assert channel_control.channel_is_configured(telegram, {"tg_bot_token": ""}) is False
     assert channel_control.channel_is_configured(telegram, {}) is False
+
+    # A token without an allow list is not a usable private bot.
+    for channel_id, token_keys in {
+        "discord": {"discord_bot_token": "token"},
+        "dingtalk": {
+            "dingtalk_client_id": "id",
+            "dingtalk_client_secret": "secret",
+        },
+        "qq": {"qq_app_id": "id", "qq_app_secret": "secret"},
+        "feishu": {"fs_app_id": "id", "fs_app_secret": "secret"},
+        "wecom": {"wecom_bot_id": "id", "wecom_secret": "secret"},
+    }.items():
+        definition = channel_control.channel_definition(channel_id)
+        assert channel_control.channel_is_configured(definition, token_keys) is False
+        allowed_key = next(
+            key for key in definition.required_keys if key.endswith("_allowed_users")
+        )
+        assert channel_control.channel_is_configured(
+            definition, {**token_keys, allowed_key: ["1001"]}
+        ) is True
 
 class _LiveProcess:
     def __init__(self, pid=4321):
@@ -299,3 +330,35 @@ async def test_mixin_ignores_commands_when_unlinked(monkeypatch):
     await bot.handle_command("chat", "/help")
 
     assert bot.sent == []
+
+
+def test_start_reflect_task_launches_the_real_runner(monkeypatch):
+    from zero_agent.frontends import desktop_commands
+
+    calls = []
+
+    class AliveProcess:
+        pid = 4321
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(
+        desktop_commands.subprocess,
+        "Popen",
+        lambda command, **kwargs: calls.append((command, kwargs)) or AliveProcess(),
+    )
+    monkeypatch.setattr(desktop_commands.time, "sleep", lambda _seconds: None)
+
+    ok, message = desktop_commands.start_reflect_task("scheduler")
+
+    assert ok is True, message
+    command, kwargs = calls[0]
+    assert command == [
+        desktop_commands.sys.executable,
+        "-m",
+        "zero_agent.runners.cli",
+        "--reflect",
+        str(desktop_commands._ROOT / "reflect" / "scheduler.py"),
+    ]
+    assert kwargs["cwd"] == str(desktop_commands._ROOT.parent)

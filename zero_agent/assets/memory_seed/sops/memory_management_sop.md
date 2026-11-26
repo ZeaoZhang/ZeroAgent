@@ -74,6 +74,11 @@ L4: [Memory]/L4_raw_sessions/ (历史会话层 - scheduler反射自动收集，�
 ```
 "这条信息该放哪层？"
 
+是『用户明确陈述的长期偏好/关系/承诺』? (例如称呼、忌口、家人生日、答应过的事)
+  ├─ YES → user_profile.md（用 memory_profile 工具 add/remove）
+  │        禁止写入密钥、一次性状态、模型猜测
+  └─ NO → 继续下面的环境事实/通用规律/任务技术判断
+
 是『环境特异性事实』? (IP、非标路径、凭证、ID、API 密钥等，大模型 Zero-shot 无法生成准确)
   ├─ YES → L2 (global_mem.txt)
   │        然后 → 按频率归入 L1 第一层(key→value)或第二层(仅关键词)

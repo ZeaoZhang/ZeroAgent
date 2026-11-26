@@ -81,6 +81,9 @@ def test_on_registers_browser_tools_with_owner(tmp_path: Path, monkeypatch) -> N
         "update_working_checkpoint",
         "ask_user",
         "start_long_term_update",
+        "enter_plan_mode",
+        "add_done_hook",
+        "memory_profile",
     }
     for name in BROWSER_TOOLS:
         assert runtime.registry.owner_of(name) == "browser_tools"

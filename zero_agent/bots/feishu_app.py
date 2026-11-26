@@ -34,13 +34,17 @@ from zero_agent.bots.common import (
     ensure_single_instance,
     PROMPT_CAPABILITY_FILE_DELIVERY,
     bot_config_source,
+    group_chats_allowed,
+    public_access,
     split_text,
     load_keys,
+    require_runtime,
     terminal_reply_text,
     terminal_output_text,
     terminal_notice,
     resolve_output_files,
     runner_workspace_dir,
+    to_allowed_set,
 )
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -109,8 +113,8 @@ def _feishu_config():
     cfg = {k: v for k, v in load_keys().items() if k.startswith("fs_")}
     app_id = str(cfg.get("fs_app_id", "") or "").strip()
     app_secret = str(cfg.get("fs_app_secret", "") or "").strip()
-    allowed = {str(x).strip() for x in cfg.get("fs_allowed_users", []) if str(x).strip()}
-    return app_id, app_secret, allowed, (not allowed or "*" in allowed), bot_config_source()
+    allowed = to_allowed_set(cfg.get("fs_allowed_users"))
+    return app_id, app_secret, allowed, public_access(allowed), bot_config_source()
 
 
 APP_ID, APP_SECRET, ALLOWED_USERS, PUBLIC_ACCESS, CONFIG_PATH = _feishu_config()
@@ -772,6 +776,9 @@ def handle_message(data):
     if not PUBLIC_ACCESS and open_id not in ALLOWED_USERS:
         print(f"未授权用户: {open_id}")
         return
+    if getattr(message, "chat_type", "") != "p2p" and not group_chats_allowed():
+        print(f"忽略群聊消息: {chat_id}")
+        return
     user_input, image_paths = _build_user_message(message)
     if not user_input:
         if chat_id:
@@ -800,9 +807,13 @@ def handle_message(data):
 def main():
     global client, APP_ID, APP_SECRET, ALLOWED_USERS, PUBLIC_ACCESS, CONFIG_PATH
     APP_ID, APP_SECRET, ALLOWED_USERS, PUBLIC_ACCESS, CONFIG_PATH = _feishu_config()
-    if not APP_ID or not APP_SECRET:
-        print(f"错误: 请在 bot 配置中填写 fs_app_id 和 fs_app_secret\n配置来源: {CONFIG_PATH}", flush=True)
-        sys.exit(1)
+    require_runtime(
+        runner,
+        "Feishu",
+        fs_app_id=APP_ID,
+        fs_app_secret=APP_SECRET,
+        fs_allowed_users=ALLOWED_USERS,
+    )
     handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(handle_message).build()
     retry_delay = 5
     while True:

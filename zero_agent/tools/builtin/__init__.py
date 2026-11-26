@@ -12,6 +12,9 @@ Core tools (auto-registered by with_builtins()):
     update_working_checkpoint — Short-term working memory (key_info + related_sop)
     ask_user              — Interrupt task to ask user a question
     start_long_term_update    — Trigger long-term memory distillation
+    enter_plan_mode       — Bind a plan.md and switch the task contract to PLAN
+    add_done_hook         — Queue a self-check turn before completion is accepted
+    memory_profile        — Maintain the injected user profile (preferences/commitments)
 
 Virtual/internal tools (handled by engine/Handler, NOT in schema):
     no_tool  — Triggered by engine when LLM produces no tool call

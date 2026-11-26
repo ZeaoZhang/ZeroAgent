@@ -4,6 +4,7 @@ import importlib
 import os
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -254,6 +255,35 @@ class TestReflectRunnerTask:
         assert terminal.reason == "RuntimeError"
         assert terminal.text == "broken before generator"
 
+    def test_run_task_injects_module_write_roots(self, tmp_path) -> None:
+        from zero_agent.core.config import AgentConfig
+
+        report_dir = tmp_path / "reports"
+        report_dir.mkdir()
+        agent = MagicMock()
+        agent.config = AgentConfig(
+            workspace_dir=str(tmp_path / "ws"),
+            memory_dir=str(tmp_path / "mem"),
+        )
+
+        def run(_task, **_kwargs):
+            yield "work"
+            return TerminalEvent(status=TerminalStatus.COMPLETED, reason="done")
+
+        agent.run = run
+        mod_path = _write_reflect_module(
+            str(tmp_path), "write_roots",
+            f"WRITE_ROOTS = ({str(report_dir)!r},)\n"
+            "def check():\n"
+            "    return None\n",
+        )
+        runner = ReflectRunner(agent, mod_path)
+        runner._load_module()
+
+        runner._run_task("task")
+
+        assert agent.config.extra_write_roots == [os.path.abspath(str(report_dir))]
+
 
 class TestReflectRunnerLifecycle:
     """ReflectRunner 生命周期测试."""
@@ -445,3 +475,117 @@ class TestReflectLogWriting:
 
             log_dir = Path(td) / "reflect_logs"
             assert log_dir.exists()
+
+
+class TestReflectRunnerPostTaskSleep:
+    """任务之间必须休眠，避免成功后立刻重复触发."""
+
+    @staticmethod
+    def _runner(monkeypatch, tmp_path, source: str):
+        agent = MagicMock()
+        agent.config.workspace_dir = str(tmp_path)
+
+        def run(_task, **_kwargs):
+            yield "work"
+            return TerminalEvent(status=TerminalStatus.COMPLETED, reason="done")
+
+        agent.run = run
+        mod_path = _write_reflect_module(str(tmp_path), "post_task", source)
+        waits: list[float] = []
+
+        class FakeEvent(threading.Event):
+            def wait(self, timeout=None):
+                waits.append(timeout)
+                return False
+
+        runner = ReflectRunner(agent, mod_path)
+        monkeypatch.setattr(runner, "_stop_event", FakeEvent())
+        return runner, waits
+
+    def test_sleeps_after_task_before_next_check(self, monkeypatch, tmp_path) -> None:
+        runner, waits = self._runner(
+            monkeypatch,
+            tmp_path,
+            "INTERVAL = 0\n"
+            "POST_TASK_INTERVAL = 0\n"
+            "ONCE = False\n"
+            "_calls = 0\n"
+            "def check():\n"
+            "    global _calls\n"
+            "    _calls += 1\n"
+            "    return 'task' if _calls == 1 else '/exit'\n",
+        )
+
+        runner.run_loop()
+
+        assert waits == [1]
+
+    def test_once_mode_exits_without_post_task_sleep(self, monkeypatch, tmp_path) -> None:
+        runner, waits = self._runner(
+            monkeypatch,
+            tmp_path,
+            "INTERVAL = 0\n"
+            "POST_TASK_INTERVAL = 0\n"
+            "ONCE = True\n"
+            "def check():\n"
+            "    return 'task'\n",
+        )
+
+        runner.run_loop()
+
+        assert waits == []
+        assert runner._running is False
+
+    def test_stop_interrupts_the_post_task_wait(self, tmp_path) -> None:
+        agent = MagicMock()
+        agent.config.workspace_dir = str(tmp_path)
+
+        def run(_task, **_kwargs):
+            yield "work"
+            return TerminalEvent(status=TerminalStatus.COMPLETED, reason="done")
+
+        agent.run = run
+        mod_path = _write_reflect_module(
+            str(tmp_path), "stop_post_task",
+            "INTERVAL = 1\n"
+            "POST_TASK_INTERVAL = 60\n"
+            "ONCE = False\n"
+            "_calls = 0\n"
+            "def check():\n"
+            "    global _calls\n"
+            "    _calls += 1\n"
+            "    return 'task' if _calls == 1 else '/exit'\n",
+        )
+        runner = ReflectRunner(agent, mod_path)
+        entered = threading.Event()
+
+        class BlockingEvent(threading.Event):
+            def wait(self, timeout=None):
+                entered.set()
+                return super().wait()
+
+        runner._stop_event = BlockingEvent()
+        thread = threading.Thread(target=runner.run_loop, daemon=True)
+        thread.start()
+
+        assert entered.wait(5), "loop should reach the post-task wait"
+        runner.stop()
+        thread.join(2)
+
+        assert not thread.is_alive(), "stop() must break the 60s post-task wait"
+
+    def test_run_task_requests_no_user_activity_stamp(self, tmp_path) -> None:
+        agent = MagicMock()
+        seen: list[dict] = []
+
+        def run(_task, **kwargs):
+            seen.append(kwargs)
+            yield "work"
+            return TerminalEvent(status=TerminalStatus.COMPLETED, reason="done")
+
+        agent.run = run
+        runner = ReflectRunner(agent, "/fake/path/reflect.py")
+
+        runner._run_task("task")
+
+        assert seen == [{"record_activity": False}]

@@ -32,6 +32,7 @@ from zero_agent.bots.common import (
     PROMPT_CAPABILITY_FILE_DELIVERY,
     clean_reply,
     ensure_single_instance,
+    group_chats_allowed,
     load_keys,
     public_access,
     redirect_log,
@@ -112,6 +113,9 @@ class WeComApp(AgentBotMixin):
         chat_id = str(body.get("chatid", "") or sender_id)
         if not public_access(ALLOWED) and sender_id not in ALLOWED:
             print(f"[WeCom] unauthorized: {sender_id}")
+            return None
+        if chat_id != sender_id and not group_chats_allowed():
+            print(f"[WeCom] group chat disabled: {chat_id}")
             return None
         self.chat_frames[chat_id] = frame
         self._stats["received"] += 1
@@ -319,7 +323,7 @@ class WeComApp(AgentBotMixin):
                 )
                 for uid, st in self.user_tasks.items():
                     _tprint(f"  ├ {uid}: running={st.get('running')}")
-                _tprint(f"  Agent running: {runner.is_running} | 允许: {self._allowed or '全部'}")
+                _tprint(f"  Agent running: {runner.is_running} | 允许: {', '.join(sorted(self._allowed))}")
             elif cmd.startswith("stop"):
                 parts = cmd.split(None, 1)
                 tasks = self.user_tasks
@@ -374,11 +378,17 @@ if __name__ == "__main__":
     runner = AgentRunner(za)
     runner.verbose = False
     _LOCK = ensure_single_instance(PORT, "WeCom")
-    require_runtime(runner, "WeCom", wecom_bot_id=BOT_ID, wecom_secret=SECRET)
+    require_runtime(
+        runner,
+        "WeCom",
+        wecom_bot_id=BOT_ID,
+        wecom_secret=SECRET,
+        wecom_allowed_users=ALLOWED,
+    )
     redirect_log(__file__, "wecomapp.log", "WeCom", ALLOWED)
     _tprint("\n═══════════════════════════════════════════")
     _tprint("  企业微信 Agent  (长连接模式)")
-    _tprint(f"  端口锁: {PORT} | 允许用户: {ALLOWED or '全部'}")
+    _tprint(f"  端口锁: {PORT} | 允许用户: {', '.join(sorted(ALLOWED))}")
     _tprint("═══════════════════════════════════════════")
     _tprint("  终端命令:  help | status | stop | exit")
 

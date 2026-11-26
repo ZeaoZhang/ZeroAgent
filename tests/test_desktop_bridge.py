@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import asyncio
 import json
+import os
 import queue
 import shutil
 import subprocess
@@ -2599,3 +2600,239 @@ def test_agent_http_endpoints_delegate_snapshot_and_cancel(monkeypatch) -> None:
     _plan_client_run(run)
     assert fake.get_calls == ["sess-123456789abc"]
     assert fake.cancel_calls == [("sess-123456789abc", "agent-aaaaaaaaaaaa")]
+
+
+@pytest.mark.asyncio
+async def test_config_rejects_a_bridge_cookie():
+    """Cookies are host-scoped; the bridge token must never be accepted from one."""
+    client = await _open_test_client()
+    try:
+        response = await client.get(
+            "/config",
+            headers={"Cookie": "za_bridge_token=secret"},
+        )
+        assert response.status == 401
+    finally:
+        await client.close()
+
+
+def test_launcher_generates_and_reuses_the_bridge_token(monkeypatch) -> None:
+    from zero_agent.frontends import launcher
+
+    monkeypatch.delenv("ZA_DESKTOP_BRIDGE_TOKEN", raising=False)
+    token = launcher._ensure_bridge_token()
+
+    assert token
+    assert os.environ["ZA_DESKTOP_BRIDGE_TOKEN"] == token
+    assert launcher._window_url("http://127.0.0.1:14168/", token).endswith(
+        f"#token={token}"
+    )
+
+    monkeypatch.setenv("ZA_DESKTOP_BRIDGE_TOKEN", "fixed")
+    assert launcher._ensure_bridge_token() == "fixed"
+
+
+def test_restart_reports_queued_and_interrupted_turns():
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "跑一个长任务")
+    manager.session_store.set_app_state(
+        f"{desktop_bridge._QUEUE_KEY_PREFIX}{sess.id}",
+        json.dumps([{"prompt": "排队的问题"}], ensure_ascii=False),
+    )
+    manager.session_store.set_app_state(
+        f"{desktop_bridge._ACTIVE_TURN_KEY_PREFIX}{sess.id}", "1"
+    )
+
+    restarted = desktop_bridge.AgentManager()
+
+    restored = restarted.sessions[sess.id]
+    contents = [message["content"] for message in restored.messages]
+    assert "未执行（服务重启）：排队的问题" in contents
+    assert "上次任务在服务重启时中断，请重新发送。" in contents
+    assert restored.terminal_status == "interrupted"
+    assert restarted.session_store.get_app_state(
+        f"{desktop_bridge._QUEUE_KEY_PREFIX}{sess.id}"
+    ) is None
+    assert restarted.session_store.get_app_state(
+        f"{desktop_bridge._ACTIVE_TURN_KEY_PREFIX}{sess.id}"
+    ) is None
+
+
+def test_restart_without_markers_adds_no_noise():
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "普通任务")
+
+    restarted = desktop_bridge.AgentManager()
+
+    contents = [m["content"] for m in restarted.sessions[sess.id].messages]
+    assert contents == ["普通任务"]
+    assert restarted.sessions[sess.id].terminal_status == ""
+
+
+def test_delete_session_clears_persisted_turn_markers():
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "hello")
+    manager.session_store.set_app_state(
+        f"{desktop_bridge._QUEUE_KEY_PREFIX}{sess.id}", "[]"
+    )
+    manager.session_store.set_app_state(
+        f"{desktop_bridge._ACTIVE_TURN_KEY_PREFIX}{sess.id}", "1"
+    )
+
+    manager.delete_session(sess.id)
+
+    assert manager.session_store.get_app_state(
+        f"{desktop_bridge._QUEUE_KEY_PREFIX}{sess.id}"
+    ) is None
+    assert manager.session_store.get_app_state(
+        f"{desktop_bridge._ACTIVE_TURN_KEY_PREFIX}{sess.id}"
+    ) is None
+
+
+def test_channel_status_requires_an_allow_list_for_every_channel(monkeypatch, tmp_path):
+    from zero_agent.frontends import desktop_commands
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "bots:\n"
+        "  discord_bot_token: dc-token\n"
+        "  qq_app_id: qq-id\n"
+        "  qq_app_secret: qq-secret\n"
+        "  fs_app_id: fs-id\n"
+        "  fs_app_secret: fs-secret\n"
+        "  wecom_bot_id: wecom-id\n"
+        "  wecom_secret: wecom-secret\n"
+        "  dingtalk_client_id: dt-id\n"
+        "  dingtalk_client_secret: dt-secret\n",
+        encoding="utf-8",
+    )
+    for name in (
+        "DISCORD_ALLOWED_USERS",
+        "QQ_ALLOWED_USERS",
+        "FS_ALLOWED_USERS",
+        "WECOM_ALLOWED_USERS",
+        "DINGTALK_ALLOWED_USERS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ZA_CONFIG_PATH", str(config))
+    monkeypatch.setattr(desktop_commands, "running_services", lambda use_cache=False: {})
+
+    rows = {row["id"]: row for row in desktop_commands.channel_statuses()}
+
+    for channel_id in ("discord", "qq", "feishu", "wecom", "dingtalk"):
+        assert rows[channel_id]["configured"] is False, channel_id
+        assert any(
+            key.endswith("_allowed_users") for key in rows[channel_id]["requiredKeys"]
+        ), channel_id
+
+
+@pytest.mark.asyncio
+async def test_memory_profile_endpoints_round_trip():
+    client = await _open_test_client()
+    try:
+        response = await client.get(
+            "/memory/profile", headers={"Authorization": "Bearer secret"},
+        )
+        payload = await response.json()
+        assert response.status == 200
+        assert payload["ok"] is True
+        assert payload["path"].endswith("user_profile.md")
+        assert "## Preferences" in payload["profile"]
+
+        saved = await client.post(
+            "/memory/profile",
+            headers={"Authorization": "Bearer secret"},
+            json={"profile": "# User Profile\n\n## Preferences\n- 喜欢黑咖啡\n"},
+        )
+        assert saved.status == 200
+        stored = (await saved.json())["profile"]
+        assert "- 喜欢黑咖啡" in stored
+
+        fetched = await client.get(
+            "/memory/profile", headers={"Authorization": "Bearer secret"},
+        )
+        assert "- 喜欢黑咖啡" in (await fetched.json())["profile"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_profile_save_rejects_non_string():
+    client = await _open_test_client()
+    try:
+        response = await client.post(
+            "/memory/profile",
+            headers={"Authorization": "Bearer secret"},
+            json={"profile": 42},
+        )
+        payload = await response.json()
+        assert response.status == 400
+        assert payload["ok"] is False
+        assert payload["error"] == "profile must be a string"
+    finally:
+        await client.close()
+
+
+def test_enqueue_failure_is_reported_instead_of_accepted(monkeypatch):
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "长任务")
+    sess.status = "running"
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("sqlite is read-only")
+
+    monkeypatch.setattr(manager, "_persist_pending_turns", boom)
+
+    with pytest.raises(web.HTTPInternalServerError):
+        manager.submit_prompt(sess.id, "排队的请求")
+
+    assert sess.pending_turns == []
+
+
+def test_promoted_queued_turn_is_not_reported_as_lost(monkeypatch):
+    """A crash between persisting the user turn and the dequeue must not lose it."""
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "第一个任务")
+    sess.pending_turns.append(
+        {"queue_id": "q-crash", "prompt": "排队的问题", "display_content": "排队的问题"}
+    )
+    manager._persist_pending_turns(sess)
+    monkeypatch.setattr(manager, "_mark_turn_active", lambda *_args, **_kwargs: None)
+
+    def crash_after_message(*_args, **_kwargs):
+        raise RuntimeError("power loss")
+
+    monkeypatch.setattr(manager, "_persist_pending_turns", crash_after_message)
+
+    with pytest.raises(RuntimeError):
+        manager._prepare_next_turn_locked(sess)
+
+    restarted = desktop_bridge.AgentManager()
+    contents = [message["content"] for message in restarted.sessions[sess.id].messages]
+
+    assert "排队的问题" in contents
+    assert not any(item.startswith("未执行（服务重启）") for item in contents)
+    # The prompt became a real turn, so the durable queue entry is dropped.
+    assert restarted.session_store.get_app_state(
+        f"{desktop_bridge._QUEUE_KEY_PREFIX}{sess.id}"
+    ) is None
+
+
+def test_queued_turn_without_persisted_message_is_reported_as_lost():
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "第一个任务")
+    manager.session_store.set_app_state(
+        f"{desktop_bridge._QUEUE_KEY_PREFIX}{sess.id}",
+        json.dumps([{"queue_id": "q-never-started", "prompt": "从未开始的请求"}]),
+    )
+
+    restarted = desktop_bridge.AgentManager()
+    contents = [m["content"] for m in restarted.sessions[sess.id].messages]
+
+    assert "未执行（服务重启）：从未开始的请求" in contents

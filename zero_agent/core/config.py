@@ -220,6 +220,8 @@ class AgentConfig:
             安全类扩展（permission_gate）始终生效.
         extensions_home: 扩展根目录，None 时使用 ``~/.zeroagent``.
         extensions_protected_writes: 额外的受保护写入前缀，修改前需人类同意.
+        extra_write_roots: 运行时附加的可写根（如 reflect 模块 WRITE_ROOTS 声明的
+            报告目录）；不来自 YAML，仅由 runner 注入.
         browser_tools: 浏览器工具加载模式 "auto" | "on" | "off"；默认 auto，
             仅在 [browser] 可选运行时可用时注册.
         sandbox_mode: code_run 的进程沙箱模式 "off" | "auto" | "macos" | "linux".
@@ -243,8 +245,9 @@ class AgentConfig:
     extensions_enabled: bool = True
     extensions_home: Optional[str] = None
     extensions_protected_writes: list[str] = field(default_factory=list)
+    extra_write_roots: list[str] = field(default_factory=list)
     browser_tools: str = "auto"
-    sandbox_mode: str = "off"
+    sandbox_mode: str = "auto"
 
     @property
     def resolved_language(self) -> str:
@@ -552,10 +555,10 @@ def _parse_sandbox_mode(value: object) -> str:
         value: 配置值.
 
     Returns:
-        ``off`` 或原始的模式字符串.
+        ``auto`` 或原始的模式字符串.
     """
     if value is None:
-        return "off"
+        return "auto"
     if isinstance(value, bool):
         # YAML 1.1 会把 off/on/yes/no 解析成布尔：`sandbox: off` 拿到的是 False。
         # False 就是 off，不需要告警；True 没有对应模式，告警并回退。

@@ -67,6 +67,10 @@ function lastCall() {
 }
 
 async function main() {
+  // Bootstrap/readiness probes resolve asynchronously; drop them first.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  fetchCalls.length = 0;
+
   await zeroAgent.rpc('session/plan', { sessionId: 'sess-123456789abc', task: 'build it' });
   const plan = lastCall();
   assert.equal(plan.url, 'http://127.0.0.1:14168/session/sess-123456789abc/plan');

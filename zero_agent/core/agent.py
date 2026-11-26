@@ -598,6 +598,7 @@ class ZeroAgent:
         initial_mode: TaskMode = TaskMode.OPEN,
         plan_path: Optional[str] = None,
         prompt_capabilities: Iterable[str] = (),
+        record_activity: bool = True,
     ) -> Generator[Any, None, TerminalEvent]:
         """执行单次 agent 任务.
 
@@ -611,6 +612,7 @@ class ZeroAgent:
             initial_mode: 新任务的初始 TaskMode，默认 OPEN.
             plan_path: PLAN/EXECUTING 任务必须提供的 plan 文件路径.
             prompt_capabilities: 本次任务运行环境支持的能力提示块.
+            record_activity: 是否刷新用户活跃时间戳；后台任务应传 False.
 
         Yields:
             str → 状态文本，供 UI 实时展示.
@@ -644,6 +646,9 @@ class ZeroAgent:
         # 创建工作目录和记忆目录
         os.makedirs(self.config.workspace_dir, exist_ok=True)
         self.memory.init_memory()
+        if record_activity:
+            from zero_agent.utils.activity import record_user_activity
+            record_user_activity(self.config.memory_dir)
 
         # 每个任务创建新 handler；等待用户的任务恢复同一契约和证据账本。
         self.handler = self._new_task_handler()
