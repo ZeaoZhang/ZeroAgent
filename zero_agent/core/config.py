@@ -284,6 +284,12 @@ class AgentConfig:
         except Exception:
             pass
 
+        # 2. 模型类型：与 resolved_tool_language 同口径。缺了这一步会出现
+        # 「工具描述中文、系统提示词英文」的分裂，中文 locale 缺失时尤甚。
+        for backend in self.llm_backends.values():
+            if any(k in backend.model.lower() for k in _CHINESE_MODEL_HINTS):
+                return "zh"
+
         return "en"
 
     @property

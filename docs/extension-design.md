@@ -626,6 +626,11 @@ extensions:
 
 目标：运行中改 skill / SOP / 插件 / `mcp.json` / config / 核心 Python 代码，都不需要人工审批或手动重启进程。
 
+这些能力写进系统提示词的 `<self_modification>` 块（`zero_agent/core/self_prompt.py`）：
+skills / SOP / plugins / `mcp.json` / 核心代码的**真实路径**、生效时机（下一轮 vs 热重启）、
+当前 `permissions.mode` 与 `sandbox` 语义、以及常开的底线（系统目录、凭据、用户数据、
+`.git` 不可写）。模型不需要猜路径，也不会在改完之后才发现被拦。
+
 ### 15.1 每轮同步（`reload_workflow`）
 
 `AgentLoop` 在每次 turn 边界调用 `ZeroAgent.reload_workflow()`：

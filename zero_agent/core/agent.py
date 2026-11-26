@@ -1879,6 +1879,15 @@ class ZeroAgent:
             dynamic=True,
         ))
 
+        # 自我扩展/自我升级：真实路径 + 当前模式 + 底线，避免模型靠猜测改自己
+        from zero_agent.core import self_prompt
+
+        blocks.append(PromptBlock(
+            "self_modification",
+            f"\n{self_prompt.build(self.config, lang)}\n",
+            dynamic=True,
+        ))
+
         extra_sys = getattr(self.client, "extra_sys_prompt", "")
         if extra_sys:
             blocks.append(PromptBlock("backend_extra", f"\n{extra_sys}", dynamic=True))
