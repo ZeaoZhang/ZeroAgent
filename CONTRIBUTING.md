@@ -41,10 +41,13 @@ pytest tests/ -v
 
 ## 工具边界
 
-`ToolRegistry.with_builtins()` 的默认注册范围必须保持为 9 个核心原子工具:
-`code_run`、`file_read`、`file_write`、`file_patch`、`web_scan`、`web_execute_js`、`update_working_checkpoint`、`start_long_term_update`、`ask_user`。
+`ToolRegistry.with_builtins()` 的默认注册范围必须保持为 15 个核心原子工具:
+`complete_task`、`code_run`、`file_read`、`file_write`、`file_patch`、`find`、`read_doc`、`fetch`、`web_search`、`update_working_checkpoint`、`start_long_term_update`、`ask_user`，
+以及三个控制/画像工具 `enter_plan_mode`、`add_done_hook`、`memory_profile`（替代已移除的
+`code_run(inline_eval=True)` 与直接改 `_done_hooks`）；新增或删除默认工具必须同时更新本节与
+`tests/test_registry.py`。
 
-`search_web`、`vision`、`memory_plot`、`send_im` 属于 ZeroAgent 可选/实验性扩展模块。不要默认放进 `with_builtins()`。
+`web_*` 浏览器工具属于可选能力扩展 `zero_agent/extensions/builtin/browser_tools.py`，由 `extensions.browser` 控制，不要重新放回 `with_builtins()`。`search_web`、`vision`、`memory_plot`、`send_im` 属于 ZeroAgent 可选/实验性扩展模块。
 
 ## 项目结构
 
@@ -52,7 +55,7 @@ pytest tests/ -v
 zero_agent/
   core/        — 编排层: exceptions, types, config, handler, loop, agent
   llm/         — LLM 后端: base, sessions, failover, factory, converters, sse_parsers
-  tools/       — 工具系统: registry, builtin/(code, file, memory, user, web) 默认核心; im/search/vision/memory_plot 可选扩展
+  tools/       — 工具系统: registry, builtin/(code, file, memory, user, utility) 默认核心; browser_tools/vision/im/search/memory_plot 可选扩展
   memory/      — 记忆管理: manager, compress_session
   reflect/     — 反射式唤醒: runner, autonomous, goal_mode, scheduler, agent_team_worker
   browser/     — 浏览器自动化 runtime

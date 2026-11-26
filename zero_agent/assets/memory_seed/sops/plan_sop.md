@@ -2,7 +2,7 @@
 
 **触发**：3步以上有依赖/多文件协同/条件分支/需并行 | **禁用**：1-2步简单任务直接做
 
-**公共入口**：用户在 Desktop / CLI / TUI 输入 `/plan <task>`。前端必须创建真实 `TaskMode.PLAN` 任务，并把创建出的 `plan_XXX/plan.md` 路径写入 `TaskContract.plan_path`；`TaskContract` 是 plan 状态的唯一状态源，禁止恢复旧的 `working` 标志流程或从聊天文本猜测状态。内部工具、兼容层或 subagent 仍可保留 `code_run({'inline_eval': True, 'script': 'handler.enter_plan_mode("./plan_XXX/plan.md")'})`，但这只是兼容入口，不能替代公共 `/plan <task>`。
+**公共入口**：用户在 Desktop / CLI / TUI 输入 `/plan <task>`。前端必须创建真实 `TaskMode.PLAN` 任务，并把创建出的 `plan_XXX/plan.md` 路径写入 `TaskContract.plan_path`；`TaskContract` 是 plan 状态的唯一状态源，禁止恢复旧的 `working` 标志流程或从聊天文本猜测状态。内部工具或 subagent 走专用控制工具 `enter_plan_mode(plan_path="./plan_XXX/plan.md")`，不能替代公共 `/plan <task>`。
 
 任务开始前必须先创建工作目录 `./plan_XXX/`（XXX=任务英文短名），且工作目录布局固定：
 
@@ -35,7 +35,7 @@
 1. 创建工作目录 `mkdir plan_XXX/`
 2. 确保 `plan_XXX/plan.md` 存在，保留后续 `exploration_findings.md`、`verify_context.json`、`evidence.json`、`result.md` 的固定位置
 3. 从上下文中的 L1 Insight 索引匹配可用领域SOP
-4. 通过 `/plan <task>` 或兼容的 `enter_plan_mode("./plan_XXX/plan.md")` 进入 `TaskMode.PLAN`，状态只以 `TaskContract` 为准
+4. 通过 `/plan <task>` 或 `enter_plan_mode(plan_path="./plan_XXX/plan.md")` 进入 `TaskMode.PLAN`，状态只以 `TaskContract` 为准
 
 ### 步骤2：启动探索subagent（监察模式）
 

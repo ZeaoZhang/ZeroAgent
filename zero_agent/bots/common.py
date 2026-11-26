@@ -453,7 +453,15 @@ def format_restore() -> tuple:
 # —— 访问控制 ——
 
 def public_access(allowed: set) -> bool:
-    return not allowed or "*" in allowed
+    """Only an explicit ``*`` grants public access; an empty list denies all."""
+    return "*" in allowed
+
+
+def group_chats_allowed() -> bool:
+    """Group chats stay closed unless ZA_ALLOW_GROUP_CHATS opts in."""
+    return os.environ.get("ZA_ALLOW_GROUP_CHATS", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 
 def to_allowed_set(value) -> set:

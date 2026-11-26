@@ -23,6 +23,7 @@ from zero_agent.bots.common import (
     AgentBotMixin,
     channel_is_linked,
     ensure_single_instance,
+    group_chats_allowed,
     load_keys,
     public_access,
     redirect_log,
@@ -308,6 +309,8 @@ class DingTalkApp(AgentBotMixin):
                 return
             # 群聊使用 group: 前缀区分会话类型
             is_group = conversation_type == "2" and conversation_id
+            if is_group and not group_chats_allowed():
+                return
             chat_id = f"group:{conversation_id}" if is_group else sender_id
             print(f"[DingTalk] message from {sender_name} ({sender_id}): {content}")
             if content.startswith("/"):
@@ -348,6 +351,7 @@ class DingTalkApp(AgentBotMixin):
 if __name__ == "__main__":
     _LOCK_SOCK = ensure_single_instance(19530, "DingTalk")
     require_runtime(runner, "DingTalk",
-                    dingtalk_client_id=CLIENT_ID, dingtalk_client_secret=CLIENT_SECRET)
+                    dingtalk_client_id=CLIENT_ID, dingtalk_client_secret=CLIENT_SECRET,
+                    dingtalk_allowed_users=ALLOWED)
     redirect_log(__file__, "dingtalkapp.log", "DingTalk", ALLOWED)
     asyncio.run(DingTalkApp().start())

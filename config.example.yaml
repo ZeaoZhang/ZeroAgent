@@ -36,30 +36,48 @@ extensions:
   # file are not re-asked within 600 seconds. Writes inside workspace_dir are
   # never gated.
   protected_writes: []
-  # Optional process sandbox for code_run: off | auto | macos | linux.
-  # "auto" picks sandbox-exec on macOS and bwrap on Linux; unsupported
-  # platforms degrade to no isolation instead of failing the command.
+  # Browser-control tools (web_*): auto | true | false.
+  # auto registers them only when the optional [browser] runtime is importable;
+  # true requires it; false disables the whole browser tool bundle.
+  browser: auto
+  # Process sandbox for code_run: off | auto | macos | linux.
+  # "auto" uses sandbox-exec on macOS and bwrap on Linux, and warns plus
+  # degrades when neither is available. An explicit "macos"/"linux" is a
+  # contract: if that sandbox is unavailable the command is refused instead of
+  # running unisolated. Set "off" to accept the risk explicitly.
   # Takes effect on config reload (registry rebuild); protected_writes is refreshed
   # on every reload; enabled/home need a restart.
   # 注意：YAML 1.1 会把未加引号的 off/on 解析成布尔，建议写成 "off"。
-  sandbox: "off"
+  sandbox: "auto"
 
 # Optional local LiteLLM model price/context-window cache.
 # litellm_model_cost_map: ./model_prices_and_context_window.json
 
 bots:
+  # Every channel needs at least one platform user ID in its allow list before
+  # it will start; an empty list means "nobody", not "everybody". Set "*" to
+  # explicitly publish a bot. The matching environment variable overrides the
+  # list here (for example TG_ALLOWED_USERS=1001,1002).
+  # Group chats (WeChat/Discord guild/QQ/DingTalk/WeCom) stay disabled unless
+  # ZA_ALLOW_GROUP_CHATS=1 is set in the environment.
   tg_bot_token: "${TG_BOT_TOKEN}"
-  # Set TG_ALLOWED_USERS=1001,1002; the environment value overrides this list.
   tg_allowed_users: []
   discord_bot_token: "${DISCORD_BOT_TOKEN}"
+  discord_allowed_users: []
   qq_app_id: "${QQ_APP_ID}"
   qq_app_secret: "${QQ_APP_SECRET}"
+  qq_allowed_users: []
   fs_app_id: "${FS_APP_ID}"
   fs_app_secret: "${FS_APP_SECRET}"
+  fs_allowed_users: []
   wecom_bot_id: "${WECOM_BOT_ID}"
   wecom_secret: "${WECOM_SECRET}"
+  wecom_allowed_users: []
   dingtalk_client_id: "${DINGTALK_CLIENT_ID}"
   dingtalk_client_secret: "${DINGTALK_CLIENT_SECRET}"
+  dingtalk_allowed_users: []
+  # WeChat keeps its bot token in ~/.wxbot/token.json; only the allow list lives here.
+  wechat_allowed_users: []
 
 llm_backends:
   # Claude / Anthropic Messages API through LiteLLM.

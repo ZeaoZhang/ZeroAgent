@@ -58,6 +58,7 @@ def code_run(
     env: Optional[dict[str, str]] = None,
     sandbox_mode: str = "",
     sandbox_root: str = "",
+    sandbox_extra_roots: Optional[List[str]] = None,
 ) -> Generator[str, None, dict]:
     """在子进程中执行 Python 或 shell 代码.
 
@@ -72,6 +73,9 @@ def code_run(
         code_cwd: Python 临时 .py 文件存放目录，默认使用系统临时目录.
         stop_signal: 外部停止信号，传入可变列表 [True] 时终止执行.
         maxlen: 返回 stdout 的最大字符数，超出部分截断.
+        sandbox_mode: 沙箱模式，空串表示不包装.
+        sandbox_root: 沙箱写入根（workspace），不是模型可控的 cwd.
+        sandbox_extra_roots: 额外写入根（运行时注入的报告目录等）.
 
     Yields:
         执行过程中的状态信息字符串.
@@ -148,28 +152,46 @@ def code_run(
 
     original_cmd = cmd
     sandbox_applied = False
+    sandbox_reason = ""
+    requested_mode = sandbox_mode
     if sandbox_mode and sandbox_mode != "off":
         try:
             from zero_agent.extensions.sandbox import wrap_command
 
             # 写入根必须是 workspace，而不是模型可指定的 cwd
             cmd, sandbox_applied, sandbox_reason = wrap_command(
-                cmd, sandbox_root or cwd, sandbox_mode,
+                cmd, sandbox_root or cwd, sandbox_mode, sandbox_extra_roots or (),
             )
             if sandbox_reason:
                 yield f"[Sandbox] {sandbox_reason}\n"
         except Exception as sandbox_exc:  # noqa: BLE001 - 沙箱问题不得阻断执行
             sandbox_applied = False
-            yield f"[Sandbox] 包装失败，直接执行: {sandbox_exc}\n"
+            sandbox_reason = f"wrap failed: {sandbox_exc}"
+            yield f"[Sandbox] 包装失败: {sandbox_exc}\n"
+
+    if sandbox_applied:
+        from zero_agent.extensions.sandbox import writable_roots
+
+        roots = writable_roots(sandbox_root or cwd, sandbox_extra_roots or ())
+        yield f"[Sandbox] active (writable: {', '.join(roots)})\n"
 
     process = None
     try:
+        if requested_mode in {"macos", "linux"} and not sandbox_applied:
+            # An explicit platform sandbox is a contract: never silently run
+            # unsandboxed. Kept inside the try so the temp script is cleaned up.
+            yield f"[Error] Sandbox {requested_mode} unavailable: {sandbox_reason}\n"
+            return {
+                "status": "error",
+                "msg": f"sandbox {requested_mode} unavailable: {sandbox_reason}",
+                "exit_code": None,
+            }
         try:
             process = _spawn(cmd)
         except (OSError, ValueError):
-            if not sandbox_applied:
+            if not sandbox_applied or requested_mode != "auto":
                 raise
-            # 包装后可执行文件缺失等：回退为原始命令
+            # auto 模式下沙箱不可用：明确告警后回退为原始命令
             yield "[Sandbox] 沙箱启动失败，回退为直接执行\n"
             process = _spawn(original_cmd)
         start_t = time.time()
@@ -292,14 +314,6 @@ def register_code_tools(registry: ToolRegistry, config: AgentConfig) -> None:
                         lang,
                     ),
                 },
-                "inline_eval": {
-                    "type": "boolean",
-                    "description": _t(
-                        "不允许使用除非明确要求",
-                        "DO NOT USE except explicitly specified.",
-                        lang,
-                    ),
-                },
             },
         },
         handler=_make_code_run_handler(config),
@@ -372,32 +386,6 @@ def _make_code_run_handler(config: AgentConfig):
                     action=StepAction.CONTINUE,
                 )
 
-        # inline_eval: 在进程内执行 Python 代码（用于自省/调试）
-        if code_type == "inline_eval" or (code_type == "python" and args.get("inline_eval")):
-            yield f"[Action] Running inline_eval\n"
-            try:
-                local_ns = {
-                    "handler": handler,
-                    "history": getattr(handler, "history_info", []),
-                }
-                # 如果可通过 handler 获取，则添加 parent 引用。
-                try:
-                    local_ns["parent"] = handler.parent
-                except Exception:
-                    pass
-                # eval() 优先：表达式直接返回值，无需 LLM 写赋值语句
-                # SyntaxError 时 fallback 到 exec() 处理语句类代码
-                try:
-                    result = repr(eval(code, {}, local_ns))
-                except SyntaxError:
-                    exec(code, {}, local_ns)
-                    result = str(local_ns.get("result", local_ns.get("_", "")))
-                yield f"[Status] OK inline_eval\n[Stdout]\n{result[:5000]}\n"
-                return {"status": "success", "stdout": result[:10000], "exit_code": 0}
-            except Exception as e:
-                yield f"[Status] ERR inline_eval: {e}\n"
-                return {"status": "error", "msg": str(e)}
-
         try:
             timeout = int(args.get("timeout", 60))
         except Exception:
@@ -443,6 +431,7 @@ def _make_code_run_handler(config: AgentConfig):
             env=subprocess_env,
             sandbox_mode=sandbox_mode,
             sandbox_root=str(config.workspace_dir),
+            sandbox_extra_roots=list(getattr(config, "extra_write_roots", []) or []),
         ))
 
     def _handler(
@@ -464,7 +453,7 @@ def _make_code_run_handler(config: AgentConfig):
                 "[Error] code_run type must be a non-empty string.",
             )
         code_type = raw_type.strip().lower()
-        if code_type not in _VALID_CODE_TYPES | {"inline_eval"}:
+        if code_type not in _VALID_CODE_TYPES:
             return _code_run_error(
                 "code_run_invalid_arguments",
                 f"[Error] Unsupported code type: {code_type}.",
@@ -492,6 +481,15 @@ def _make_code_run_handler(config: AgentConfig):
                 "code_run_invalid_arguments",
                 "[Error] code_run cwd must be a string.",
             )
+        try:
+            resolved_cwd = resolve_workspace_path(
+                raw_cwd or "./", config.workspace_dir
+            )
+        except ValueError as exc:
+            return _code_run_error(
+                "code_run_invalid_cwd",
+                f"[Error] cwd must stay inside workspace: {exc}",
+            )
 
         raw_script = args.get("script")
         raw_script_path = args.get("script_path")
@@ -515,7 +513,9 @@ def _make_code_run_handler(config: AgentConfig):
             )
 
         normalized = dict(args)
-        normalized.update({"type": code_type, "timeout": timeout, "cwd": raw_cwd})
+        normalized.update(
+            {"type": code_type, "timeout": timeout, "cwd": resolved_cwd}
+        )
         source = "missing"
         if script_path:
             try:

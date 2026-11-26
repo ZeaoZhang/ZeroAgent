@@ -35,6 +35,7 @@ async function adapterTests() {
     navigator: { platform: 'MacIntel' },
     WebSocket: FakeWebSocket,
     console,
+    URLSearchParams,
     fetch: async (url, init = {}) => {
       calls.push({ url, init });
       return {
@@ -47,7 +48,15 @@ async function adapterTests() {
   };
   context.globalThis = context;
   vm.runInNewContext(fs.readFileSync(adapterPath, 'utf8'), context, { filename: adapterPath });
+  // Bootstrap resolves asynchronously; let the /status probe settle first.
+  await new Promise((resolve) => setTimeout(resolve, 0));
   calls.length = 0;
+
+  // No token anywhere: there is no authenticated media URL to hand out.
+  assert.equal(
+    windowObj.zeroAgent.sessionFileUrl('bridge/a', 'reports/a b.pdf'),
+    '',
+  );
 
   await windowObj.zeroAgent.rpc('channels/list', {});
   assert.equal(calls[0].url, 'http://127.0.0.1:14168/channels');
@@ -89,6 +98,17 @@ async function adapterTests() {
     windowObj.zeroAgent.rpc('channels/wechat/login/status', {}),
     /missing sessionId/,
   );
+
+  calls.length = 0;
+  const profile = await windowObj.zeroAgent.rpc('memory/profile/get', {});
+  assert.equal(profile.ok, true);
+  assert.equal(calls[0].url, 'http://127.0.0.1:14168/memory/profile');
+  assert.equal(calls[0].init.method, undefined);
+
+  await windowObj.zeroAgent.rpc('memory/profile/save', { profile: '- 喜欢黑咖啡' });
+  assert.equal(calls[1].url, 'http://127.0.0.1:14168/memory/profile');
+  assert.equal(calls[1].init.method, 'POST');
+  assert.deepEqual(JSON.parse(calls[1].init.body), { profile: '- 喜欢黑咖啡' });
 
 }
 
@@ -188,9 +208,16 @@ function makeAppContext() {
     'wechat-qr-image',
     'wechat-qr-status',
     'channel-config-error',
+    'memory-settings-modal',
+    'memory-settings-btn',
+    'memory-profile-input',
+    'memory-settings-error',
+    'memory-settings-save',
   ]) {
     elements.set(id, new FakeElement('div'));
   }
+  elements.set('memory-profile-input', new FakeElement('textarea'));
+  elements.set('memory-settings-save', new FakeElement('button'));
   const context = {
     console,
     Date,
@@ -475,7 +502,239 @@ globalThis.__testExports = {
   assert.equal(elements.get('channel-config-error').classList.contains('hidden'), false);
 }
 
-Promise.all([adapterTests(), rendererTests()])
+async function bridgeAuthTests() {
+  const calls = [];
+  const replaced = [];
+  const storage = new Map();
+  const windowObj = {
+    location: {
+      protocol: 'http:',
+      hostname: '127.0.0.1',
+      hash: '#token=abc123',
+      pathname: '/',
+      search: '',
+    },
+    history: { replaceState: (...args) => replaced.push(args) },
+    sessionStorage: {
+      getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+      setItem: (key, value) => storage.set(key, value),
+    },
+  };
+  class FakeWebSocket {
+    static get CONNECTING() { return 0; }
+    static get OPEN() { return 1; }
+    constructor() { this.readyState = 0; }
+    addEventListener() {}
+  }
+  const context = {
+    window: windowObj,
+    location: windowObj.location,
+    document: { title: 'ZeroAgent' },
+    navigator: { platform: 'MacIntel' },
+    WebSocket: FakeWebSocket,
+    console,
+    URLSearchParams,
+    fetch: async (url, init = {}) => {
+      calls.push({ url, init });
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        text: async () => JSON.stringify({ ok: true, channels: [] }),
+      };
+    },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(fs.readFileSync(adapterPath, 'utf8'), context, { filename: adapterPath });
+
+  // The hash token is persisted and dropped; readiness waits for /status.
+  assert.equal(replaced.length, 1);
+  assert.equal(storage.get('za_bridge_token'), 'abc123');
+  assert.equal(calls[0].url, 'http://127.0.0.1:14168/status');
+  assert.equal(calls[0].init.credentials, undefined);
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer abc123');
+
+  assert.equal(
+    windowObj.zeroAgent.sessionFileUrl('bridge/a', 'reports/a b.pdf'),
+    'http://127.0.0.1:14168/session/bridge%2Fa/file?path=reports%2Fa+b.pdf&token=abc123',
+  );
+  assert.equal(
+    windowObj.zeroAgent.sessionImageUrl('bridge/a', 'shots/a b.png'),
+    'http://127.0.0.1:14168/session/bridge%2Fa/image?path=shots%2Fa+b.png&token=abc123',
+  );
+
+  calls.length = 0;
+  await windowObj.zeroAgent.rpc('channels/list', {});
+
+  assert.equal(calls[0].url, 'http://127.0.0.1:14168/channels');
+  assert.equal(calls[0].init.credentials, undefined);
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer abc123');
+}
+
+async function memoryProfileTests() {
+  const { context, elements } = makeAppContext();
+  const source = fs.readFileSync(appPath, 'utf8');
+  const bridgeMarker = source.indexOf('// ─── Bridge events');
+  assert.ok(bridgeMarker > 0);
+  vm.runInNewContext(source.slice(0, bridgeMarker) + `
+memorySettingsModal = document.getElementById('memory-settings-modal');
+memorySettingsBtn = document.getElementById('memory-settings-btn');
+memoryProfileInput = document.getElementById('memory-profile-input');
+memorySettingsError = document.getElementById('memory-settings-error');
+memorySettingsSaveBtn = document.getElementById('memory-settings-save');
+globalThis.__memoryExports = { openMemorySettings, closeMemorySettings, saveMemoryProfile };
+`, context, { filename: appPath });
+
+  const t = context.__memoryExports;
+  const modal = elements.get('memory-settings-modal');
+  const input = elements.get('memory-profile-input');
+  const saveBtn = elements.get('memory-settings-save');
+  const errorEl = elements.get('memory-settings-error');
+  const calls = [];
+  let pending = null;
+  context.window.zeroAgent = {
+    rpc: (method, params) => new Promise((resolve, reject) => {
+      calls.push({ method, params });
+      pending = { resolve, reject };
+    }),
+  };
+
+  // 1. Save stays disabled until the profile actually loaded.
+  const opening = t.openMemorySettings();
+  assert.equal(saveBtn.disabled, true);
+  await t.saveMemoryProfile();
+  assert.equal(calls.length, 1, 'save must not be sent before a successful load');
+  assert.equal(calls[0].method, 'memory/profile/get');
+  pending.resolve({ profile: '- 喜欢黑咖啡' });
+  await opening;
+  assert.equal(input.value, '- 喜欢黑咖啡');
+  assert.equal(saveBtn.disabled, false);
+
+  // 2. After a successful load, saving sends the current textarea content.
+  const saving = t.saveMemoryProfile();
+  assert.equal(calls[1].method, 'memory/profile/save');
+  assert.equal(calls[1].params.profile, '- 喜欢黑咖啡');
+  pending.resolve({ ok: true });
+  await saving;
+
+  // 3. A failed load keeps save disabled and surfaces the error.
+  const failing = t.openMemorySettings();
+  pending.reject(Object.assign(new Error('boom'), { status: 500 }));
+  await failing;
+  assert.equal(saveBtn.disabled, true);
+  assert.equal(errorEl.classList.contains('hidden'), false);
+  await t.saveMemoryProfile();
+  assert.equal(calls.filter((call) => call.method === 'memory/profile/save').length, 1);
+
+  // 4. Closing invalidates an in-flight load, so its result is discarded.
+  const stale = t.openMemorySettings();
+  t.closeMemorySettings();
+  pending.resolve({ profile: '- 过期内容' });
+  await stale;
+  assert.equal(input.value, '');
+  assert.equal(saveBtn.disabled, true);
+  assert.equal(modal.classList.contains('hidden'), true);
+}
+
+async function tokenStorageTests() {
+  async function load({ hash, storage, fetchImpl }) {
+    const calls = [];
+    const replaced = [];
+    const events = [];
+    const sockets = [];
+    const store = storage || new Map();
+    const windowObj = {
+      location: {
+        protocol: 'http:', hostname: '127.0.0.1', hash, pathname: '/', search: '',
+      },
+      history: { replaceState: (...args) => replaced.push(args) },
+      sessionStorage: {
+        getItem: (key) => (store.has(key) ? store.get(key) : null),
+        setItem: (key, value) => store.set(key, value),
+      },
+    };
+    let agent = null;
+    // Register listeners the moment the adapter publishes its API, so the
+    // synchronous "token missing" error is observable.
+    Object.defineProperty(windowObj, 'zeroAgent', {
+      configurable: true,
+      get: () => agent,
+      set: (value) => {
+        agent = value;
+        value.onBridgeReady((payload) => events.push(['ready', payload]));
+        value.onBridgeError((payload) => events.push(['error', payload]));
+      },
+    });
+    class FakeWebSocket {
+      static get CONNECTING() { return 0; }
+      static get OPEN() { return 1; }
+      constructor(url) { this.readyState = 0; this.url = url; sockets.push(url); }
+      addEventListener() {}
+    }
+    const context = {
+      window: windowObj,
+      location: windowObj.location,
+      document: { title: 'ZeroAgent' },
+      navigator: { platform: 'MacIntel' },
+      WebSocket: FakeWebSocket,
+      console,
+      URLSearchParams,
+      setTimeout,
+      fetch: (url, init = {}) => {
+        calls.push({ url, init });
+        return fetchImpl(url, init);
+      },
+    };
+    context.globalThis = context;
+    vm.runInNewContext(fs.readFileSync(adapterPath, 'utf8'), context, { filename: adapterPath });
+    return { calls, replaced, events, sockets, windowObj, storage: store };
+  }
+
+  const okResponse = () => ({
+    ok: true, status: 200, statusText: 'OK', text: async () => '{"ok":true,"running":true}',
+  });
+
+  // 1. A hash token is stored, dropped from the URL, and used everywhere.
+  const withHash = await load({
+    hash: '#token=abc123',
+    fetchImpl: async () => okResponse(),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(withHash.replaced.length, 1, 'the hash must be cleared after storing');
+  assert.equal(withHash.storage.get('za_bridge_token'), 'abc123');
+  assert.equal(withHash.sockets.length, 1);
+  assert.ok(withHash.sockets[0].includes('token=abc123'));
+  assert.equal(withHash.calls[0].url, 'http://127.0.0.1:14168/status');
+  assert.equal(withHash.calls[0].init.headers.Authorization, 'Bearer abc123');
+  assert.equal(withHash.events[0][0], 'ready');
+
+  // 2. Reload with only sessionStorage: no hash to clear, same token in use.
+  const reloaded = await load({
+    hash: '',
+    storage: new Map([['za_bridge_token', 'reload-token']]),
+    fetchImpl: async () => okResponse(),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(reloaded.replaced.length, 0);
+  assert.equal(reloaded.sockets.length, 1);
+  assert.ok(reloaded.sockets[0].includes('token=reload-token'));
+  assert.equal(reloaded.calls[0].init.headers.Authorization, 'Bearer reload-token');
+  assert.equal(reloaded.events[0][0], 'ready');
+
+  // 3. No token anywhere: no ws, no request, and an explicit auth error.
+  const missing = await load({ hash: '', fetchImpl: async () => okResponse() });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(missing.calls.length, 0);
+  assert.equal(missing.sockets.length, 0);
+  assert.equal(missing.events.length, 1);
+  assert.equal(missing.events[0][0], 'error');
+  assert.equal(missing.events[0][1].type, 'auth');
+}
+
+Promise.all([adapterTests(), rendererTests(), bridgeAuthTests(), memoryProfileTests(), tokenStorageTests()])
   .then(() => console.log('frontend_channels.test.js OK'))
   .catch((error) => {
     console.error(error);

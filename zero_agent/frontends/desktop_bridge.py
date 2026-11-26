@@ -312,6 +312,8 @@ class SessionGroup:
     position: int = 0
 
 _DESKTOP_SESSION_ID_RE = re.compile(r"^sess-[0-9a-f]{12}$")
+_QUEUE_KEY_PREFIX = "pending_turns:"
+_ACTIVE_TURN_KEY_PREFIX = "active_turn:"
 
 
 def _desktop_log_path(sessions_dir: str, sid: str) -> str:
@@ -488,6 +490,7 @@ class AgentManager:
         self.lock = threading.RLock()
         base_config = self._load_base_config()
         self.workspace_dir = _resolve_runtime_path(base_config.workspace_dir)
+        self.memory_dir = _resolve_runtime_path(base_config.memory_dir)
         self.sessions_dir = _resolve_runtime_path(base_config.sessions_dir)
         self.config_path = str(getattr(base_config, "_source_path", default_config_path()))
         self.config: Dict[str, Any] = _public_config_snapshot(base_config)
@@ -584,6 +587,43 @@ class AgentManager:
             for field, value in values.items():
                 setattr(sess, field, copy.deepcopy(value))
 
+    def _persist_pending_turns(
+        self, sess: Session, *, raise_on_error: bool = False
+    ) -> None:
+        """Mirror the in-memory queue so a restart can report lost turns.
+
+        Args:
+            sess: 会话.
+            raise_on_error: True 时把存储失败抛给调用者，用于「接口已承诺
+                入队」的路径；内部清理路径保持只记日志。
+
+        Raises:
+            Exception: 仅当 ``raise_on_error`` 为 True 且写入失败.
+        """
+        key = f"{_QUEUE_KEY_PREFIX}{sess.id}"
+        try:
+            if sess.pending_turns:
+                self.session_store.set_app_state(
+                    key, json.dumps(sess.pending_turns, ensure_ascii=False)
+                )
+            else:
+                self.session_store.delete_app_state(key)
+        except Exception as exc:
+            print(f"persist pending turns failed: {exc}", file=sys.stderr)
+            if raise_on_error:
+                raise
+
+    def _mark_turn_active(self, sess: Session, active: bool) -> None:
+        """Track whether a turn is in flight, so restarts do not lie."""
+        key = f"{_ACTIVE_TURN_KEY_PREFIX}{sess.id}"
+        try:
+            if active:
+                self.session_store.set_app_state(key, "1")
+            else:
+                self.session_store.delete_app_state(key)
+        except Exception as exc:
+            print(f"mark turn active failed: {exc}", file=sys.stderr)
+
     def _persist_sessions(self, *, raise_on_error: bool = True) -> None:
         """Persist non-empty in-memory sessions to SQLite."""
         try:
@@ -632,6 +672,62 @@ class AgentManager:
             self.active_session_id = next(iter(self.sessions))
         else:
             self.active_session_id = None
+
+        self._restore_interrupted_turns()
+
+    def _restore_interrupted_turns(self) -> None:
+        """Report turns the previous process never finished, then clear markers."""
+        for sess in list(self.sessions.values()):
+            try:
+                queue_key = f"{_QUEUE_KEY_PREFIX}{sess.id}"
+                active_key = f"{_ACTIVE_TURN_KEY_PREFIX}{sess.id}"
+                try:
+                    raw_queue = self.session_store.get_app_state(queue_key)
+                except Exception:
+                    raw_queue = None
+                queued: list = []
+                if raw_queue:
+                    try:
+                        parsed = json.loads(raw_queue)
+                        queued = parsed if isinstance(parsed, list) else []
+                    except (TypeError, ValueError):
+                        queued = []
+                if queued:
+                    started = {
+                        str(message.get("queue_id"))
+                        for message in sess.messages
+                        if message.get("queue_id")
+                    }
+                    for item in queued:
+                        queue_id = str((item or {}).get("queue_id") or "")
+                        if queue_id and queue_id in started:
+                            # Already promoted into a real turn before the crash.
+                            continue
+                        prompt_text = str((item or {}).get("prompt") or "").strip()
+                        if prompt_text:
+                            self.add_message(
+                                sess, "system",
+                                f"未执行（服务重启）：{prompt_text}",
+                                kind="queue_interrupted",
+                            )
+                    self.session_store.delete_app_state(queue_key)
+                try:
+                    active_marker = self.session_store.get_app_state(active_key)
+                except Exception:
+                    active_marker = None
+                if active_marker:
+                    sess.terminal_status = "interrupted"
+                    sess.terminal_reason = "bridge_restart"
+                    if sess.plan_status in {"planning", "executing"}:
+                        sess.plan_status = "failed"
+                    self.add_message(
+                        sess, "system",
+                        "上次任务在服务重启时中断，请重新发送。",
+                        kind="turn_interrupted",
+                    )
+                    self.session_store.delete_app_state(active_key)
+            except Exception as exc:
+                print(f"restore interrupted turns failed: {exc}", file=sys.stderr)
 
 
 
@@ -1026,6 +1122,28 @@ class AgentManager:
         emit_session_state(sess, "group-changed")
         return result
 
+    def _profile_memory_manager(self):
+        from zero_agent.memory.manager import MemoryManager
+
+        mm = MemoryManager(
+            memory_dir=self.memory_dir,
+            workspace_dir=self.workspace_dir,
+            language=str(self.config.get("language") or "auto"),
+        )
+        mm.init_memory()
+        return mm
+
+    def memory_profile(self) -> dict:
+        """Return the injected user profile and its path."""
+        mm = self._profile_memory_manager()
+        return {"profile": mm.read_user_profile(), "path": mm.profile_path}
+
+    def save_memory_profile(self, profile: str) -> dict:
+        """Replace the user profile file and return the stored text."""
+        mm = self._profile_memory_manager()
+        mm.write_user_profile(profile)
+        return {"profile": mm.read_user_profile(), "path": mm.profile_path}
+
     def delete_session(self, sid: str) -> dict:
         with self.lock:
             key = ("delete", sid)
@@ -1061,6 +1179,8 @@ class AgentManager:
                     sid,
                     active_session_id=persisted_active,
                 )
+                self.session_store.delete_app_state(f"{_QUEUE_KEY_PREFIX}{sid}")
+                self.session_store.delete_app_state(f"{_ACTIVE_TURN_KEY_PREFIX}{sid}")
             except Exception:
                 self.sessions[sid] = sess
                 self.active_session_id = previous_active
@@ -1315,6 +1435,17 @@ class AgentManager:
                     "image_ids": image_ids,
                 }
                 sess.pending_turns.append(queued)
+                try:
+                    self._persist_pending_turns(sess, raise_on_error=True)
+                except Exception:
+                    sess.pending_turns.pop()
+                    raise web.HTTPInternalServerError(
+                        text=json.dumps(
+                            {"error": "failed to persist the queued prompt"},
+                            ensure_ascii=False,
+                        ),
+                        content_type="application/json",
+                    )
                 sess.updated_at = time.time()
                 return {
                     "ok": True,
@@ -1341,6 +1472,7 @@ class AgentManager:
                 name=f"Turn-{sid}",
             )
             sess.thread = t
+            self._mark_turn_active(sess, True)
             t.start()
             seq = sess.msg_seq
         return {"ok": True, "sessionId": sid, "accepted": True, "queued": False, "userMessageId": user_msg["id"], "seq": seq}
@@ -1395,6 +1527,7 @@ class AgentManager:
             sess.terminal_reason = ""
             sess.partial = {"id": sess.msg_seq + 1, "role": "assistant", "content": "", "ts": time.time(), "partial": True}
             sess.thread = threading.Thread(target=self._run_submitted_turn, args=(sess, agent, display_q, token), daemon=True, name=f"Plan-{sid}")
+            self._mark_turn_active(sess, True)
             sess.thread.start()
             seq = sess.msg_seq
             self._persist_sessions()
@@ -1441,6 +1574,7 @@ class AgentManager:
             sess.terminal_reason = ""
             sess.partial = {"id": sess.msg_seq + 1, "role": "assistant", "content": "", "ts": time.time(), "partial": True}
             sess.thread = threading.Thread(target=self._run_submitted_turn, args=(sess, agent, display_q, token), daemon=True, name=f"Execute-{sid}")
+            self._mark_turn_active(sess, True)
             sess.thread.start()
             seq = sess.msg_seq
             self._persist_sessions()
@@ -1598,14 +1732,19 @@ class AgentManager:
         if not sess.pending_turns or self.sessions.get(sess.id) is not sess:
             return None
 
-        queued = sess.pending_turns.pop(0)
+        queued = sess.pending_turns[0]
         extra = {
             "display_content": queued.get("display_content", queued.get("prompt", "")),
             "queue_id": queued.get("queue_id", ""),
         }
         if queued.get("image_ids"):
             extra["image_ids"] = list(queued["image_ids"])
+        # Persist the user turn first: a crash between the two writes must leave
+        # the durable queue entry behind, never a silently dropped prompt. The
+        # recovery pass skips entries whose queue_id already reached messages.
         self.add_message(sess, "user", str(queued.get("prompt") or ""), **extra)
+        sess.pending_turns.pop(0)
+        self._persist_pending_turns(sess)
         sess.status = "running"
         sess.last_error = ""
         sess.terminal_status = ""
@@ -1624,6 +1763,7 @@ class AgentManager:
             name=f"Queued-Turn-{sess.id}",
         )
         sess.thread = thread
+        self._mark_turn_active(sess, True)
         return thread
 
     def _drain_turn(self, sess: Session, agent: Any, display_q, token: str) -> None:
@@ -1732,6 +1872,7 @@ class AgentManager:
             }.get(terminal_status, "failed")
             self._update_agent_locked(sess, token, agent_status, reason)
             sess.updated_at = time.time()
+            self._mark_turn_active(sess, False)
             next_thread = self._prepare_next_turn_locked(sess)
             self._persist_sessions()
             next_state = sess.status
@@ -1756,6 +1897,7 @@ class AgentManager:
             if partial_text.strip():
                 self.add_message(sess, "assistant", partial_text)
             self.add_message(sess, "error", str(exc))
+            self._mark_turn_active(sess, False)
             next_thread = self._prepare_next_turn_locked(sess)
             self._persist_sessions()
             next_state = sess.status
@@ -1822,6 +1964,8 @@ class AgentManager:
                 if item.get("queue_id")
             ]
             sess.pending_turns.clear()
+            self._persist_pending_turns(sess)
+            self._mark_turn_active(sess, False)
             sess.agent_turn_token = ""
             sess.status = "cancelled"
             sess.partial = None
@@ -2255,6 +2399,21 @@ async def scheduler_start_handler(request):
         }, status=200 if ok else 409)
     except Exception as e:
         return json_ok({"ok": False, "error": f"Failed to start scheduler: {type(e).__name__}: {e}"}, status=500)
+
+
+async def memory_profile_get_handler(request):
+    return json_ok({"ok": True, **manager.memory_profile()})
+
+
+async def memory_profile_save_handler(request):
+    data = await read_json(request)
+    profile = data.get("profile")
+    if not isinstance(profile, str):
+        return json_ok({"ok": False, "error": "profile must be a string"}, status=400)
+    try:
+        return json_ok({"ok": True, **manager.save_memory_profile(profile)})
+    except ValueError as exc:
+        return json_ok({"ok": False, "error": str(exc)}, status=400)
 
 
 async def channels_handler(request):
@@ -2786,6 +2945,8 @@ def create_app(
         from zero_agent.frontends.channel_onboarding import WechatQrManager
 
         wechat_qr_manager = WechatQrManager()
+    app.router.add_get("/memory/profile", memory_profile_get_handler)
+    app.router.add_post("/memory/profile", memory_profile_save_handler)
     app.router.add_get("/channels", channels_handler)
     app.router.add_post("/channels/{channel_id}/start", channel_start_handler)
     app.router.add_post("/channels/{channel_id}/stop", channel_stop_handler)

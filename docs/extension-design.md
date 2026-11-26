@@ -87,7 +87,8 @@ zero_agent/
 │   └── builtin/                # 内置扩展（它们和第三方用同一套接口）
 │       ├── permission_gate.py  # 写入需人类同意的策略
 │       ├── skills_index.py     # skill 发现与描述注入
-│       └── mcp_client.py       # MCP 工具来源
+│       ├── mcp_client.py       # MCP 工具来源
+│       └── browser_tools.py    # 可选浏览器工具包（extensions.browser 控制）
 │
 └── tools/                      # 工具仍注册进现有 ToolRegistry
 ```
@@ -341,6 +342,10 @@ CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有
   问句附带将写入内容的长度与 sha256 摘要，避免盲批；对明确危险的 shell
   （递归强制删除、格式化、关机等）仍直接 `block`。路径判定复用文件工具的
   解析口径（含 `memory_dir` 前缀重定向），避免判定与实际写入位置不一致。
+- **写入范围**：落在 workspace、`memory_dir` 与 reflect 模块通过 `WRITE_ROOTS`
+  声明的目录（例如定时任务报告目录）之外的写入一律 `confirm`，即使路径不在
+  受保护前缀里；门禁不额外放行临时目录（比沙箱更严），判定不了写入目标的
+  工具仍然直接拒绝。
 - **路径规范化**：`scope` 使用解析后的绝对路径（realpath + 平台大小写归一），因此同一
   文件经软链、相对路径两种写法命中同一个批量授权，不会重复弹审批；
   macOS/Windows 这类大小写不敏感文件系统上，改大小写也绕不过受保护前缀判定。
@@ -372,7 +377,9 @@ CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有
 - 白名单内的临时目录、以及任何同权限的可写目录，都能被用作落脚点。
 - Linux 依赖可用的 `bwrap` 与 unprivileged userns；不可用时整体降级为不隔离。
   macOS 与 Linux 都把临时目录纳入可写白名单（python 模式的脚本落在那里）。
-- 降级是静默的（只在执行日志里提示），因此不能把"开了 sandbox"当作安全保证。
+- `auto` 模式的降级只在执行日志里提示，因此不能把"开了 sandbox"当作安全保证。
+- 显式写 `macos` / `linux` 时，该平台沙箱不可用即**拒绝执行**（不静默裸跑）；
+  需要无隔离执行必须显式写 `off`。
 
 **策略层的判定口径与已知漏洞**（`extensions/builtin/shell_policy.py`）：
 
@@ -410,7 +417,8 @@ extensions:
   enabled: true            # false 时不加载插件、skill 与 MCP（安全门仍生效）
   home: "~/.zeroagent"     # 扩展根目录，可指向临时目录便于测试
   protected_writes: []     # 额外的受保护路径；写入前需人类批准
-  sandbox: "off"           # code_run 沙箱：off | auto | macos | linux（加引号避免 YAML 布尔）
+  sandbox: "auto"          # code_run 沙箱：off | auto | macos | linux（加引号避免 YAML 布尔）
+                           # auto 不可用时降级并告警；显式 macos/linux 不可用则拒绝执行
 ```
 
 生效时机：`sandbox` 随 registry 重建即时生效（配置热重载会触发）；
@@ -418,8 +426,8 @@ extensions:
 `enabled` 与 `home` 变更需要重启进程。
 
 配置值解析：`enabled` 接受 `true/false` 与 `"true"/"false"`（字符串 `"false"`
-不会被当成真值）；`protected_writes` 传单个字符串时按一项处理；`sandbox` 非法值
-会告警并按 `off` 处理。
+不会被当成真值）；`protected_writes` 传单个字符串时按一项处理；`sandbox` 缺省为 `auto`，
+非法值会告警并按 `auto` 处理。
 
 **策略说明（与早期设计的差异）**：策略层不再按工具名判断，而是读取
 `ToolDefinition.effects`。早期设计里的 `approval.default` / `approval.rules`

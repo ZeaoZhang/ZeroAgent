@@ -113,6 +113,36 @@ def _broad_prefix_hit(
     return prefix
 
 
+def _memory_dir(runtime: Any) -> Optional[str]:
+    """返回记忆目录；记忆文件是系统提示词的一部分，允许写入."""
+    config = getattr(runtime, "config", None)
+    raw = getattr(config, "memory_dir", None) if config else None
+    return str(raw) if raw else None
+
+
+def _extra_write_roots(runtime: Any, workspace: Optional[str]) -> list[str]:
+    """返回运行时声明的额外可写根（已规范化）.
+
+    来源是 ``AgentConfig.extra_write_roots``（由 reflect runner 从模块级
+    ``WRITE_ROOTS`` 注入）。门禁刻意不把系统临时目录纳入白名单：它必须比
+    沙箱更严，否则任意 ``/tmp`` 写入都会绕过审批。
+
+    Args:
+        runtime: ExtensionRuntime.
+        workspace: 相对路径解析基准.
+
+    Returns:
+        规范化后的绝对路径列表.
+    """
+    config = getattr(runtime, "config", None)
+    raw = getattr(config, "extra_write_roots", None) if config else None
+    return [
+        path_policy.normalize(str(item), workspace)
+        for item in (raw or [])
+        if str(item).strip()
+    ]
+
+
 def _definition(call: Any) -> Any:
     """返回门控入参里的工具定义；未注册工具为 None."""
     return getattr(call, "definition", None)
@@ -379,6 +409,7 @@ def setup(ctx: Any) -> None:
                 return ctx.block("已拦截：写入目标为空，无法判定安全性。")
             # 声明了 optional_write_paths 时，本次写入落在工具写死的默认位置
             # （通常在 workspace 内），模型无法把目标指向别处，因此不干预。
+            extra_roots = _extra_write_roots(ctx.runtime, workspace)
             for raw_path in targets:
                 path = _resolve_write_path(raw_path, ctx.runtime)
                 prefix = path_policy.under(
@@ -397,6 +428,35 @@ def setup(ctx: Any) -> None:
                         "mcp.json 会拉起外部命令。是否允许这一次修改？",
                         # 批量授权键：同任务内对同一路径的后续改写不再重复询问，
                         # 避免模型把内容改一个换行就再弹一次审批
+                        scope=f"write:{resolved}",
+                    )
+                resolved = path_policy.normalize(path, workspace)
+                memory_dir = _memory_dir(ctx.runtime)
+                # inside() expects both sides normalized: a workspace reached
+                # through a symlink (e.g. /tmp -> /private/tmp) would otherwise
+                # report every ordinary in-workspace write as outside.
+                workspace_root = (
+                    path_policy.normalize(workspace, None) if workspace else ""
+                )
+                inside_workspace = bool(
+                    workspace_root
+                    and path_policy.inside(resolved, workspace_root)
+                )
+                inside_memory = bool(
+                    memory_dir
+                    and path_policy.inside(
+                        resolved, path_policy.normalize(memory_dir, None)
+                    )
+                )
+                inside_extra = any(
+                    path_policy.inside(resolved, root) for root in extra_roots
+                )
+                if not inside_workspace and not inside_memory and not inside_extra:
+                    return ctx.confirm(
+                        f"将写入 workspace 之外的路径"
+                        f"（不在记忆目录或本次任务的报告目录内）：{resolved}\n"
+                        f"内容：{_content_summary(args)}\n"
+                        "是否允许这一次写入？",
                         scope=f"write:{resolved}",
                     )
 

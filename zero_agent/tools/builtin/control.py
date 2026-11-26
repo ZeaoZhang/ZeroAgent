@@ -46,3 +46,42 @@ def register_control_tools(registry: ToolRegistry, config: AgentConfig) -> None:
         promotes_task_state=False,
         effects=("control",),
     ))
+
+
+    registry.register(ToolDefinition(
+        name="enter_plan_mode",
+        description=_t(
+            "进入计划模式并绑定 plan.md 路径。仅在需要创建可验证计划时调用。",
+            "Enter plan mode bound to a plan.md path.",
+            lang,
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"plan_path": {"type": "string"}},
+            "required": ["plan_path"],
+        },
+        handler=lambda _args, _response, _handler: None,
+        category="control",
+        evidence_kind="system",
+        promotes_task_state=False,
+        effects=("control",),
+    ))
+
+    registry.register(ToolDefinition(
+        name="add_done_hook",
+        description=_t(
+            "在任务声明完成前追加一轮自检提示。只用于自主/长任务的收尾复核。",
+            "Queue one self-check prompt before the task is allowed to finish.",
+            lang,
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        },
+        handler=lambda _args, _response, _handler: None,
+        category="control",
+        evidence_kind="system",
+        promotes_task_state=False,
+        effects=("control",),
+    ))

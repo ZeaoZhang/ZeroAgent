@@ -15,7 +15,7 @@ import importlib
 import logging
 import os
 import sys
-import time
+import threading
 from typing import Any, Callable, Optional
 from zero_agent.core.types import TerminalEvent, TerminalStatus
 from zero_agent.runners.agent_runner import _consume_agent_run
@@ -52,6 +52,7 @@ class ReflectRunner:
         self._module: Any = None
         self._mtime: float = 0.0
         self._running = False
+        self._stop_event = threading.Event()
 
     def _load_module(self) -> Any:
         """加载或热重载 reflect 模块.
@@ -150,10 +151,33 @@ class ReflectRunner:
         if on_done_fn is not None:
             on_done_fn(result)
 
+    def _apply_module_write_roots(self) -> None:
+        """把 reflect 模块声明的 WRITE_ROOTS 注入 agent 配置.
+
+        模块可以在 workspace 之外产出报告（例如 ``sche_tasks/done/*.md``）。
+        只有模块自己声明过的目录才会进入沙箱可写根与写入门禁白名单。
+        """
+        roots = getattr(self._module, "WRITE_ROOTS", ())
+        config = getattr(self.agent, "config", None)
+        if not roots or config is None:
+            return
+        raw_current = getattr(config, "extra_write_roots", None)
+        current = [str(path) for path in raw_current] if isinstance(raw_current, list) else []
+        for raw in roots:
+            path = os.path.abspath(str(raw))
+            if path not in current:
+                current.append(path)
+        config.extra_write_roots = current
+
     def _run_task(self, task: str) -> TerminalEvent:
         """Execute one reflect task and retain the typed terminal return."""
+        self._apply_module_write_roots()
         try:
-            gen = self.agent.run(task)
+            try:
+                gen = self.agent.run(task, record_activity=False)
+            except TypeError:
+                # Duck-typed agents and existing tests expose run(task) only.
+                gen = self.agent.run(task)
         except Exception as exc:
             return TerminalEvent(
                 status=TerminalStatus.FAILED,
@@ -222,6 +246,7 @@ class ReflectRunner:
         self._module = self._load_module()
         self._call_init(init_args)
         self._running = True
+        self._stop_event.clear()
 
         logger.info(
             "Reflect runner 启动: %s (INTERVAL=%ds, ONCE=%s)",
@@ -236,12 +261,12 @@ class ReflectRunner:
                 task = self._call_check()
             except Exception:
                 logger.exception("check() 调用失败")
-                time.sleep(self._get_interval())
+                self._stop_event.wait(self._get_interval())
                 continue
 
             if task is None:
-                # 无任务，休眠
-                time.sleep(self._get_interval())
+                # 无任务，休眠（stop() 可立即打断）
+                self._stop_event.wait(self._get_interval())
                 continue
 
             if task == "/exit":
@@ -263,8 +288,16 @@ class ReflectRunner:
                 self._running = False
                 break
 
+            post_delay = getattr(self._module, "POST_TASK_INTERVAL", self._get_interval())
+            try:
+                post_delay = max(1, int(post_delay))
+            except (TypeError, ValueError):
+                post_delay = max(1, int(self._get_interval()))
+            self._stop_event.wait(post_delay)
+
         logger.info("Reflect runner 退出: %s", self.name)
 
     def stop(self) -> None:
         """停止 reflect 循环.（可从其他线程调用）"""
         self._running = False
+        self._stop_event.set()

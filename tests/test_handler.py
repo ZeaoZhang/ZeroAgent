@@ -1681,3 +1681,80 @@ def _exhaust(gen):
             next(gen)
     except StopIteration as e:
         return e.value
+
+
+def _collect(gen):
+    """消费 generator，返回 (yield 文本, 最终值)."""
+    chunks = []
+    try:
+        while True:
+            chunks.append(next(gen))
+    except StopIteration as stop:
+        return "".join(chunks), stop.value
+
+
+class TestExecutionSurface:
+    """inline_eval 移除后由专用控制工具取代."""
+
+    def test_code_run_rejects_inline_eval(self, mock_config) -> None:
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
+
+        text, result = _collect(handler.dispatch(
+            "code_run", {"type": "inline_eval", "script": "1+1"}, MockResponse(),
+        ))
+
+        assert result.action is StepAction.CONTINUE
+        assert "Unsupported code type: inline_eval" in str(result.data)
+        assert "Running inline_eval" not in text
+        assert result.reason == "code_run_invalid_arguments"
+
+    def test_enter_plan_mode_tool_updates_contract(self, mock_handler) -> None:
+        plan_path = "/tmp/test-workspace/plan_demo/plan.md"
+
+        _text, result = _collect(mock_handler.dispatch(
+            "enter_plan_mode", {"plan_path": plan_path}, MockResponse(),
+        ))
+
+        assert result.action is StepAction.CONTINUE
+        assert result.data == {"plan_path": plan_path}
+        assert mock_handler.task_contract.mode is TaskMode.PLAN
+        assert mock_handler.task_contract.plan_path == plan_path
+
+    def test_enter_plan_mode_requires_path(self, mock_handler) -> None:
+        _text, result = _collect(mock_handler.dispatch(
+            "enter_plan_mode", {}, MockResponse(),
+        ))
+
+        assert result.action is StepAction.CONTINUE
+        assert result.data["status"] == "error"
+        assert mock_handler.task_contract.mode is not TaskMode.PLAN
+
+    def test_add_done_hook_queues_prompt(self, mock_handler) -> None:
+        _text, result = _collect(mock_handler.dispatch(
+            "add_done_hook", {"text": "再检查一次"}, MockResponse(),
+        ))
+
+        assert result.action is StepAction.CONTINUE
+        assert mock_handler._done_hooks == ["再检查一次"]
+
+    def test_add_done_hook_requires_text(self, mock_handler) -> None:
+        _text, result = _collect(mock_handler.dispatch(
+            "add_done_hook", {"text": "   "}, MockResponse(),
+        ))
+
+        assert result.data["status"] == "error"
+        assert mock_handler._done_hooks == []
+
+    def test_code_run_rejects_cwd_outside_workspace(self, mock_config) -> None:
+        registry = ToolRegistry.with_builtins(mock_config)
+        handler = BaseHandler(registry=registry, cwd=mock_config.workspace_dir)
+
+        _text, result = _collect(handler.dispatch(
+            "code_run",
+            {"type": "python", "script": "print(1)", "cwd": "/"},
+            MockResponse(),
+        ))
+
+        assert result.reason == "code_run_invalid_cwd"
+        assert result.action is StepAction.CONTINUE

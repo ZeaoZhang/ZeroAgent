@@ -26,6 +26,7 @@ from zero_agent.bots.common import (
     AgentBotMixin,
     channel_is_linked,
     ensure_single_instance,
+    group_chats_allowed,
     load_keys,
     public_access,
     redirect_log,
@@ -341,6 +342,9 @@ class QQApp(AgentBotMixin):
             if not public_access(ALLOWED) and user_id not in ALLOWED:
                 print(f"[QQ] unauthorized user: {user_id}")
                 return
+            if is_group and not group_chats_allowed():
+                print(f"[QQ] group chat disabled: {chat_id}")
+                return
             print(f"[QQ] message from {user_id} ({'group' if is_group else 'c2c'}): {content}")
             if content.startswith("/"):
                 return await self.handle_command(chat_id, content, msg_id=msg_id, is_group=is_group)
@@ -375,6 +379,12 @@ class QQApp(AgentBotMixin):
 
 if __name__ == "__main__":
     _LOCK_SOCK = ensure_single_instance(19528, "QQ")
-    require_runtime(runner, "QQ", qq_app_id=APP_ID, qq_app_secret=APP_SECRET)
+    require_runtime(
+        runner,
+        "QQ",
+        qq_app_id=APP_ID,
+        qq_app_secret=APP_SECRET,
+        qq_allowed_users=ALLOWED,
+    )
     redirect_log(__file__, "qqapp.log", "QQ", ALLOWED)
     asyncio.run(QQApp().start())

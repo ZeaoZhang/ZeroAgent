@@ -35,7 +35,9 @@ from zero_agent.bots.common import (
     resolve_output_files,
     runner_workspace_dir,
     format_restore,
+    group_chats_allowed,
     load_keys,
+    public_access,
     redirect_log,
     require_runtime,
     split_text,
@@ -54,7 +56,21 @@ za = ZeroAgent()
 runner = AgentRunner(za)
 runner.verbose = False
 
-ALLOWED = set(_KEYS.get("tg_allowed_users", []))
+# Normalize to strings: config/env give IDs as strings while Telegram events
+# carry ints, so a raw set comparison silently rejects the owner.
+ALLOWED = {str(item).strip() for item in _KEYS.get("tg_allowed_users", []) if str(item).strip()}
+
+
+def _unauthorized(uid) -> bool:
+    """Only an explicit '*' is public; every other allow list is exact-match."""
+    return not public_access(ALLOWED) and str(uid) not in ALLOWED
+
+
+def _group_blocked(update) -> bool:
+    """Private-chat-only by default; group chats need an explicit opt-in."""
+    chat = getattr(update, "effective_chat", None)
+    chat_type = getattr(chat, "type", "private")
+    return chat_type != "private" and not group_chats_allowed()
 
 # —— Telegram SDK ——
 try:
@@ -802,6 +818,8 @@ def _review_command_body(cmd):
 async def _handle_review_command(update, ctx, cmd):
     if not channel_is_linked("telegram"):
         return
+    if _group_blocked(update):
+        return
     dq = Q.Queue()
     prompt = handle_review_command(za, _review_command_body(cmd), dq)
     if not prompt:
@@ -828,8 +846,10 @@ async def handle_msg(update, ctx):
     if not channel_is_linked("telegram"):
         return
     uid = update.effective_user.id
-    if ALLOWED and uid not in ALLOWED:
+    if _unauthorized(uid):
         return await update.message.reply_text("no")
+    if _group_blocked(update):
+        return
     dq = runner.put_task(
         update.message.text,
         source="telegram",
@@ -846,7 +866,9 @@ async def handle_ask_callback(update, ctx):
     if query is None:
         return
     uid = update.effective_user.id if update.effective_user else None
-    if ALLOWED and uid not in ALLOWED:
+    if _unauthorized(uid):
+        return await query.answer("no", show_alert=True)
+    if _group_blocked(update):
         return await query.answer("no", show_alert=True)
     menu_id, action = _parse_ask_callback_data(query.data)
     if not menu_id:
@@ -946,7 +968,9 @@ async def handle_llm_callback(update, ctx):
     if query is None:
         return
     uid = update.effective_user.id if update.effective_user else None
-    if ALLOWED and uid not in ALLOWED:
+    if _unauthorized(uid):
+        return await query.answer("no", show_alert=True)
+    if _group_blocked(update):
         return await query.answer("no", show_alert=True)
     menu_id, action = _parse_menu_callback_data(query.data, _LLM_CALLBACK_PREFIX)
     if not menu_id:
@@ -998,8 +1022,10 @@ async def handle_photo(update, ctx):
     if not channel_is_linked("telegram"):
         return
     uid = update.effective_user.id
-    if ALLOWED and uid not in ALLOWED:
+    if _unauthorized(uid):
         return await update.message.reply_text("no")
+    if _group_blocked(update):
+        return
     if update.message.photo:
         photo = update.message.photo[-1]
         file = await photo.get_file()
@@ -1033,8 +1059,10 @@ async def handle_command(update, ctx):
     if not channel_is_linked("telegram"):
         return
     uid = update.effective_user.id
-    if ALLOWED and uid not in ALLOWED:
+    if _unauthorized(uid):
         return await update.message.reply_text("no")
+    if _group_blocked(update):
+        return
     cmd = _normalized_command(update.message.text)
     op = cmd.split()[0] if cmd else ""
     if op == "/help":

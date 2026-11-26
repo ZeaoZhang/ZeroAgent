@@ -23,7 +23,7 @@ print(get_todo())       # 查看待办
 
 ## 执行
 - 选定任务后 update_working_checkpoint，将选中的TODO条目和执行注意事项 append 到 checkpoint 中
-- 调用code_run准备结尾回调, script为handler._done_hooks.append("重读自主任务sop，检查你刚刚的收尾工作是否正确，不正确则改正")，inline_eval=True （秘密参数）
+- 调用 add_done_hook(text="重读自主任务sop，检查你刚刚的收尾工作是否正确，不正确则改正") 追加收尾自检。
 - ≤30回合，小步快跑，边探测边实验
 - 用临时脚本验证假设；禁只读即下结论，完整验证再写报告
 - 即使失败也记录实验过程和结果，失败报告同样有价值

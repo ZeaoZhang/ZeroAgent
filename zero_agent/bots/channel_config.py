@@ -17,7 +17,13 @@ from zero_agent.bots import channel_control
 BOT_CONFIG_ENV = "ZA_BOT_CONFIG_PATH"
 _CONFIG_ENV = "ZA_CONFIG_PATH"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_TOKEN_FILE = Path.home() / ".wxbot" / "token.json"
+
+
+def _token_file() -> Path:
+    """Resolve the WeChat token path at call time (HOME may differ per run)."""
+    return Path.home() / ".wxbot" / "token.json"
+
+
 _ENV_REFERENCE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 
 
@@ -44,6 +50,7 @@ _ENV_MAP = {
     "qq_app_id": "QQ_APP_ID",
     "qq_app_secret": "QQ_APP_SECRET",
     "qq_allowed_users": "QQ_ALLOWED_USERS",
+    "wechat_allowed_users": "WECHAT_ALLOWED_USERS",
     "proxy": "BOT_PROXY",
 }
 _CONFIG_KEYS = frozenset(_ENV_MAP)
@@ -139,7 +146,7 @@ def load_keys() -> dict:
 
 def _wechat_configured() -> bool:
     try:
-        document = _read_document(_TOKEN_FILE)
+        document = _read_document(_token_file())
     except ChannelConfigError:
         return False
     return bool(str(document.get("bot_token") or "").strip())
@@ -177,17 +184,10 @@ def _field_metadata(definition: channel_control.ChannelDefinition, file_keys: Ma
 def channel_config_snapshot(channel_id: str) -> dict:
     """Return non-sensitive metadata for a channel's editable configuration."""
     definition = channel_control.channel_definition(channel_id)
-    if definition.id == "wechat":
-        return {
-            "channelId": definition.id,
-            "source": "~/.wxbot/token.json",
-            "fields": [],
-            "configured": _wechat_configured(),
-        }
     document = _read_document(bot_config_path())
     file_keys = _file_keys(document)
     fields = _field_metadata(definition, file_keys)
-    return {
+    snapshot = {
         "channelId": definition.id,
         "source": bot_config_source(),
         "fields": fields,
@@ -196,6 +196,10 @@ def channel_config_snapshot(channel_id: str) -> dict:
             _effective_keys(document),
         ),
     }
+    if definition.id == "wechat":
+        # The bot token lives in ~/.wxbot/token.json, never in config.yaml.
+        snapshot["tokenConfigured"] = _wechat_configured()
+    return snapshot
 
 
 def _validate_values(
@@ -266,8 +270,25 @@ def update_channel_config(channel_id: str, values: Mapping[str, Any]) -> dict:
     """Validate and atomically update file-backed channel values."""
     definition = channel_control.channel_definition(channel_id)
     if definition.id == "wechat":
-        if values:
-            raise ChannelConfigError("wechat has no editable fields")
+        if not values:
+            return channel_config_snapshot(definition.id)
+        if not isinstance(values, Mapping):
+            raise ChannelConfigError("values must be an object")
+        validated = _validate_values(definition, values)
+        if set(validated) - {"wechat_allowed_users"}:
+            raise ChannelConfigError("wechat only accepts wechat_allowed_users")
+        path = bot_config_path()
+        document = _read_document(path)
+        bots = document.get("bots")
+        if not isinstance(bots, dict):
+            bots = {}
+            document["bots"] = bots
+        for key, value in validated.items():
+            if value is None:
+                bots.pop(key, None)
+            else:
+                bots[key] = value
+        _write_document(path, document)
         return channel_config_snapshot(definition.id)
     if not isinstance(values, Mapping):
         raise ChannelConfigError("values must be an object")

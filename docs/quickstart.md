@@ -101,8 +101,22 @@ streamlit run zero_agent/frontends/stapp.py
 
 # 浏览器控制功能
 pip install -e ".[browser]"
+# 浏览器工具是可选能力扩展；确认 config.yaml:
+# extensions:
+#   browser: auto   # auto|true|false；auto 仅在 [browser] runtime 可导入时加载
 # 还需要在浏览器中加载/连接 bundled extension:
 # zero_agent/assets/tmwd_cdp_bridge
+# 升级扩展代码后，在 chrome://extensions 点 Reload 使其生效；
+# 常驻 bridge 还需重启 Python 进程以加载新驱动。
+# 标签页生命周期、原生输入、网络捕获、无人值守改包和验证码读取需要扩展 v3.0+。
+# 同一个扩展实例会同时连接 ZeroAgent(18765/18766) 和 dsh-browser-control(18865)，
+# 不要再启用 dsh 自带的 extension，避免两个扩展抢同一个 tab 的 chrome.debugger。
+# 无人值守流程：web_intercept(rules=[...]) 自动放行未匹配请求；
+# web_captcha(selector=...) 先本地 OCR，失败时自动用视觉后端；
+# 识别后 web_input(action="type", selector=输入框, text=验证码, submit=True)。
+
+# PDF / Word / Excel / PPT 读取
+pip install -e ".[docs]"
 
 # OCR 功能
 pip install -e ".[memory]"

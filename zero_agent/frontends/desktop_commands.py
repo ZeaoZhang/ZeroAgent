@@ -453,8 +453,14 @@ def start_reflect_task(name: str) -> tuple[bool, str]:
         if os.name == "nt":
             flags = 0x00000200 | 0x08000000
         proc = subprocess.Popen(
-            [sys.executable, str(script)],
-            cwd=str(_ROOT),
+            [
+                sys.executable,
+                "-m",
+                "zero_agent.runners.cli",
+                "--reflect",
+                str(script),
+            ],
+            cwd=str(_ROOT.parent),
             creationflags=flags,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,

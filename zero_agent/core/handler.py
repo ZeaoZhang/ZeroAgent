@@ -164,6 +164,45 @@ class BaseHandler:
         print(f"[Info] Entered plan mode with plan file: {plan_path}")
         return plan_path
 
+    def do_enter_plan_mode(self, args, response):
+        """工具入口：绑定 plan.md 并进入 PLAN 模式."""
+        path = str(args.get("plan_path") or "").strip()
+        if not path:
+            message = self._tl(
+                "[System] enter_plan_mode 需要 plan_path。\n",
+                "[System] enter_plan_mode requires plan_path.\n",
+            )
+            yield message
+            return StepOutcome(
+                {"status": "error", "msg": "plan_path is required"},
+                next_prompt=message,
+                action=StepAction.CONTINUE,
+            )
+        self.enter_plan_mode(path)
+        yield self._tl(
+            f"[Info] 已进入计划模式: {path}\n",
+            f"[Info] Entered plan mode: {path}\n",
+        )
+        return StepOutcome({"plan_path": path}, action=StepAction.CONTINUE)
+
+    def do_add_done_hook(self, args, response):
+        """工具入口：把一条自检提示排入完成前队列."""
+        text = str(args.get("text") or "").strip()
+        if not text:
+            message = self._tl(
+                "[System] add_done_hook 需要 text。\n",
+                "[System] add_done_hook requires text.\n",
+            )
+            yield message
+            return StepOutcome(
+                {"status": "error", "msg": "text is required"},
+                next_prompt=message,
+                action=StepAction.CONTINUE,
+            )
+        self._done_hooks.append(text)
+        yield self._tl("[Info] 已排入完成前自检。\n", "[Info] Done hook queued.\n")
+        return StepOutcome({"queued": True}, action=StepAction.CONTINUE)
+
     def _check_plan_completion(self) -> Optional[int]:
         """检查 plan.md 中剩余未完成项的数量.
 
@@ -882,7 +921,7 @@ class BaseHandler:
             return "write"
         if tool_name == "code_run":
             return "execute"
-        if tool_name in {"web_scan", "web_execute_js"}:
+        if tool_name.startswith("web_") or tool_name == "web_search":
             return "web"
         if tool_name == "ask_user":
             return "user"
@@ -907,7 +946,7 @@ class BaseHandler:
                 if isinstance(data, str) and not data.startswith("Error:")
                 else "error"
             )
-        if tool_name in {"file_write", "file_patch", "web_scan", "web_execute_js"}:
+        if tool_name.startswith("web_") or tool_name in {"file_write", "file_patch"}:
             return "success" if isinstance(data, dict) and data.get("status") == "success" else "error"
         if tool_name == "code_run":
             return (

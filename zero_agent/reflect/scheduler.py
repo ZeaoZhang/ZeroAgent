@@ -19,7 +19,13 @@ TASKS = os.path.abspath(
     os.environ.get("ZA_SCHED_TASKS_DIR") or str(project_root() / "sche_tasks")
 )
 DONE  = os.path.join(TASKS, 'done')
+# 报告目录：reflect runner 把它注入可写根，让沙箱与写入门禁允许写下执行报告
+WRITE_ROOTS = (DONE,)
 _LOG  = os.path.join(TASKS, 'scheduler.log')
+STATE = os.path.join(TASKS, '.state.json')
+# 旧版本把账本写成 state.json，会被 check() 当成任务定义解析；迁移后删除
+_LEGACY_STATE = os.path.join(TASKS, 'state.json')
+_active_task_id = None
 
 os.makedirs(DONE, exist_ok=True)
 
@@ -130,24 +136,118 @@ def _last_run(tid, done_files):
         except: continue
     return latest
 
+def _read_ledger(path):
+    """读取账本文件；只有形如 {"tasks": {...}} 的内容才算账本，否则 None."""
+    try:
+        with open(path, encoding="utf-8") as fp:
+            data = json.load(fp)
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and isinstance(data.get("tasks"), dict):
+        return data
+    return None
+
+
+def _load_state():
+    for path in (STATE, _LEGACY_STATE):
+        data = _read_ledger(path)
+        if data is not None:
+            return data
+    return {"tasks": {}}
+
+
+def _save_state(state):
+    os.makedirs(TASKS, exist_ok=True)
+    tmp = STATE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fp:
+        json.dump(state, fp, ensure_ascii=False, indent=2, sort_keys=True)
+        fp.flush()
+        os.fsync(fp.fileno())
+    os.replace(tmp, STATE)
+    # 旧账本已迁移到 .state.json；只删除确实「像账本」的旧文件，避免误删
+    # 用户名为 state 的任务定义。
+    if _read_ledger(_LEGACY_STATE) is not None:
+        try:
+            os.remove(_LEGACY_STATE)
+        except OSError:
+            pass
+
+
+def _task_state(state, tid):
+    return state.setdefault("tasks", {}).setdefault(tid, {})
+
+
+def _read_task(tid):
+    try:
+        with open(os.path.join(TASKS, f"{tid}.json"), encoding="utf-8") as fp:
+            data = json.load(fp)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _retry_delay_minutes(task, attempts):
+    base = int(task.get("retry_delay_minutes", 10))
+    return min(base * (2 ** max(0, attempts - 1)), 360)
+
+
+def on_done(result):
+    global _active_task_id
+    tid = _active_task_id
+    if not tid:
+        return
+    _active_task_id = None
+    task = _read_task(tid)
+    repeat = str(task.get("repeat") or "daily")
+    state = _load_state()
+    entry = _task_state(state, tid)
+    now_ts = _time.time()
+    entry["last_finished_at"] = now_ts
+    from zero_agent.core.types import TerminalStatus
+    completed = getattr(result, "status", None) == TerminalStatus.COMPLETED
+    if completed:
+        entry["last_status"] = "success"
+        entry["next_retry_at"] = 0.0
+        # Backoff is per failure streak: a healthy task must not inherit the
+        # attempt counter of an earlier incident and jump straight to the cap.
+        entry["attempts"] = 0
+        _logger.info("DONE %s", tid)
+    else:
+        attempts = int(entry.get("attempts") or 1)
+        if repeat == "once" and attempts >= int(task.get("max_retries", 3)):
+            entry["last_status"] = "gave_up"
+            entry["next_retry_at"] = 0.0
+            _logger.error("GAVE UP %s after %d attempts", tid, attempts)
+        else:
+            delay_minutes = _retry_delay_minutes(task, attempts)
+            entry["last_status"] = "failed"
+            entry["next_retry_at"] = now_ts + delay_minutes * 60
+            _logger.warning(
+                "FAILED %s attempts=%d next_retry_in=%dmin",
+                tid, attempts, delay_minutes,
+            )
+    _save_state(state)
+
+
 def check():
     # L4 archive cron (silent, every 12h)
-    global _l4_t
+    global _l4_t, _active_task_id
     if _time.time() - _l4_t > 43200:
         _l4_t = _time.time()
         try:
             from zero_agent.memory.compress_session import batch_process
-            from zero_agent.bots.shared.continue_cmd import _sessions_dir
+            from zero_agent.core.config import load_default_config
+            cfg = load_default_config()
             raw_dir = os.path.abspath(
-                os.environ.get("ZA_MODEL_RESPONSES_DIR")
-                or _sessions_dir
+                os.environ.get("ZA_MODEL_RESPONSES_DIR") or cfg.sessions_dir
             )
             l4_dir = os.path.abspath(
                 os.environ.get("ZA_L4_DIR")
-                or str(project_root() / "memory" / "L4_raw_sessions")
+                or os.path.join(cfg.memory_dir, "L4_raw_sessions")
             )
             r = batch_process(raw_dir, l4_dir, dry_run=False)
             print(f'[L4 cron] {r}')
+            _logger.info('L4 cron %s', r)
         except Exception as e:
             _logger.error(f'L4 archive failed: {e}')
 
@@ -156,7 +256,7 @@ def check():
     os.makedirs(DONE, exist_ok=True)
     done_files = set(os.listdir(DONE))
     for f in sorted(os.listdir(TASKS)):
-        if not f.endswith('.json'): continue
+        if f.startswith('.') or not f.endswith('.json'): continue
         tid = f[:-5]
         try:
             with open(os.path.join(TASKS, f), encoding='utf-8') as fp:
@@ -166,8 +266,31 @@ def check():
             continue
         if not task.get('enabled', False): continue
 
+        state = _load_state()
+        now_ts = _time.time()
+        entry = _task_state(state, tid)
+
         repeat = task.get('repeat', 'daily')
         cron_expr = task.get('cron', '')
+
+        if entry.get("last_status") == "running":
+            started = float(entry.get("last_started_at") or 0)
+            timeout = int(task.get("timeout_minutes", 120)) * 60
+            if now_ts - started < timeout:
+                continue
+            attempts = int(entry.get("attempts") or 1)
+            delay_minutes = _retry_delay_minutes(task, attempts)
+            entry["last_status"] = "failed"
+            entry["next_retry_at"] = now_ts + delay_minutes * 60
+            _logger.warning("STALE RUN %s; retry in %dmin", tid, delay_minutes)
+            _save_state(state)
+            continue
+
+        if repeat == "once" and entry.get("last_status") in {"success", "gave_up"}:
+            continue
+
+        if float(entry.get("next_retry_at") or 0) > now_ts:
+            continue
 
         if cron_expr:
             # cron 模式：使用 cron 表达式匹配
@@ -208,12 +331,28 @@ def check():
 
         # 检查冷却
         last = _last_run(tid, done_files)
+        last_success = (
+            float(entry.get("last_finished_at") or 0)
+            if entry.get("last_status") == "success"
+            else 0.0
+        )
+        # Report files are human-readable output, not execution state. Only
+        # fall back to them for tasks that predate the ledger: honouring a
+        # report written by a *failed* run would suppress its retry forever.
+        if not entry.get("last_status") and last is not None:
+            last_success = last.timestamp()
         cooldown = _parse_cooldown(repeat)
-        if last and (now - last) < cooldown: continue
+        if last_success and (now_ts - last_success) < cooldown.total_seconds():
+            continue
 
         # 触发
         _logger.info(f'TRIGGER {tid} (repeat={repeat}, schedule={sched}, '
                      f'last_run={last})')
+        entry["last_started_at"] = now_ts
+        entry["last_status"] = "running"
+        entry["attempts"] = int(entry.get("attempts") or 0) + 1
+        _active_task_id = tid
+        _save_state(state)
         ts = now.strftime('%Y-%m-%d_%H%M')
         rpt = os.path.join(DONE, f'{ts}_{tid}.md')
         prompt = task.get('prompt', '')

@@ -567,6 +567,33 @@ class SessionStore:
                         ("active_session_id", str(session_id)),
                     )
 
+    def set_app_state(self, key: str, value: str) -> None:
+        """Store a bridge-level key/value pair."""
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO app_state(key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (str(key), str(value)),
+                )
+
+    def get_app_state(self, key: str, default=None):
+        """Return a stored bridge-level value, or default."""
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT value FROM app_state WHERE key = ?", (str(key),)
+                ).fetchone()
+                return row["value"] if row is not None else default
+
+    def delete_app_state(self, key: str) -> None:
+        """Remove a stored bridge-level value."""
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("DELETE FROM app_state WHERE key = ?", (str(key),))
+
     def close(self) -> None:
         """Connections are scoped to operations; retained for manager lifecycle symmetry."""
         return None

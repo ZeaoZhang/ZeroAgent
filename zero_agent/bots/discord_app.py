@@ -38,6 +38,7 @@ from zero_agent.bots.common import (
     clean_reply,
     ensure_single_instance,
     format_restore,
+    group_chats_allowed,
     load_keys,
     public_access,
     redirect_log,
@@ -520,6 +521,9 @@ class DiscordApp(AgentBotMixin):
         if not public_access(ALLOWED) and user_id not in ALLOWED:
             print(f"[Discord] unauthorized user: {user_name} ({user_id})")
             return
+        if is_guild and not group_chats_allowed():
+            print(f"[Discord] group chat disabled: {chat_id}")
+            return
 
         # Guild 频道激活管理: @mention 激活, 已激活保持, 否则忽略
         if is_guild:
@@ -587,6 +591,11 @@ class DiscordApp(AgentBotMixin):
 
 if __name__ == "__main__":
     _LOCK_SOCK = ensure_single_instance(19532, "Discord")
-    require_runtime(AgentRunner(ZeroAgent()), "Discord", discord_bot_token=BOT_TOKEN)
+    require_runtime(
+        AgentRunner(ZeroAgent()),
+        "Discord",
+        discord_bot_token=BOT_TOKEN,
+        discord_allowed_users=ALLOWED,
+    )
     redirect_log(__file__, "dcapp.log", "Discord", ALLOWED)
     asyncio.run(DiscordApp().start())

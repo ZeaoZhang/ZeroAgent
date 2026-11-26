@@ -2,13 +2,15 @@
 
 设计原则（见 ``docs/extension-design.md`` 第九节）:
 
-- **默认关闭**。只有显式配置 ``extensions.sandbox = "auto" | "macos" | "linux"``
-  才会包装命令。
+- **默认 auto**。未显式配置时也包装命令；auto 在沙箱不可用时降级为直接
+  执行，显式 ``macos`` / ``linux`` 不可用时由 ``code_run`` 拒绝执行。
 - **写入根固定为 workspace**，不接受工具参数里的 cwd —— 否则模型传一个
-  ``cwd="/"`` 就能把沙箱变成 ``(subpath "/")``，等同于关闭隔离。
+  ``cwd="/"`` 就能把沙箱变成 ``(subpath "/")``，等同于关闭隔离。运行时可在
+  workspace 之外附加少量可写根（``extra_roots``，例如 reflect 报告目录）。
 - **功能探测后启用**。仅 ``which`` 命中不够：Linux 上 bwrap 可能因内核禁用
   unprivileged userns 而无法工作。探测失败一律降级。
-- **best-effort**。包装执行失败时由调用方回退为直接执行，绝不让正常命令失败。
+- **auto 下 best-effort**。包装或启动失败时由调用方回退为直接执行；显式模式
+  绝不静默降级成无隔离执行。
 
 平台实现:
 
@@ -25,10 +27,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 VALID_MODES = ("off", "auto", "macos", "linux")
-DEFAULT_MODE = "off"
+DEFAULT_MODE = "auto"
 
 _logger = logging.getLogger("zero_agent.extensions.sandbox")
 
@@ -171,20 +173,29 @@ def _safe_tempdir() -> Optional[str]:
         return None
 
 
-def _writable_dirs(root: str) -> List[str]:
-    """返回沙箱内允许写入的目录（去重）.
+def writable_roots(root: str, extra_roots: Iterable[str] = ()) -> List[str]:
+    """返回沙箱允许写入的根（去重后的 realpath 列表）.
 
-    写入根无条件保留（它可能还没被创建，命令自己要 mkdir）；临时目录只在真实
-    存在时加入。临时目录必须可写：``code_run`` 的 python 模式会把脚本落在系统
-    临时目录，遮住它会让命令必然失败.
+    写入根无条件保留（它可能还没被创建，命令自己要 mkdir）；``extra_roots``
+    里不可用的候选被跳过；临时目录只在真实存在时加入。临时目录必须可写：
+    ``code_run`` 的 python 模式会把脚本落在系统临时目录，遮住它会让命令必然
+    失败.
 
     Args:
-        root: 已规范的写入根.
+        root: 主写入根（通常是 workspace）.
+        extra_roots: 附加写入根（运行时注入，例如 reflect 报告目录）.
 
     Returns:
         可写目录列表，``root`` 永远排在第一位.
     """
-    writable: List[str] = [os.path.realpath(root)]
+    writable: List[str] = []
+    main = _normalize_root(root)
+    if main is not None:
+        writable.append(main)
+    for candidate in extra_roots:
+        normalized = _normalize_root(str(candidate))
+        if normalized is not None:
+            writable.append(normalized)
     for extra in (_safe_tempdir(), "/tmp"):
         if not extra or not os.path.isdir(extra):
             continue
@@ -192,16 +203,17 @@ def _writable_dirs(root: str) -> List[str]:
     return list(dict.fromkeys(writable))
 
 
-def _macos_profile(root: str) -> str:
-    """构造 macOS sandbox profile：只允许写 workspace 与临时目录.
+def _macos_profile(root: str, extra_roots: Iterable[str] = ()) -> str:
+    """构造 macOS sandbox profile：只允许写 workspace、附加根与临时目录.
 
     Args:
         root: 已规范的写入根.
+        extra_roots: 附加写入根.
 
     Returns:
         sandbox profile 文本.
     """
-    writable = _writable_dirs(root)
+    writable = writable_roots(root, extra_roots)
     rules = "\n".join(f'  (subpath "{_escape(path)}")' for path in writable)
     return (
         "(version 1)\n"
@@ -219,6 +231,7 @@ def wrap_command(
     cmd: List[str],
     root: Optional[str],
     mode: str,
+    extra_roots: Iterable[str] = (),
 ) -> Tuple[List[str], bool, str]:
     """把命令包进平台沙箱.
 
@@ -226,9 +239,11 @@ def wrap_command(
         cmd: 原始 argv 列表.
         root: 允许写入的根目录（应传 workspace，而不是模型可控的 cwd）.
         mode: ``off`` / ``auto`` / ``macos`` / ``linux``.
+        extra_roots: 额外的写入根（运行时注入，不影响 ``root`` 必选性）.
 
     Returns:
-        ``(最终命令, 是否已包装, 降级原因)``；未包装时原因为空串.
+        ``(最终命令, 是否已包装, 降级原因)``；第三项是降级原因，未包装且非降级
+        （如 ``mode="off"``）时为空串.
     """
     if not cmd:
         return cmd, False, ""
@@ -254,7 +269,7 @@ def wrap_command(
         if not _macos_available():
             return cmd, False, "sandbox-exec 不可用，已降级"
         return (
-            ["sandbox-exec", "-p", _macos_profile(writable_root), "--", *cmd],
+            ["sandbox-exec", "-p", _macos_profile(writable_root, extra_roots), "--", *cmd],
             True,
             "",
         )
@@ -263,7 +278,7 @@ def wrap_command(
         if not _linux_available():
             return cmd, False, "bwrap 不可用或被内核禁用，已降级"
         binds: List[str] = []
-        for directory in _writable_dirs(writable_root):
+        for directory in writable_roots(writable_root, extra_roots):
             binds.extend(["--bind", directory, directory])
         return (
             [

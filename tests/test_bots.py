@@ -270,9 +270,20 @@ class TestCommonHelpers:
         assert "/stop" in text
 
     def test_public_access(self):
-        assert public_access(set()) is True
+        assert public_access(set()) is False
         assert public_access({"*"}) is True
         assert public_access({"123"}) is False
+
+    def test_group_chats_allowed_reads_env(self, monkeypatch):
+        from zero_agent.bots.common import group_chats_allowed
+
+        monkeypatch.delenv("ZA_ALLOW_GROUP_CHATS", raising=False)
+        assert group_chats_allowed() is False
+        for value in ("1", "true", "YES", " on "):
+            monkeypatch.setenv("ZA_ALLOW_GROUP_CHATS", value)
+            assert group_chats_allowed() is True
+        monkeypatch.setenv("ZA_ALLOW_GROUP_CHATS", "0")
+        assert group_chats_allowed() is False
 
     def test_to_allowed_set(self):
         assert to_allowed_set(None) == set()

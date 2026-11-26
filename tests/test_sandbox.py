@@ -31,14 +31,14 @@ def _run(argv, cwd=None):
 
 
 class TestResolveMode:
-    def test_default_is_off(self) -> None:
-        assert sandbox.resolve_mode(SimpleNamespace()) == "off"
+    def test_default_is_auto(self) -> None:
+        assert sandbox.resolve_mode(SimpleNamespace()) == "auto"
 
     def test_explicit_mode(self) -> None:
         assert sandbox.resolve_mode(SimpleNamespace(sandbox_mode="auto")) == "auto"
 
-    def test_invalid_mode_falls_back_to_off(self) -> None:
-        assert sandbox.resolve_mode(SimpleNamespace(sandbox_mode="nope")) == "off"
+    def test_invalid_mode_falls_back_to_default(self) -> None:
+        assert sandbox.resolve_mode(SimpleNamespace(sandbox_mode="nope")) == "auto"
 
 
 class TestWrapCommand:
@@ -121,9 +121,49 @@ class TestWrapCommand:
         # --tmpfs /tmp 会遮住 python 模式落在系统临时目录的脚本
         assert "--tmpfs" not in cmd
 
-    def test_profile_escapes_quotes(self) -> None:
-        profile = sandbox._macos_profile('/tmp/with"quote')
-        assert '\\"' in profile
+    def test_profile_escapes_backslashes(self) -> None:
+        # 含引号的根在 wrap_command 里已被 _normalize_root 拒绝；这里验证
+        # profile 文本层面的转义仍然生效（反斜杠是合法路径字符）。
+        profile = sandbox._macos_profile('/tmp/with\\backslash')
+        assert '\\\\' in profile
+
+    def test_extra_write_roots_enter_the_profile(
+        self, monkeypatch, tmp_path: Path,
+    ) -> None:
+        monkeypatch.setattr(sandbox, "_macos_available", lambda: True)
+        extra = tmp_path / "reports"
+        extra.mkdir()
+
+        cmd, applied, _reason = sandbox.wrap_command(
+            ["echo"], str(tmp_path / "root"), "macos",
+            extra_roots=[str(extra)],
+        )
+
+        assert applied is True
+        assert str(extra.resolve()) in cmd[2]
+
+    def test_extra_write_roots_are_bound_on_linux(
+        self, monkeypatch, tmp_path: Path,
+    ) -> None:
+        monkeypatch.setattr(sandbox.sys, "platform", "linux")
+        monkeypatch.setattr(sandbox.shutil, "which", lambda _name: "/usr/bin/bwrap")
+        monkeypatch.setattr(sandbox, "_linux_available", lambda: True)
+        extra = tmp_path / "reports"
+        extra.mkdir()
+
+        cmd, applied, _reason = sandbox.wrap_command(
+            ["echo"], str(tmp_path / "root"), "linux",
+            extra_roots=[str(extra)],
+        )
+
+        assert applied is True
+        target = str(extra.resolve())
+        pairs = [
+            (cmd[index + 1], cmd[index + 2])
+            for index, item in enumerate(cmd)
+            if item == "--bind" and index + 2 < len(cmd)
+        ]
+        assert (target, target) in pairs
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec 仅 macOS")
@@ -203,3 +243,88 @@ class TestMacosIsolation:
 
         # 无论命令成功与否，目标文件都不能被写出来
         assert not target.exists()
+
+
+class TestExplicitSandboxFailClosed:
+    """显式 macos/linux 不可用时必须拒绝执行，auto 才允许降级."""
+
+    def _collect(self, generator):
+        chunks = []
+        while True:
+            try:
+                chunks.append(next(generator))
+            except StopIteration as stop:
+                return "".join(chunks), stop.value
+
+    def test_explicit_sandbox_unavailable_refuses_execution(self, monkeypatch) -> None:
+        work = tempfile.mkdtemp()
+        spawned = []
+
+        monkeypatch.setattr(
+            sandbox,
+            "wrap_command",
+            lambda cmd, root, mode: (cmd, False, "unavailable"),
+        )
+        monkeypatch.setattr(
+            subprocess,
+            "Popen",
+            lambda *args, **kwargs: spawned.append(args),
+        )
+
+        text, result = self._collect(code_run(
+            "print('must not run')",
+            code_type="python",
+            cwd=work,
+            sandbox_mode="macos",
+            sandbox_root=work,
+            timeout=10,
+        ))
+
+        assert result["status"] == "error"
+        assert result["msg"].startswith("sandbox macos unavailable")
+        assert "Sandbox macos unavailable" in text
+        assert spawned == []
+
+    def test_explicit_sandbox_refusal_removes_the_temp_script(self, monkeypatch) -> None:
+        """Refusing to run must still clean the generated .ai.py file."""
+        work = tempfile.mkdtemp()
+
+        monkeypatch.setattr(
+            sandbox,
+            "wrap_command",
+            lambda cmd, root, mode: (cmd, False, "unavailable"),
+        )
+
+        _, result = self._collect(code_run(
+            "print('never runs')",
+            code_type="python",
+            cwd=work,
+            code_cwd=work,
+            sandbox_mode="macos",
+            sandbox_root=work,
+            timeout=10,
+        ))
+
+        assert result["status"] == "error"
+        assert [name for name in os.listdir(work) if name.endswith(".ai.py")] == []
+
+    def test_auto_mode_degrades_and_still_runs(self, monkeypatch) -> None:
+        work = tempfile.mkdtemp()
+
+        monkeypatch.setattr(
+            sandbox,
+            "wrap_command",
+            lambda cmd, root, mode: (cmd, False, "unavailable"),
+        )
+
+        _, result = self._collect(code_run(
+            "print('auto-ok')",
+            code_type="python",
+            cwd=work,
+            sandbox_mode="auto",
+            sandbox_root=work,
+            timeout=30,
+        ))
+
+        assert result["status"] == "success"
+        assert "auto-ok" in result["stdout"]
