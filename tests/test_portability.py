@@ -75,7 +75,9 @@ def _config(tmp_path: Path, **overrides) -> AgentConfig:
         sessions_dir=str(tmp_path / "sessions"),
     )
     base.update(overrides)
-    return AgentConfig(**base)
+    config = AgentConfig(**base)
+    Path(config.workspace_dir).mkdir(parents=True, exist_ok=True)
+    return config
 
 
 def test_prompt_uses_tilde_instead_of_absolute_home(
@@ -123,3 +125,81 @@ def test_file_tools_expand_tilde(tmp_path: Path, monkeypatch) -> None:
     assert file_tools.resolve_file_path("~/notes/a.md", config) == str(
         tmp_path / "notes" / "a.md",
     )
+
+
+def test_prompt_uses_project_tokens_for_repo_paths(tmp_path: Path) -> None:
+    from zero_agent.utils.files import project_root
+
+    project = Path(project_root())
+    config = _config(tmp_path, memory_dir=str(project / "memory"))
+
+    text = self_prompt.build(config, "zh")
+
+    assert "<project>/zero_agent/**/*.py" in text
+    assert "<project>/memory/sops" in text
+    assert str(project) not in text
+
+
+def test_tool_paths_expand_project_workspace_and_home_tokens(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from zero_agent.utils.files import expand_tool_path, project_root
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = _config(tmp_path)
+
+    assert expand_tool_path("<project>/zero_agent/core/loop.py", config.workspace_dir) == (
+        str(Path(project_root()) / "zero_agent" / "core" / "loop.py")
+    )
+    assert expand_tool_path("<workspace>/a.py", config.workspace_dir) == str(
+        tmp_path / "ws" / "a.py",
+    )
+    assert expand_tool_path("<home>/.zeroagent/mcp.json", config.workspace_dir) == str(
+        tmp_path / ".zeroagent" / "mcp.json",
+    )
+    assert file_tools.resolve_file_path(
+        "<workspace>/notes/a.md", config,
+    ) == str(tmp_path / "ws" / "notes" / "a.md")
+
+
+def test_memory_context_uses_project_tokens(tmp_path: Path) -> None:
+    from zero_agent.memory.manager import MemoryManager
+    from zero_agent.utils.files import project_root
+
+    project = Path(project_root())
+    manager = MemoryManager(
+        memory_dir=str(project / "memory"),
+        workspace_dir=str(project / "workspace"),
+        language="zh",
+    )
+
+    context = manager.get_global_memory_context()
+
+    assert "cwd = <project>/workspace (./)" in context
+    assert "[Memory] (<project>/memory)" in context
+    assert str(project) not in context
+
+
+def test_code_run_exports_root_env_vars(tmp_path: Path) -> None:
+    from zero_agent.tools.builtin import code as code_tools
+    from zero_agent.utils.files import project_root
+
+    config = _config(tmp_path)
+    registry = ToolRegistry()
+    code_tools.register_code_tools(registry, config)
+
+    gen = registry.get("code_run").handler(
+        {"script": "echo \"$ZA_PROJECT_ROOT|$ZA_WORKSPACE_DIR\"", "type": "bash"},
+        None, None,
+    )
+    chunks = []
+    try:
+        while True:
+            chunks.append(next(gen))
+    except StopIteration as stop:
+        outcome = stop.value
+
+    text = "".join(chunks)
+    assert (outcome or {}).get("status") == "success"
+    assert str(tmp_path / "ws") in text
+    assert "zero_agent" in text or str(Path(project_root())) in text

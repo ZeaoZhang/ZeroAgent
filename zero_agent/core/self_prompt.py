@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from zero_agent.core import hot_restart
+from zero_agent.utils.files import display_path, project_root
 
 
 def _resolve(path: Any, base: str = "") -> str:
@@ -31,21 +32,6 @@ def _home(config: Any) -> str:
     if configured:
         return _resolve(configured)
     return os.path.join(os.path.expanduser("~"), ".zeroagent")
-
-
-def _display(path: str) -> str:
-    """Show a path relative to ``~`` when it lives under the current home.
-
-    提示词里不出现任何机器特定的绝对家目录：同一条提示词在换用户、换机器后
-    仍然是可读且可用的（工具侧会把 ``~`` 展开回绝对路径）。
-    """
-    home = os.path.expanduser("~")
-    if path == home:
-        return "~"
-    prefix = home + os.sep
-    if path.startswith(prefix):
-        return "~" + path[len(home):]
-    return path
 
 
 def _mode_note_zh(config: Any) -> str:
@@ -70,13 +56,14 @@ def build(config: Any, lang: str = "zh") -> str:
     Returns:
         提示词块文本，包含真实路径与当前模式.
     """
+    project = project_root()
     home = _home(config)
-    skills = _display(os.path.join(home, "skills"))
-    plugins = _display(os.path.join(home, "extensions"))
-    mcp_json = _display(os.path.join(home, "mcp.json"))
+    skills = display_path(os.path.join(home, "skills"), project)
+    plugins = display_path(os.path.join(home, "extensions"), project)
+    mcp_json = display_path(os.path.join(home, "mcp.json"), project)
     memory = _resolve(getattr(config, "memory_dir", "")) or "./memory"
-    sops = _display(os.path.join(memory, "sops"))
-    core_root = _display(str(Path(hot_restart.__file__).resolve().parents[1]))
+    sops = display_path(os.path.join(memory, "sops"), project)
+    core_root = display_path(str(Path(hot_restart.__file__).resolve().parents[1]), project)
     sandbox = str(getattr(config, "sandbox_mode", "auto") or "auto")
     mode = str(getattr(config, "permission_mode", "full") or "full")
     enabled = bool(getattr(config, "extensions_enabled", True))
@@ -96,6 +83,10 @@ def build(config: Any, lang: str = "zh") -> str:
             "<self_modification>\n"
             "You can extend and upgrade yourself; changes apply at the next turn boundary or "
             "after a hot restart, without user action.\n"
+            "- Path tokens: <project> is the project root (the directory holding config.yaml), "
+            "<workspace> the working directory, <home> the user home. File tools and code_run "
+            "accept all three as path prefixes; in a shell use $ZA_PROJECT_ROOT / "
+            "$ZA_WORKSPACE_DIR. Avoid other host-specific absolute paths.\n"
             f"- Skills: {skills}/<name>/SKILL.md (indexed next turn).\n"
             f"- SOPs: {sops}/*.md (higher priority than skills).\n"
             f"- Plugins: {plugins}/<name>.py or <name>/__init__.py with setup(ctx) to register "
@@ -117,6 +108,9 @@ def build(config: Any, lang: str = "zh") -> str:
     return (
         "<self_modification>\n"
         "你可以扩展和升级自己；改动在下一轮 turn 边界或热重启后生效，不需要用户操作。\n"
+        "- 路径记号：<project> 是项目根目录（config.yaml 所在目录），<workspace> 是工作目录，"
+        "<home> 是用户目录。文件工具与 code_run 的路径参数都接受这三个前缀；shell 里用 "
+        "$ZA_PROJECT_ROOT / $ZA_WORKSPACE_DIR。不要用其它主机相关的绝对路径。\n"
         f"- 技能：{skills}/<name>/SKILL.md（下一轮进入索引）。\n"
         f"- SOP：{sops}/*.md（优先级高于技能）。\n"
         f"- 插件：{plugins}/<name>.py 或 <name>/__init__.py 里的 setup(ctx)，用于注册工具/门控/"

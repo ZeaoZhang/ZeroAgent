@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from zero_agent.core.exceptions import ConfigError
+from zero_agent.utils.files import display_path, project_root
 
 
 _ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
@@ -188,11 +189,12 @@ class MemoryManager:
             若 L1 文件不存在则返回仅含结构说明的字符串.
         """
         prompt = "\n"
-        prompt += f"cwd = {self.workspace_dir} (./)\n"
-        prompt += f"\n[Memory] ({self.memory_dir})\n"
+        project = project_root()
+        prompt += f"cwd = {display_path(self.workspace_dir, project)} (./)\n"
+        prompt += f"\n[Memory] ({display_path(self.memory_dir, project)})\n"
         prompt += _asset_text(f"insight_fixed_structure{self._lang_suffix()}.txt")
         l1_path = os.path.join(self.memory_dir, "global_mem_insight.txt")
-        prompt += f"\n{l1_path}:\n"
+        prompt += f"\n{display_path(l1_path, project)}:\n"
 
         # L1 索引内容
         l1_path = os.path.join(self.memory_dir, "global_mem_insight.txt")

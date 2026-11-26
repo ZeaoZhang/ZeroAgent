@@ -18,7 +18,7 @@ from zero_agent.core.config import AgentConfig
 from zero_agent.core.safety import write_denial
 from zero_agent.core.types import StepAction, StepOutcome
 from zero_agent.tools.registry import ToolRegistry
-from zero_agent.utils.files import expand_file_refs
+from zero_agent.utils.files import expand_file_refs, expand_tool_path
 from zero_agent.utils.text import smart_format
 
 
@@ -375,8 +375,10 @@ def resolve_file_path(path: str, config: AgentConfig) -> str:
     """
     if not path:
         return ""
-    # ``~`` 在 POSIX 下不是绝对路径：不先展开会被当成 workspace 下的相对路径，
-    # 变成 ``<workspace>/~/...``。模型常按提示词里的 ``~/...`` 写，必须展开。
+    # 提示词里用 ``<project>`` / ``<workspace>`` / ``<home>`` 这些可移植前缀，
+    # 工具侧必须能把它们还原成真实路径（``~`` 在 POSIX 下不是绝对路径，
+    # 不先展开会被当成 workspace 下的相对路径）。
+    path = expand_tool_path(path, config.workspace_dir)
     path = os.path.expanduser(path)
     if os.path.isabs(path):
         return path

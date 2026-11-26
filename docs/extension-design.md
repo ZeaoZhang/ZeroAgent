@@ -633,10 +633,20 @@ skills / SOP / plugins / `mcp.json` / 核心代码的**真实路径**、生效�
 
 路径全部在运行时解析，仓库里不含任何机器特定的绝对路径：`extensions.home` 缺省为
 `~/.zeroagent`、config 里的相对路径基于配置文件目录、核心代码目录取自包自身位置。
-提示词里位于家目录下的路径渲染成 `~/...`（工具侧 `resolve_file_path` 会展开 `~`），
+提示词只用可移植记号：项目内路径渲染成 `<project>/...`（例如
+`<project>/zero_agent/**/*.py`、`<project>/memory/sops/*.md`），家目录下的其它路径
+渲染成 `~/...`。这些记号在工具侧真能用，不是装饰：
+
+| 记号 | 解析为 | 支持位置 |
+| --- | --- | --- |
+| `<project>` / `<repo>` | 项目根（`config.yaml` 所在目录） | `file_read/write/patch` 的 `path`、`code_run` 的 `script_path`/`cwd` |
+| `<workspace>` / `<workdir>` | `workspace_dir` | 同上 |
+| `<home>` | 当前用户家目录（`os.path.expanduser("~")`） | 同上 |
+| `$ZA_PROJECT_ROOT` / `$ZA_WORKSPACE_DIR` | 同上的 shell 形式 | `code_run` 子进程环境变量 |
+
 因此同一份代码换用户、换机器都能直接跑；`tests/test_portability.py` 会扫描
 `zero_agent/`、`config.example.yaml`、`docs/` 与 `tests/`，禁止 `/Users/<name>`、
-`/home/<name>` 这类字面量回归。
+`/home/<name>` 这类字面量回归，并验证记号展开、shell 环境变量与提示词渲染。
 
 ### 15.1 每轮同步（`reload_workflow`）
 

@@ -22,7 +22,7 @@ from zero_agent.core.config import AgentConfig
 from zero_agent.core.safety import command_denial
 from zero_agent.core.types import StepAction, StepOutcome
 from zero_agent.tools.registry import ToolRegistry
-from zero_agent.utils.files import resolve_workspace_path
+from zero_agent.utils.files import expand_tool_path, project_root, resolve_workspace_path
 from zero_agent.utils.text import smart_format
 
 
@@ -406,16 +406,19 @@ def _make_code_run_handler(config: AgentConfig):
             timeout = int(args.get("timeout", 60))
         except Exception:
             timeout = 60
-        cwd = os.path.normpath(os.path.join(
-            config.workspace_dir, args.get("cwd", "./"),
-        ))
+        workspace_root = str(config.workspace_dir)
+        # 提示词用 ``<workspace>/...`` 之类的可移植前缀，cwd 参数必须能解析
+        raw_cwd = expand_tool_path(str(args.get("cwd", "./")), workspace_root)
+        cwd = os.path.normpath(os.path.join(workspace_root, raw_cwd))
         maxlen = 10000 // max(args.get("_tool_num", 1), 1)
         stop_signal = getattr(handler, "code_stop_signal", None)
 
-        subprocess_env = None
+        # 路径前缀在 shell 里也能用：显式导出两个根，避免脚本里硬编码主机路径
+        subprocess_env = os.environ.copy()
+        subprocess_env["ZA_PROJECT_ROOT"] = project_root()
+        subprocess_env["ZA_WORKSPACE_DIR"] = workspace_root
         registry_path = getattr(config, "_desktop_subagent_registry_path", None)
         if registry_path:
-            subprocess_env = os.environ.copy()
             from zero_agent.utils.subagent_registry import (
                 PARENT_AGENT_ID_ENV,
                 REGISTRY_ENV,
@@ -437,7 +440,6 @@ def _make_code_run_handler(config: AgentConfig):
         except Exception:  # noqa: BLE001 - 沙箱模块不可用不应影响执行
             sandbox_mode = ""
 
-        workspace_root = str(config.workspace_dir)
         extra_roots = list(getattr(config, "extra_write_roots", []) or [])
         if not _sandbox_active(workspace_root, sandbox_mode, extra_roots):
             # 沙箱没真正生效：退回静态兜底，挡住格式化/写块设备/关机/fork 炸弹
