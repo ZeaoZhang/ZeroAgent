@@ -39,7 +39,7 @@ WS API:
 """
 from __future__ import annotations
 
-import asyncio, contextlib, copy, hmac, importlib, ipaddress, json, os, re, secrets, shutil, signal, sys, urllib.parse, webbrowser
+import asyncio, contextlib, copy, hmac, importlib, ipaddress, json, os, re, secrets, shutil, signal, sqlite3, sys, urllib.parse, webbrowser
 import threading, time, traceback, uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -477,6 +477,15 @@ def _session_from_persisted(
         plan_task=str(data.get("planTask", data.get("plan_task")) or ""),
     )
     sess.messages = list(data.get("messages") or [])
+    # A stored msg_seq below MAX(message_id) would make the next append reuse a
+    # primary key; trust whichever source is higher.
+    stored_max = 0
+    for message in sess.messages:
+        try:
+            stored_max = max(stored_max, int(message.get("id") or 0))
+        except (TypeError, ValueError):
+            continue
+    sess.msg_seq = max(int(sess.msg_seq or 0), stored_max)
     sess.restore_history = bool(sess.messages)
     return sess
 def _public_config_snapshot(config: AgentConfig) -> Dict[str, Any]:
@@ -978,6 +987,7 @@ class AgentManager:
         except Exception as exc:  # noqa: BLE001 - 恢复失败不得阻断启动
             print(f"load checkpoints failed: {exc}", file=sys.stderr)
             return
+        print(f"[resume] checkpoints found: {len(entries)}", file=sys.stderr)
         for path, data in entries:
             try:
                 if data.get("source") != "desktop":
@@ -986,6 +996,7 @@ class AgentManager:
                 with self.lock:
                     sess = self.sessions.get(sid)
                 if sess is None:
+                    print(f"[resume] skip {sid}: session no longer exists", file=sys.stderr)
                     with contextlib.suppress(OSError):
                         path.unlink()
                     continue
@@ -1012,6 +1023,10 @@ class AgentManager:
                     sess.agent = self.make_agent(sess)
                     za = getattr(sess.agent, "_agent", sess.agent)
                     if not za.restore_checkpoint(data):
+                        print(
+                            f"[resume] skip {sid}: checkpoint could not be restored",
+                            file=sys.stderr,
+                        )
                         with contextlib.suppress(OSError):
                             path.unlink()
                         continue
@@ -1041,6 +1056,9 @@ class AgentManager:
                     self._persist_sessions()
                 emit_session_state(sess, "running" if should_resume else "waiting")
                 if should_resume:
+                    print(f"[resume] starting continuation turn for {sess.id}", file=sys.stderr)
+                    with self.lock:
+                        self._mark_turn_active(sess, True)
                     threading.Thread(
                         target=self.run_agent_turn,
                         args=(sess, CONTINUATION_PROMPT),
@@ -1048,7 +1066,10 @@ class AgentManager:
                         name=f"Resume-{sess.id}",
                     ).start()
             except Exception as exc:  # noqa: BLE001 - 单个会话失败不影响其他
-                print(f"resume checkpoint {path} failed: {exc}", file=sys.stderr)
+                print(
+                    f"resume checkpoint {path} failed: {exc}\n{traceback.format_exc()}",
+                    file=sys.stderr,
+                )
 
     def _subagent_registry_path(self, sess: Session) -> str:
         safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", sess.id)[:100] or "session"
@@ -1178,7 +1199,26 @@ class AgentManager:
                 out["partial"] = copy.deepcopy(sess.partial) if sess.partial else None
             return out
 
+    @staticmethod
+    def _highest_message_id(sess: Session) -> int:
+        """Return the highest message id currently held in memory."""
+        highest = int(sess.msg_seq or 0)
+        for message in sess.messages:
+            try:
+                highest = max(highest, int(message.get("id") or 0))
+            except (TypeError, ValueError):
+                continue
+        return highest
+
     def add_message(self, sess: Session, role: str, content: str, **extra) -> dict:
+        """Append one UI message and persist it, never reusing an id.
+
+        ``msg_seq`` can lag behind SQLite after a history restore or a crashed
+        writer; blindly bumping it then collides with the primary key and makes
+        every prompt fail with a 500. Allocate from the highest id seen in
+        memory, and if SQLite still disagrees, re-derive from the store and
+        retry once before giving up.
+        """
         previous = (
             sess.msg_seq,
             len(sess.messages),
@@ -1186,28 +1226,50 @@ class AgentManager:
             sess.updated_at,
         )
         was_valid = session_has_user_message(sess)
-        sess.msg_seq += 1
+        sess.msg_seq = self._highest_message_id(sess) + 1
         msg = {"id": sess.msg_seq, "role": role, "content": content, "ts": time.time()}
         msg.update(extra)
         sess.messages.append(msg)
         sess.updated_at = time.time()
         if role == "user" and content.strip() and sess.title == "New chat":
             sess.title = content.strip().replace("\n", " ")[:40]
+
+        def persist() -> None:
+            if was_valid:
+                self.session_store.append_message(
+                    _session_to_store_dict(sess),
+                    _message_to_store_dict(msg),
+                    active_session_id=self.active_session_id,
+                )
+            else:
+                self.session_store.persist_session(
+                    _session_to_store_dict(sess),
+                    [_message_to_store_dict(message) for message in sess.messages],
+                    active_session_id=self.active_session_id,
+                )
+            self._last_persisted_state = self._capture_session_state()
+
         if session_has_user_message(sess):
             try:
-                if was_valid:
-                    self.session_store.append_message(
-                        _session_to_store_dict(sess),
-                        _message_to_store_dict(msg),
-                        active_session_id=self.active_session_id,
-                    )
-                else:
-                    self.session_store.persist_session(
-                        _session_to_store_dict(sess),
-                        [_message_to_store_dict(message) for message in sess.messages],
-                        active_session_id=self.active_session_id,
-                    )
-                self._last_persisted_state = self._capture_session_state()
+                persist()
+            except sqlite3.IntegrityError:
+                stored_max = self.session_store.max_message_id(sess.id)
+                recovered_id = max(stored_max, self._highest_message_id(sess)) + 1
+                if recovered_id == msg["id"]:
+                    sess.msg_seq, message_count, sess.title, sess.updated_at = previous
+                    del sess.messages[message_count:]
+                    raise
+                # The store knew about ids this process never saw: move past
+                # them instead of failing the whole turn.
+                sess.msg_seq = recovered_id
+                msg["id"] = recovered_id
+                sess.updated_at = time.time()
+                try:
+                    persist()
+                except Exception:
+                    sess.msg_seq, message_count, sess.title, sess.updated_at = previous
+                    del sess.messages[message_count:]
+                    raise
             except Exception:
                 sess.msg_seq, message_count, sess.title, sess.updated_at = previous
                 del sess.messages[message_count:]
@@ -3071,6 +3133,23 @@ async def prompt_handler(request):
     except ValueError as exc:
         raise web.HTTPBadRequest(
             text=json.dumps({"error": str(exc)}, ensure_ascii=False),
+            content_type="application/json",
+        ) from exc
+    except web.HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 必须把真实原因交给前端
+        # A bare aiohttp 500 hides the cause and the UI labels every 5xx as a
+        # model outage. Keep the traceback in the bridge log and echo a
+        # concrete message so the user can act on it.
+        print(traceback.format_exc(), file=sys.stderr)
+        raise web.HTTPInternalServerError(
+            text=json.dumps(
+                {
+                    "error": f"提交失败：{type(exc).__name__}: {exc}",
+                    "code": "prompt_failed",
+                },
+                ensure_ascii=False,
+            ),
             content_type="application/json",
         ) from exc
     return json_ok(result)

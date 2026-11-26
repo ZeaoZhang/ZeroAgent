@@ -96,6 +96,7 @@ function cleanErrorMessage(text) {
 function formatRequestError(error, operation = '请求') {
   const raw = rawErrorText(error);
   const status = Number(error?.status || error?.data?.status || 0);
+  const serverError = String(error?.data?.error || '').trim();
   if (/timeout|timed out|超时|gateway timeout/i.test(raw) || status === 408 || status === 504) {
     return `${operation}超时，请稍后重试。`;
   }
@@ -105,7 +106,9 @@ function formatRequestError(error, operation = '请求') {
     return `${operation}失败：无法连接 ZeroAgent 服务，请检查 bridge 是否运行或网络连接。`;
   }
   if (status >= 500) {
-    return `${operation}失败：模型服务暂时不可用（HTTP ${status}），请稍后重试。`;
+    // Only claim a model outage when the server did not explain itself.
+    if (serverError) return `${operation}失败：${serverError}`;
+    return `${operation}失败：服务端错误（HTTP ${status}），详情见诊断信息。`;
   }
   if (status === 401 || status === 403) {
     return `${operation}失败：认证未通过，请检查 API 配置。`;
@@ -4083,24 +4086,106 @@ async function hydrateBridgeSessions(listRes) {
     const msgRes = await window.zeroAgent.rpc('session/poll', { sessionId: sid, afterId: 0, limit: 9999 }).catch(() => null);
     const messages = msgRes?.messages || [];
     if (!sessionHasUserMessage({ messages })) continue;
-    const localId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const sess = createLocalSession(
-      localId,
+    const existing = findLocalSessionByBridgeId(sid);
+    const sess = existing || createLocalSession(
+      `local-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       bSess.title || 'Restored',
       sid,
       bSess.modelOverride ?? null,
     );
-    sess.cwd = bSess.cwd || null;
-    replaceSessionAgents(sess, bSess.subAgents);
+    applyBridgeSessionSnapshot(sess, bSess, msgRes);
+  }
+}
+
+function findLocalSessionByBridgeId(bridgeId) {
+  if (!bridgeId) return null;
+  for (const sess of state.sessions.values()) {
+    if (sess.bridgeSessionId === bridgeId) return sess;
+  }
+  return null;
+}
+
+// Overwrite one local session with the bridge's authoritative view. Used both
+// for the first bootstrap and after a kernel hot restart, where the webview
+// kept stale messages while the backend rewrote them.
+function applyBridgeSessionSnapshot(sess, bSess, pollRes) {
+  if (!sess) return;
+  if (bSess) {
+    if (bSess.title) {
+      sess.title = bSess.title;
+      sess.untitled = isUntitledSessionTitle(bSess.title);
+    }
+    sess.cwd = bSess.cwd || sess.cwd;
+    if (bSess.modelOverride !== undefined) sess.modelOverride = bSess.modelOverride;
     if (bSess.createdAt) sess.createdAt = Number(bSess.createdAt);
     if (bSess.updatedAt) sess.updatedAt = Number(bSess.updatedAt);
-    sess.groupId = bSess.groupId || null;
+    sess.groupId = bSess.groupId || sess.groupId || null;
+    if (bSess.subAgents) replaceSessionAgents(sess, bSess.subAgents);
+    if (bSess.tokenUsage) sess.tokenUsage = mergeTokenUsage(sess.tokenUsage, bSess.tokenUsage);
     mergePlanMetadata(sess, bSess);
-    sess.messages = messages;
-    const runtime = getSessionRuntime(sess);
-    runtime.seenBridgeMessageIds = new Set(messages.filter(m => m.id).map(m => Number(m.id)));
-    runtime.lastPolledMessageId = Math.max(0, ...messages.map(m => Number(m.id) || 0));
   }
+  if (pollRes && !pollRes.error) {
+    if (Array.isArray(pollRes.messages)) sess.messages = pollRes.messages;
+    const runtime = getSessionRuntime(sess);
+    runtime.seenBridgeMessageIds = new Set(
+      (sess.messages || []).filter(m => m.id).map(m => Number(m.id)),
+    );
+    runtime.lastPolledMessageId = Math.max(0, ...(sess.messages || []).map(m => Number(m.id) || 0));
+    if (pollRes.partial) {
+      upsertPolledMessage(sess, pollRes.partial, { partial: true });
+    } else if (runtime.assistantDraft) {
+      clearAssistantDraft(sess);
+    }
+    if (pollRes.tokenUsage) sess.tokenUsage = mergeTokenUsage(sess.tokenUsage, pollRes.tokenUsage);
+    if (pollRes.updatedAt) sess.updatedAt = Number(pollRes.updatedAt) || sess.updatedAt;
+    const running = pollRes.status === 'running';
+    setBusy(running, running ? 'Agent is responding…' : null, sess);
+    if (running && !runtime.polling) pollSessionMessages(sess);
+  }
+}
+
+// The webview survives a kernel restart, so the sidebar and the open transcript
+// must be reloaded from the bridge instead of trusting in-memory state.
+async function resyncSessionsAfterReconnect() {
+  const listRes = await window.zeroAgent.rpc('session/list', {}).catch(() => null);
+  if (!listRes || listRes.error) return;
+  const bridgeSessions = new Map();
+  for (const bSess of listRes.sessions || []) {
+    const sid = bSess.id || bSess.sessionId;
+    if (sid) bridgeSessions.set(sid, bSess);
+  }
+  for (const [localId, sess] of Array.from(state.sessions.entries())) {
+    if (sess.bridgeSessionId && !bridgeSessions.has(sess.bridgeSessionId)) {
+      state.sessions.delete(localId);
+      state.activeAgents.delete(localId);
+      state.runtimeBySessionId.delete(localId);
+      if (state.activeId === localId) state.activeId = null;
+    }
+  }
+  for (const [sid, bSess] of bridgeSessions.entries()) {
+    const pollRes = await window.zeroAgent.rpc('session/poll', {
+      sessionId: sid, afterId: 0, limit: 9999,
+    }).catch(() => null);
+    let sess = findLocalSessionByBridgeId(sid);
+    if (!sess) {
+      if (!sessionHasUserMessage({ messages: pollRes?.messages || [] })) continue;
+      sess = createLocalSession(
+        `local-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        bSess.title || 'Restored',
+        sid,
+        bSess.modelOverride ?? null,
+      );
+    }
+    applyBridgeSessionSnapshot(sess, bSess, pollRes);
+  }
+  renderSessionList();
+  const activeBridgeId = listRes.activeSessionId;
+  const activeLocal = state.sessions.get(state.activeId)
+    || findLocalSessionByBridgeId(activeBridgeId)
+    || state.sessions.values().next().value;
+  if (activeLocal) setActiveSession(activeLocal.id);
+  else await newSession();
+  updateSendButton();
 }
 
 
@@ -4114,6 +4199,7 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
   else setStatus('ok', 'Ready');
   updateBridgeNotice(noticeText);
   hideError();
+  const hadSessions = state.sessions.size > 0;
   if (state.sessions.size === 0 && !_bootstrappingSession) {
     _bootstrappingSession = true;
     try {
@@ -4134,6 +4220,15 @@ async function markBridgeReady(noticeText = 'Bridge ready.') {
         await newSession();
       }
     } finally { _bootstrappingSession = false; }
+  } else if (hadSessions) {
+    // Kernel hot restart: the webview kept its state, the backend rewrote the
+    // session store. Pull the authoritative sessions/messages instead of
+    // showing a stale transcript until the user switches chats.
+    try {
+      await resyncSessionsAfterReconnect();
+    } catch (err) {
+      addDiagnostic('warn', 'Session resync failed', err);
+    }
   }
   updateSendButton();
   loadModelProfiles();
@@ -4182,6 +4277,16 @@ window.zeroAgent.onBridgeError((err) => {
   }
 });
 
+async function waitForBridgeRecovery(timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const status = await window.zeroAgent.checkStatus().catch(() => null);
+    if (status && status.ok) return true;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return false;
+}
+
 window.zeroAgent.onBridgeClosed(async (info) => {
   addDiagnostic('warn', 'Bridge closed', info);
   if (state.restartingBridge) {
@@ -4196,20 +4301,23 @@ window.zeroAgent.onBridgeClosed(async (info) => {
       setBusy(false, null, sess);
     }
   }
-  const status = await window.zeroAgent.checkStatus().catch(() => null);
-  if (status && status.ok) {
-    const config = await window.zeroAgent.getConfig().catch((err) => err);
-    if (config && (config.status === 401 || config.status === 403)) {
-      setStatus('err', '需要重新认证');
-      showError('认证已失效，请从桌面应用重新打开 ZeroAgent。', undefined, undefined, { skipDiagnostic: true });
-      return;
-    }
-    setStatus('warn', 'Bridge 重连中…');
-    window.zeroAgent.startBridge().catch(() => {});
+  // A kernel hot restart drops the websocket for a second or two. Do not give
+  // up on the first failed probe: wait for /status, then reconnect; the
+  // `bridge-ready` handler resyncs sessions and messages.
+  setStatus('warn', 'Bridge 重连中…');
+  const recovered = await waitForBridgeRecovery();
+  if (!recovered) {
+    setStatus('err', 'Bridge stopped');
+    showError('ZeroAgent 服务连接已断开，请检查 bridge 是否运行。', '重启服务', () => restartBridge(), { skipDiagnostic: true });
     return;
   }
-  setStatus('err', 'Bridge stopped');
-  showError('ZeroAgent 服务连接已断开，请检查 bridge 是否运行。', '重启服务', () => restartBridge(), { skipDiagnostic: true });
+  const config = await window.zeroAgent.getConfig().catch((err) => err);
+  if (config && (config.status === 401 || config.status === 403)) {
+    setStatus('err', '需要重新认证');
+    showError('认证已失效，请从桌面应用重新打开 ZeroAgent。', undefined, undefined, { skipDiagnostic: true });
+    return;
+  }
+  window.zeroAgent.startBridge().catch(() => {});
 });
 
 window.zeroAgent.onBridgeLog((text) => {
