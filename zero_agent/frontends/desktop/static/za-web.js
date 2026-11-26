@@ -6,8 +6,19 @@
   const listeners = new Map();
   let ws = null;
   let cachedBridgeReady = null;
-  const bridgeBase = `${location.protocol}//${location.hostname}:14168`;
-  const wsBase = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:14168/ws`;
+  // The UI is served by the bridge itself (the Tauri window navigates to
+  // http://127.0.0.1:<port>/#token=...), so the page origin is authoritative.
+  // Hardcoding 14168 broke any BRIDGE_PORT override and looped the UI back to
+  // a different instance.
+  const pageIsHttp = location.protocol === 'http:' || location.protocol === 'https:';
+  const pageHost = location.host
+    || `${location.hostname || '127.0.0.1'}:${location.port || '14168'}`;
+  const bridgeBase = pageIsHttp
+    ? `${location.protocol}//${pageHost}`
+    : `${location.protocol}//127.0.0.1:14168`;
+  const wsBase = pageIsHttp
+    ? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${pageHost}/ws`
+    : 'ws://127.0.0.1:14168/ws';
   const TOKEN_STORAGE_KEY = 'za_bridge_token';
   const bridgeToken = loadBridgeToken();
 

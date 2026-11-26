@@ -6,7 +6,11 @@ import json
 
 import pytest
 
-from zero_agent.browser.tm_webdriver import TMWebDriver
+# browser/ 是可选依赖组（pyproject: browser extra）。没装时整模块跳过，
+# 而不是让 pytest 在收集阶段 ImportError 打断整个 tests/ 收集。
+pytest.importorskip("simple_websocket_server")
+
+from zero_agent.browser.tm_webdriver import TMWebDriver  # noqa: E402
 
 
 class FakeClient:

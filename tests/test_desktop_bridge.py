@@ -8,6 +8,7 @@ import json
 import os
 import queue
 import shutil
+import sqlite3
 import subprocess
 import re
 import threading
@@ -2859,3 +2860,58 @@ def test_queued_turn_without_persisted_message_is_reported_as_lost():
     contents = [m["content"] for m in restarted.sessions[sess.id].messages]
 
     assert "未执行（服务重启）：从未开始的请求" in contents
+
+
+def test_add_message_allocates_past_a_stale_in_memory_seq(monkeypatch, tmp_path):
+    """A rewind that lowered msg_seq must not collide with stored message ids."""
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "hello")
+    manager.add_message(sess, "assistant", "hi")
+    sess.msg_seq = 1
+
+    msg = manager.add_message(sess, "user", "again")
+
+    assert msg["id"] == 3
+    assert manager.session_store.max_message_id(sess.id) == 3
+
+
+def test_manager_reconciles_stale_seq_after_restart(monkeypatch, tmp_path):
+    """A process restart must lift msg_seq to MAX(message_id) before appending."""
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "hello")
+    manager.add_message(sess, "assistant", "hi")
+    with sqlite3.connect(os.path.join(manager.sessions_dir, "sessions.sqlite3")) as conn:
+        conn.execute("UPDATE sessions SET msg_seq = 1 WHERE id = ?", (sess.id,))
+
+    restarted = desktop_bridge.AgentManager()
+    reloaded = restarted.sessions[sess.id]
+
+    assert reloaded.msg_seq == 2
+    msg = restarted.add_message(reloaded, "system", "resumed")
+    assert msg["id"] == 3
+    assert restarted.session_store.max_message_id(sess.id) == 3
+
+
+def test_frontend_resyncs_sessions_after_bridge_restart() -> None:
+    app_js = (
+        Path(desktop_bridge.__file__).parent / "desktop" / "static" / "app.js"
+    ).read_text(encoding="utf-8")
+    assert "async function resyncSessionsAfterReconnect" in app_js
+    ready_start = app_js.index("async function markBridgeReady")
+    assert "resyncSessionsAfterReconnect" in app_js[ready_start:ready_start + 2600]
+    assert "async function waitForBridgeRecovery" in app_js
+    closed_start = app_js.index("window.zeroAgent.onBridgeClosed")
+    assert "waitForBridgeRecovery" in app_js[closed_start:closed_start + 1600]
+
+
+def test_frontend_shows_server_error_instead_of_model_outage() -> None:
+    app_js = (
+        Path(desktop_bridge.__file__).parent / "desktop" / "static" / "app.js"
+    ).read_text(encoding="utf-8")
+    assert "模型服务暂时不可用" not in app_js
+    start = app_js.index("function formatRequestError")
+    block = app_js[start:start + 900]
+    assert "error?.data?.error" in block
+    assert "服务端错误（HTTP ${status}）" in block

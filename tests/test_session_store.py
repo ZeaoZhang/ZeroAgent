@@ -405,3 +405,29 @@ def test_app_state_survives_reopen(tmp_path):
         assert reopened.get_app_state("active_turn:sess-b") == "1"
     finally:
         reopened.close()
+
+
+def test_initialize_repairs_msg_seq_that_lags_stored_messages(tmp_path):
+    """A stale counter must never make the next append reuse a primary key."""
+    path = tmp_path / "sessions.sqlite3"
+    store = SessionStore(path)
+    store.initialize()
+    session = session_record()
+    store.append_message(session, message_record(1))
+    session["msg_seq"] = 2
+    store.append_message(session, message_record(2, "assistant", "world"))
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE sessions SET msg_seq = 1 WHERE id = ?", ("sess-test",))
+    store.close()
+
+    reopened = SessionStore(path)
+    reopened.initialize()
+    try:
+        assert reopened.load_state()["sessions"]["sess-test"]["msg_seq"] == 2
+        assert reopened.max_message_id("sess-test") == 2
+        repaired = session_record()
+        repaired["msg_seq"] = 3
+        reopened.append_message(repaired, message_record(3, "user", "again"))
+        assert reopened.max_message_id("sess-test") == 3
+    finally:
+        reopened.close()

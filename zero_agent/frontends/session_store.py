@@ -168,6 +168,7 @@ class SessionStore:
                             f"{version_row['value']}"
                         )
                     self._validate_existing_schema(conn)
+                    self._reconcile_message_sequences(conn)
                     return
                 if tables & set(_REQUIRED_SCHEMA_COLUMNS):
                     raise RuntimeError(
@@ -178,6 +179,43 @@ class SessionStore:
                     "INSERT INTO schema_meta(key, value) VALUES (?, ?)",
                     ("version", _SCHEMA_VERSION),
                 )
+                self._reconcile_message_sequences(conn)
+
+    @staticmethod
+    def _reconcile_message_sequences(conn: sqlite3.Connection) -> None:
+        """Repair ``msg_seq`` values that lag behind the stored messages.
+
+        A history rewrite (restore/rewind) that keeps only a prefix, or a
+        crash between the message insert and the session bump, leaves
+        ``sessions.msg_seq`` below ``MAX(messages.message_id)``. The next
+        ``append_message`` then reuses a primary key and every prompt fails
+        with ``UNIQUE constraint failed`` — a self-inflicted 500 that the
+        desktop UI reports as a model outage. Reconcile once per startup.
+        """
+        conn.execute(
+            """
+            UPDATE sessions
+               SET msg_seq = (
+                   SELECT COALESCE(MAX(m.message_id), 0)
+                     FROM messages m
+                    WHERE m.session_id = sessions.id
+               )
+             WHERE msg_seq < (
+                   SELECT COALESCE(MAX(m.message_id), 0)
+                     FROM messages m
+                    WHERE m.session_id = sessions.id
+             )
+            """
+        )
+
+    def max_message_id(self, session_id: str) -> int:
+        """Return the highest stored message id for one session."""
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(message_id), 0) FROM messages WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return int(row[0] or 0)
 
     @staticmethod
     def _json_dump(value: Any) -> str:

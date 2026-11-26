@@ -167,6 +167,10 @@ class TestWrapCommand:
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec 仅 macOS")
+@pytest.mark.skipif(
+    not sandbox._macos_available(),
+    reason="当前环境无法应用 sandbox-exec（例如测试进程本身已在沙箱内，嵌套被拒）",
+)
 class TestMacosIsolation:
     def test_workspace_write_is_allowed(self) -> None:
         work = Path(tempfile.mkdtemp())
