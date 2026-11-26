@@ -441,6 +441,19 @@ def _make_code_run_handler(config: AgentConfig):
             sandbox_mode = ""
 
         extra_roots = list(getattr(config, "extra_write_roots", []) or [])
+        # 项目 temp/ 是 autonomous 助手（TODO.txt / autonomous_reports/）的固定落盘
+        # 位置，但它在沙箱可写根（workspace）之外，导致 code_run 里写报告直接 EPERM。
+        # 这里把 <project>/temp 作为默认可写根放行（不改 config，保持配置语义简单）。
+        try:
+            _project_temp = os.path.abspath(
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "temp")
+            )
+            os.makedirs(_project_temp, exist_ok=True)
+            extra_roots.append(_project_temp)
+        except OSError:
+            _logger.debug("无法准备项目 temp 可写根: %s", locals().get("_project_temp"), exc_info=True)
+        # 去重并保持顺序，避免同一根重复进入 sandbox profile
+        extra_roots = list(dict.fromkeys(extra_roots))
         if not _sandbox_active(workspace_root, sandbox_mode, extra_roots):
             # 沙箱没真正生效：退回静态兜底，挡住格式化/写块设备/关机/fork 炸弹
             # 与 workspace 之外的递归删除。沙箱生效时不做这一步，保持命令自由。
