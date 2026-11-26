@@ -570,11 +570,34 @@ def _parse_browser_tools_mode(value: object) -> str:
     return "auto"
 
 
+PERMISSION_MODES = frozenset({"ask", "full"})
+"""合法的 ``permissions.mode`` 取值."""
+
+
+def normalize_permission_mode(value: object, *, default: str = "full") -> str:
+    """把任意配置/环境值归一为 ``ask`` 或 ``full``.
+
+    这里是权限模式的唯一归一入口：配置解析、扩展运行时与 ``/permissions``
+    命令都走它，避免三处各自的默认值或校验规则漂移。
+
+    Args:
+        value: 原始值.
+        default: ``value`` 为 None 时的返回值.
+
+    Returns:
+        ``ask`` 或 ``full``；非法值回退 ``ask``（安全侧）.
+    """
+    if value is None:
+        return default if default in PERMISSION_MODES else "ask"
+    normalized = str(value).strip().lower()
+    return normalized if normalized in PERMISSION_MODES else "ask"
+
+
 def _parse_permission_mode(value: object) -> str:
     """解析 ``permissions.mode``.
 
     缺省是全权限模式；非法值回退 ``ask``（安全侧），并留下告警，避免
-    ``permissions: {mode: fulll}`` 静默变成绕过审批。
+    ``permissions: {mode: fulll}`` 静默变成免审批。
 
     Args:
         value: 配置值.
@@ -582,16 +605,13 @@ def _parse_permission_mode(value: object) -> str:
     Returns:
         ``ask`` 或 ``full``.
     """
-    if value is None:
-        return "full"
-    normalized = str(value).strip().lower()
-    if normalized in {"ask", "full"}:
-        return normalized
-    _logger.warning(
-        "permissions.mode 期望 ask/full，收到 %r，已按 ask 处理",
-        value,
-    )
-    return "ask"
+    mode = normalize_permission_mode(value, default="full")
+    if value is not None and str(value).strip().lower() not in PERMISSION_MODES:
+        _logger.warning(
+            "permissions.mode 期望 ask/full，收到 %r，已按 ask 处理",
+            value,
+        )
+    return mode
 
 
 def _parse_sandbox_mode(value: object) -> str:

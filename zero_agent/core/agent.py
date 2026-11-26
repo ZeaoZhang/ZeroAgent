@@ -16,9 +16,15 @@ import time
 import weakref
 from dataclasses import dataclass
 from importlib import resources
+from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, List, Optional
 
-from zero_agent.core.config import AgentConfig, load_default_config
+from zero_agent.core.config import (
+    PERMISSION_MODES,
+    AgentConfig,
+    load_default_config,
+    normalize_permission_mode,
+)
 from zero_agent.core.checkpoint import CONTINUATION_PROMPT
 from zero_agent.core import checkpoint as checkpoint_store
 from zero_agent.core import hot_restart
@@ -643,9 +649,9 @@ class ZeroAgent:
             ValueError: 无 pending task 时 PLAN/EXECUTING 未提供 plan_path.
         """
         self._checkpoint_pending_messages = []
-        report = self.reload_workflow(allow_core_restart=False)
-        if report.get("core_restart_error"):
-            yield f"[hot-restart] {report['core_restart_error']}\n"
+        # 入口处还不存在本次任务的 contract，因此只做非核心同步：
+        # 生成器内没有重启错误通道，重启校验只在 turn 边界发生。
+        self.reload_workflow(allow_core_restart=False)
         self._apply_pending_runtime_config()
         pending_state = self._pending_task_state
         if pending_state is not None:
@@ -855,10 +861,16 @@ class ZeroAgent:
             return self._approval_continuation(pending, answer)
 
         if pending.waiting_kind == "restart":
-            return (
+            base = (
                 f"{CONTINUATION_PROMPT}\n\n"
                 f"原任务：{pending.contract.user_request}"
             )
+            # 自动续跑时 answer 就是 CONTINUATION_PROMPT 本身（丢弃）；
+            # 进程重启失败后由用户输入继续时，用户这句话不能被吞掉。
+            extra = str(answer or "").strip()
+            if extra and extra != CONTINUATION_PROMPT:
+                return f"{base}\n\n用户补充：{extra}"
+            return base
 
         if pending.waiting_kind == "plan_partial_acceptance":
             if self._is_partial_acceptance(answer):
@@ -1005,8 +1017,12 @@ class ZeroAgent:
                 getattr(contract, "mode", None), "value", TaskMode.OPEN.value,
             ),
             "plan_path": getattr(contract, "plan_path", None),
-            "history": copy.deepcopy(getattr(self.client, "history", []) or []),
-            "pending_messages": copy.deepcopy(self._checkpoint_pending_messages),
+            "history": checkpoint_store.normalize_history(
+                getattr(self.client, "history", []),
+            ),
+            "pending_messages": checkpoint_store.normalize_history(
+                self._checkpoint_pending_messages,
+            ),
             "handler": handler_payload,
             "pending": self._pending_payload(pending) if pending is not None else {},
             "mode_context": copy.deepcopy(self.checkpoint_context or {}),
@@ -1045,13 +1061,12 @@ class ZeroAgent:
         if str(data.get("session_id") or "") != self._checkpoint_session_id():
             return False
 
-        history = copy.deepcopy(list(data.get("history") or []))
-        pending_messages = copy.deepcopy(list(data.get("pending_messages") or []))
-        if pending_messages:
-            tail = history[-len(pending_messages):]
-            if tail != pending_messages:
-                history.extend(pending_messages)
-        self.client.history = history
+        history = checkpoint_store.normalize_history(data.get("history"))
+        pending_messages = data.get("pending_messages")
+        self.client.history = checkpoint_store.merge_pending_messages(
+            history,
+            pending_messages,
+        )
 
         handler_state = data.get("handler")
         if not isinstance(handler_state, dict):
@@ -1092,7 +1107,9 @@ class ZeroAgent:
             waiting_data = {}
         if (
             waiting_kind == "approval"
-            and str(getattr(self.config, "permission_mode", "full")) == "full"
+            and normalize_permission_mode(
+                getattr(self.config, "permission_mode", None),
+            ) == "full"
         ):
             waiting_kind = "restart"
             waiting_data = {}
@@ -1140,6 +1157,24 @@ class ZeroAgent:
         prompt = self._restart_prompt
         self._restart_prompt = None
         return prompt
+
+    @property
+    def pending_task_state(self) -> Optional[PendingTaskState]:
+        """当前暂停中、等待用户答复的任务状态；没有则为 None."""
+
+        return self._pending_task_state
+
+    @property
+    def restart_checkpoint_armed(self) -> bool:
+        """本次任务是否已写好等待热重启的检查点（前端据此决定要不要补写）."""
+
+        return self._restart_checkpoint_armed
+
+    @property
+    def last_checkpoint_path(self) -> Optional[str]:
+        """最近一次写入的检查点文件路径；从未写过则为 None."""
+
+        return self._last_checkpoint_path
 
     def note_pending_messages(self, messages: Any) -> None:
         """Remember the messages currently being sent to the LLM."""
@@ -1381,8 +1416,10 @@ class ZeroAgent:
         """创建扩展运行时并加载插件与内置扩展.
 
         ``extensions_enabled=false`` 只关闭外部插件与能力类扩展，安全门仍然生效。
-        当前没有配置项可以关闭安全门：要关必须改代码（移除 ``permission_gate``
-        的安装），这是刻意设计——避免一次误配置就失去全部写入保护。
+        ``permissions.mode`` 只决定是否**暂停等人审批**：``full``（默认）下
+        ``confirm`` 由运行时自动放行，而 ``block``（危险命令、声明缺失、
+        门控异常）依旧拒绝。因此不存在“静默失去全部写入保护”的配置项，
+        真正的强制隔离仍然只有 ``extensions.sandbox``。
 
         安全类扩展或运行时本身安装失败时抛 :class:`ExtensionBootstrapError`，
         绝不在没有写入保护的情况下继续启动。外部插件与能力类扩展的失败仍只
@@ -1474,6 +1511,8 @@ class ZeroAgent:
             # 否则 release()（ZeroAgent.close() 与进程退出兜底）不会撤销
             # 它们注册的工具与回调
             runtime.track_owner(name)
+            # 记下模块对象：reload_builtin 失败时回滚需要它
+            runtime.register_builtin_module(name, module)
             return True
         except Exception as exc:  # noqa: BLE001 - 按安全/能力分级处理
             # 安装到一半失败时清掉半成品注册（例如门控只注册了一半）
@@ -1522,14 +1561,12 @@ class ZeroAgent:
             str(self.config.browser_tools or "auto"),
         )
 
-    def _mcp_path(self) -> Optional[Any]:
+    def _mcp_path(self) -> Optional[Path]:
         """Return ``<extensions.home>/mcp.json`` for the live runtime."""
 
         extensions = getattr(self, "extensions", None)
         if extensions is None:
             return None
-        from pathlib import Path
-
         return Path(extensions.home) / "mcp.json"
 
     def _apply_extension_topology(self) -> bool:
@@ -1538,10 +1575,11 @@ class ZeroAgent:
         extensions = getattr(self, "extensions", None)
         if extensions is None:
             return False
-        old_enabled, old_home, _old_browser = self._extension_topology_state
-        new_enabled, new_home, _new_browser = self._extension_topology_value()
+        old_enabled, old_home, old_browser = self._extension_topology_state
+        new_enabled, new_home, new_browser = self._extension_topology_value()
         home_changed = old_home != new_home
         enabled_changed = old_enabled != new_enabled
+        browser_changed = old_browser != new_browser
         if home_changed:
             extensions.set_home(new_home or None)
         if not new_enabled or home_changed:
@@ -1549,15 +1587,22 @@ class ZeroAgent:
         force_names = {"skills_index", "mcp_client"} if (
             home_changed or enabled_changed
         ) else set()
+        if browser_changed:
+            # browser_tools 的 setup 在安装时就按 extensions.browser 决定注册什么；
+            # 不强制重装的话 auto↔on↔off 的切换会被当成「已应用」而静默不生效。
+            force_names.add("browser_tools")
         self._sync_builtin_extensions(extensions, new_enabled, force_names=force_names)
         if new_enabled:
             extensions.sync_plugins(force=home_changed)
-        self._extension_topology_state = (new_enabled, new_home, _new_browser)
+        self._extension_topology_state = (new_enabled, new_home, new_browser)
         self._mcp_signature = hot_restart.file_signature(self._mcp_path())
         return True
 
     def _reload_builtin_extension(self, name: str) -> bool:
-        """Reload one installed builtin extension by name."""
+        """Reload one installed builtin extension by name.
+
+        失败时 ``reload_builtin`` 已回滚到旧注册，这里只负责记录。
+        """
 
         extensions = getattr(self, "extensions", None)
         if extensions is None:
@@ -1571,8 +1616,8 @@ class ZeroAgent:
             return False
         try:
             return extensions.reload_builtin(name, module_path)
-        except Exception as exc:  # noqa: BLE001 - 重载失败保留旧注册
-            _logger.warning("内置扩展 %s 重载失败，已跳过: %s", name, exc)
+        except Exception as exc:  # noqa: BLE001 - 回滚后继续用旧注册
+            _logger.warning("内置扩展 %s 重载失败，已保留旧注册: %s", name, exc)
             return False
 
     def _refresh_loop_tools(self) -> None:
@@ -1600,7 +1645,7 @@ class ZeroAgent:
             ValueError: 未知模式.
         """
         normalized = str(mode or "").strip().lower()
-        if normalized not in {"ask", "full"}:
+        if normalized not in PERMISSION_MODES:
             raise ValueError(f"unknown permission mode: {mode!r}")
         self.config.permission_mode = normalized
         self._refresh_extension_config()
@@ -1620,7 +1665,11 @@ class ZeroAgent:
                 此时新任务的 contract 还不存在，不能写 running checkpoint）.
 
         Returns:
-            结构化的同步报告.
+            结构化同步报告：``config``（是否重载了配置）、``topology``、
+            ``plugins``（loaded/reloaded/removed/failed）、``mcp``、
+            ``tools_changed``，以及 ``core_restart``——``""`` 表示无重启，
+            ``"blocked"`` 表示校验失败（错误在 ``core_restart_error``），
+            ``"requested"`` 表示检查点已写好、``_hot_restart_hook`` 已被调用.
         """
         report: dict[str, Any] = {
             "config": False,

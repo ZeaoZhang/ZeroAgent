@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from zero_agent.core.config import normalize_permission_mode
 from zero_agent.extensions.context import ExtensionContext
 from zero_agent.extensions.events import (
     ApprovalRequired,
@@ -242,6 +243,8 @@ class ExtensionRuntime:
         # 内置扩展（permission_gate 等）的归属；它们不经 load_all 加载，
         # 单独记录才能在 release() 时一并撤销
         self._builtin_owners: List[str] = []
+        # 已安装内置扩展的模块对象；重载失败时用它回滚旧注册
+        self._builtin_modules: Dict[str, Any] = {}
         self._approvals: Dict[str, Tuple[float, str]] = {}
         # 批量授权：键为 (task_id, scope)，值为过期时间。
         # 用于「同一任务内反复写同一个文件」时不重复弹审批。
@@ -327,11 +330,11 @@ class ExtensionRuntime:
         Returns:
             sha256 十六进制摘要.
         """
-        files = (
-            sorted(path.rglob("*.py"))
-            if is_package
-            else [path]
-        )
+        # 目录插件的入口是 ``<pkg>/__init__.py``，必须从包目录起递归，
+        # 否则 rglob 作用在单个文件上返回空集，签名恒等于空摘要，
+        # 目录插件的任何修改都不会被判定为「已变化」。
+        entry = path.parent if is_package else path
+        files = sorted(entry.rglob("*.py")) if is_package else [path]
         rows: List[str] = []
         for item in files:
             if "__pycache__" in item.parts:
@@ -344,14 +347,6 @@ class ExtensionRuntime:
                 f"{item.resolve()}|{stat.st_mtime_ns}|{stat.st_size}"
             )
         return hashlib.sha256("\n".join(sorted(rows)).encode("utf-8")).hexdigest()
-
-    def plugin_signatures(self) -> Dict[str, str]:
-        """Return current on-disk signatures for every discoverable plugin."""
-
-        return {
-            name: self._plugin_signature(path, is_package)
-            for name, path, is_package in discover(self.home)
-        }
 
     def set_home(self, home: Optional[Path | str]) -> None:
         """Point the runtime at a new extension home without reloading."""
@@ -393,6 +388,7 @@ class ExtensionRuntime:
             existed = existed or owner in self._builtin_owners
             self._loaded.pop(owner, None)
             self._signatures.pop(owner, None)
+            self._builtin_modules.pop(owner, None)
             if owner in self._builtin_owners:
                 self._builtin_owners.remove(owner)
             self._clear_plugin_modules(owner)
@@ -404,8 +400,20 @@ class ExtensionRuntime:
         for name in list(self._loaded):
             self.unload_owner(name)
 
+    def register_builtin_module(self, name: str, module: Any) -> None:
+        """Record one builtin extension's module object for later rollback.
+
+        Args:
+            name: 内置扩展归属名.
+            module: 已成功执行 ``setup`` 的模块对象.
+        """
+        self._builtin_modules[name] = module
+
     def reload_builtin(self, name: str, module_path: str) -> bool:
         """Re-run one builtin extension's ``setup`` after unloading it.
+
+        导入在卸载之前完成（导入失败不破坏现有注册）；``setup`` 失败时用旧
+        模块重新安装一次，保证安全类扩展不会因为一次失败的重载而彻底消失。
 
         Args:
             name: 内置扩展归属名.
@@ -415,18 +423,36 @@ class ExtensionRuntime:
             True 表示重装成功.
 
         Raises:
-            Exception: 模块导入或 setup 失败（已撤销半成品注册）.
+            Exception: 模块导入或 setup 失败（已撤销半成品注册并尽力回滚）.
         """
         with _IMPORT_LOCK:
+            module = importlib.import_module(module_path)
+            previous = self._builtin_modules.get(name)
             self.unload_owner(name)
             try:
-                module = importlib.import_module(module_path)
                 teardown = module.setup(ExtensionContext(name, self))
                 if callable(teardown):
                     self.register_teardown(name, teardown)
                 self.track_owner(name)
+                self._builtin_modules[name] = module
             except (Exception, SystemExit):
                 self.unregister_owner(name)
+                if previous is not None:
+                    try:
+                        previous.setup(ExtensionContext(name, self))
+                        self.track_owner(name)
+                        self._builtin_modules[name] = previous
+                        _logger.warning(
+                            "内置扩展 %s 重载失败，已回滚到旧注册", name,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 回滚失败只能记录
+                        self.unregister_owner(name)
+                        self._builtin_modules.pop(name, None)
+                        _logger.error(
+                            "内置扩展 %s 重载失败且回滚失败，该扩展当前未生效: %s",
+                            name,
+                            exc,
+                        )
                 raise
             return True
 
@@ -535,6 +561,7 @@ class ExtensionRuntime:
         self._loaded.clear()
         self._signatures.clear()
         self._builtin_owners.clear()
+        self._builtin_modules.clear()
         self._notify.clear()
         self._tool_call.clear()
         self._tool_result.clear()
@@ -622,12 +649,16 @@ class ExtensionRuntime:
 
     @property
     def permission_mode(self) -> str:
-        """Return the effective tool-gating mode (``ask`` or ``full``)."""
+        """Return the effective tool-gating mode (``ask`` or ``full``).
 
-        value = str(
-            getattr(self.config, "permission_mode", "full") or "full",
-        ).strip().lower()
-        return value if value in {"ask", "full"} else "ask"
+        缺省按 ``ask`` 处理：*没有* config 的运行时（单元测试、外部装配）
+        不应该因为少传一个参数而静默进入免审批模式。
+        """
+
+        return normalize_permission_mode(
+            getattr(self.config, "permission_mode", None),
+            default="ask",
+        )
 
     @property
     def has_llm_request_subscribers(self) -> bool:
@@ -709,8 +740,6 @@ class ExtensionRuntime:
         Returns:
             ToolCallVerdict.
         """
-        if self.permission_mode == "full":
-            return ToolCallVerdict("allow")
         if not self._tool_call:
             return ToolCallVerdict("allow")
 
@@ -762,6 +791,11 @@ class ExtensionRuntime:
                 )
 
         if approval_fingerprint_value:
+            # full 模式只是免去人类参与：门控给出的「需要审批」自动放行，
+            # 但确定性拒绝（危险命令、声明缺失、插件 veto、门控异常）仍然生效，
+            # 这些是 fail-closed 不变量，与是否有人审核无关。
+            if self.permission_mode == "full":
+                return ToolCallVerdict("allow")
             if self.consume_approval(
                 approval_fingerprint_value,
                 task_id=task_id,

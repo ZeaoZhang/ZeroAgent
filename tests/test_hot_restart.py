@@ -130,6 +130,42 @@ class TestPluginHotReload:
 
         assert len(runtime._prompt_blocks) == 1
 
+    def test_directory_plugin_reloads_on_edit(self, tmp_path: Path) -> None:
+        # 目录插件的入口是 ``__init__.py``：签名必须覆盖整个包目录，
+        # 否则任何修改都不会被判定为「已变化」。
+        package = tmp_path / "extensions" / "pkg"
+        _write(
+            package / "__init__.py",
+            "VERSION = 'v1'\n"
+            "from .helper import unused\n"
+            "def setup(ctx):\n"
+            "    @ctx.tool(name='pkg_tool', description='d',"
+            " parameters={'type': 'object', 'properties': {}})\n"
+            "    def pkg_tool(args):\n"
+            "        return VERSION\n",
+        )
+        _write(package / "helper.py", "unused = 1\n")
+        runtime = ExtensionRuntime(registry=ToolRegistry(), home=tmp_path)
+        assert runtime.sync_plugins()["loaded"] == ["pkg"]
+        assert _handler_result(runtime.registry.get("pkg_tool")) == "v1"
+
+        _write(
+            package / "__init__.py",
+            "VERSION = 'v2'\n"
+            "from .helper import unused\n"
+            "def setup(ctx):\n"
+            "    @ctx.tool(name='pkg_tool', description='d',"
+            " parameters={'type': 'object', 'properties': {}})\n"
+            "    def pkg_tool(args):\n"
+            "        return VERSION\n",
+        )
+        assert runtime.sync_plugins()["reloaded"] == ["pkg"]
+        assert _handler_result(runtime.registry.get("pkg_tool")) == "v2"
+
+        # 只改包内非入口模块也必须触发重载
+        _write(package / "helper.py", "unused = 2\n")
+        assert runtime.sync_plugins()["reloaded"] == ["pkg"]
+
 
 class TestMcpHotReload:
     def test_reconfigure_points_to_new_server(self, tmp_path: Path) -> None:
@@ -511,6 +547,7 @@ class TestDesktopResume:
     class _FakeZa:
         def __init__(self, pending):
             self._pending_task_state = pending
+            self.pending_task_state = pending
 
         def restore_checkpoint(self, data) -> bool:
             return True
@@ -656,3 +693,231 @@ class TestHotRestartValidation:
             agent.close()
             os.environ.pop("ZA_RESUME_CHECKPOINT", None)
             os.environ.pop("ZA_HOT_RESTART", None)
+
+
+class TestCheckpointFidelity:
+    def test_history_with_block_content_survives_roundtrip(self, tmp_path: Path) -> None:
+        from zero_agent.core.types import TaskContract, TaskMode
+
+        agent = TestCheckpoint()._agent(tmp_path)
+        try:
+            agent._is_running_task = True
+            agent.handler.task_contract = TaskContract(
+                task_id="t1", user_request="look", mode=TaskMode.OPEN,
+            )
+            block = [{"type": "text", "text": "hi"}, {"type": "image_url",
+                      "image_url": {"url": "data:image/png;base64,AAA"}}]
+            agent.client.history = [{"role": "user", "content": block}]
+
+            path = agent.save_checkpoint(status="running")
+            data = checkpoint_store.load(path)
+
+            assert data["history"][0]["content"] == block
+            restored = TestCheckpoint()._agent(tmp_path)
+            try:
+                assert restored.restore_checkpoint(data) is True
+                assert restored.client.history[0]["content"] == block
+            finally:
+                restored.close()
+        finally:
+            agent.close()
+
+    def test_pending_messages_merge_without_duplicates(self) -> None:
+        history = [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+        ]
+
+        merged = checkpoint_store.merge_pending_messages(
+            list(history),
+            [{"role": "assistant", "content": "b"},
+             {"role": "user", "content": "c"}],
+        )
+        assert merged == [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+            {"role": "user", "content": "c"},
+        ]
+
+        # 整段 pending 已落盘时不重复追加
+        assert checkpoint_store.merge_pending_messages(list(history), history) == history
+
+    def test_restart_budget_helpers(self) -> None:
+        now = 1000.0
+        running = {"status": "running", "restart_history": [now - 10] * 4}
+        assert not checkpoint_store.restart_budget_exhausted(running, now=now)
+
+        running["restart_history"] = [now - 10] * checkpoint_store.RESTART_BUDGET_LIMIT
+        assert checkpoint_store.restart_budget_exhausted(running, now=now)
+
+        # 窗口外的不计入
+        stale = {
+            "status": "running",
+            "restart_history": [now - 10_000] * 20,
+        }
+        assert not checkpoint_store.restart_budget_exhausted(stale, now=now)
+
+        # 等用户答复的检查点不受预算限制
+        waiting = {"status": "waiting", "restart_history": [now] * 20}
+        assert not checkpoint_store.restart_budget_exhausted(waiting, now=now)
+
+
+class TestBuiltinReloadRollback:
+    def test_failed_reload_keeps_previous_registrations(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import importlib as importlib_module
+        from types import SimpleNamespace
+
+        runtime = ExtensionRuntime(
+            registry=ToolRegistry(),
+            home=tmp_path,
+            config=SimpleNamespace(permission_mode="ask"),
+        )
+        module_path = "zero_agent.extensions.builtin.permission_gate"
+        try:
+            assert runtime.reload_builtin("permission_gate", module_path) is True
+            assert runtime._tool_call
+
+            class _BrokenModule:
+                @staticmethod
+                def setup(ctx):
+                    raise RuntimeError("boom")
+
+            import importlib as importlib_module
+
+            real_import = importlib_module.import_module
+            monkeypatch.setattr(
+                importlib_module,
+                "import_module",
+                lambda path, *a, **kw: (
+                    _BrokenModule if path == "broken.builtin" else real_import(path)
+                ),
+            )
+
+            with pytest.raises(RuntimeError):
+                runtime.reload_builtin("permission_gate", "broken.builtin")
+
+            # 回滚：门控仍然在注册表里，且归属仍被视为已安装
+            assert runtime._tool_call
+            assert "permission_gate" in runtime.installed_builtins
+        finally:
+            runtime.release()
+
+
+class TestExtensionTopologyBrowser:
+    def test_browser_mode_change_reinstalls_builtin(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from zero_agent.core.config import AgentConfig, LLMBackendConfig
+        from zero_agent.core.agent import ZeroAgent
+        from zero_agent.extensions.builtin import browser_tools
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            browser_tools, "setup", lambda ctx: calls.append(ctx.name),
+        )
+        config = AgentConfig(
+            llm_backends={
+                "d": LLMBackendConfig(
+                    name="d", provider="openai", api_key="k",
+                    api_base="https://api.openai.com/v1", model="gpt-4o",
+                )
+            },
+            default_backend="d",
+            workspace_dir=str(tmp_path / "ws"),
+            memory_dir=str(tmp_path / "mem"),
+            sessions_dir=str(tmp_path / "sessions"),
+            extensions_home=str(tmp_path / "home"),
+            browser_tools="off",
+        )
+        agent = ZeroAgent(config)
+        try:
+            assert "browser_tools" not in agent.extensions.installed_builtins
+
+            agent.config.browser_tools = "auto"
+            assert agent.reload_workflow()["topology"] is True
+            assert calls == ["browser_tools"]
+
+            agent.config.browser_tools = "on"
+            assert agent.reload_workflow()["topology"] is True
+            assert calls == ["browser_tools", "browser_tools"]
+        finally:
+            agent.close()
+
+
+class TestHotRestartLifecycle:
+    def test_failed_exec_rebuilds_closed_sessions(self, tmp_path: Path) -> None:
+        from zero_agent.core.types import PendingTaskState, TaskContract, TaskMode
+
+        manager, Session = TestDesktopResume()._manager(tmp_path)
+        sess = Session(id="sess-recover")
+        sess.status = "running"
+        manager.sessions[sess.id] = sess
+        pending = PendingTaskState(
+            contract=TaskContract(
+                task_id="t1", user_request="do", mode=TaskMode.OPEN,
+            ),
+            ledger=EvidenceLedger(),
+            plan_verify_status="missing",
+            waiting_kind="restart",
+        )
+        rebuilt: list[str] = []
+        manager.make_agent = lambda target: (
+            rebuilt.append(target.id)
+            or TestDesktopResume._FakeRunner(TestDesktopResume._FakeZa(pending))
+        )
+        TestDesktopResume()._checkpoint(manager, sess.id, "running")
+
+        manager._recover_after_failed_restart([sess.id])
+
+        assert rebuilt == [sess.id]
+        assert sess.status == "waiting"
+        assert sess.agent is not None
+        assert any(
+            "热重启失败" in str(message.get("content", ""))
+            for message in sess.messages
+        )
+
+    def test_exec_restart_hands_token_to_new_process(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from zero_agent.frontends import desktop_bridge
+
+        manager, _Session = TestDesktopResume()._manager(tmp_path)
+        manager.bridge_token = "tok-abc"
+        monkeypatch.delenv("ZA_DESKTOP_BRIDGE_TOKEN", raising=False)
+        monkeypatch.setattr(
+            desktop_bridge.hot_restart,
+            "restart_process",
+            lambda: (_ for _ in ()).throw(RuntimeError("exec-blocked")),
+        )
+
+        with pytest.raises(RuntimeError):
+            manager._exec_restart()
+
+        assert os.environ["ZA_DESKTOP_BRIDGE_TOKEN"] == "tok-abc"
+        os.environ.pop("ZA_DESKTOP_BRIDGE_TOKEN", None)
+
+    def test_adopt_bridge_token_keeps_env_clean(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from types import SimpleNamespace as NS
+
+        from zero_agent.frontends import desktop_bridge
+
+        monkeypatch.setenv("ZA_DESKTOP_BRIDGE_TOKEN", "tok-123")
+        security = desktop_bridge.load_bridge_security("127.0.0.1", 14168)
+        monkeypatch.setattr(desktop_bridge, "manager", NS(bridge_token=""))
+
+        desktop_bridge.adopt_bridge_token(security)
+
+        assert desktop_bridge.manager.bridge_token == "tok-123"
+        assert "ZA_DESKTOP_BRIDGE_TOKEN" not in os.environ

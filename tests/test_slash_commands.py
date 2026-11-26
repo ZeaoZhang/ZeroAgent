@@ -493,7 +493,7 @@ class TestPlanHelpers:
         )
         return SimpleNamespace(
             _is_running_task=running,
-            _pending_task_state=(
+            pending_task_state=(
                 SimpleNamespace(contract=pending_contract)
                 if pending_contract is not None else None
             ),

@@ -446,6 +446,8 @@ class _RecordingAgent:
             SimpleNamespace(contract=pending_contract)
             if pending_contract is not None else None
         )
+        # 生产代码只认公共访问器
+        self.pending_task_state = self._pending_task_state
         self.calls = []
 
     def run(self, prompt, **kwargs):

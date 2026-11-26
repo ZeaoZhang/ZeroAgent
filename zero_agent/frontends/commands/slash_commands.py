@@ -358,7 +358,7 @@ def has_active_plan(agent: "ZeroAgent") -> bool:
     user behind the active-plan gate.
     """
 
-    if getattr(agent, "_pending_task_state", None) is not None:
+    if getattr(agent, "pending_task_state", None) is not None:
         return True
 
     handler = getattr(agent, "handler", None)
@@ -374,7 +374,7 @@ def has_active_plan(agent: "ZeroAgent") -> bool:
 def resolve_pending_plan(agent: "ZeroAgent") -> tuple[str, TaskMode, str] | None:
     """Return the resumable pending PLAN/EXECUTING contract for /plan execute."""
 
-    pending = getattr(agent, "_pending_task_state", None)
+    pending = getattr(agent, "pending_task_state", None)
     contract = getattr(pending, "contract", None)
     mode = getattr(contract, "mode", None)
     if mode not in (TaskMode.PLAN, TaskMode.EXECUTING):

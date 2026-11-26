@@ -149,9 +149,10 @@ class AgentLoop:
                             )
                             break
                         if report.get("config") or report.get("tools_changed"):
+                            # tool schema 已由 reload_workflow 刷到 self.loop 上；
+                            # 这里只接管重建后的 client。
                             self.client = self._agent.client
                             self.handler.client = self.client
-                            self.tools_schema = self._agent.registry.generate_openai_schema()
                     else:
                         # 兼容仅实现 reload_config 的旧式 agent 适配层
                         reload_config = getattr(self._agent, "reload_config", None)

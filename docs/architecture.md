@@ -11,7 +11,9 @@ core/agent.py           ←── ZeroAgent: 组装所有组件
         ├── core/config.py     ←── AgentConfig: YAML/ENV/程序化
         ├── core/loop.py       ←── AgentLoop: generator-based 事件循环
         ├── core/handler.py    ←── BaseHandler: 工具执行 + 计划模式 + 轮次管理
-        ├── core/types.py      ←── StepOutcome, TurnResult
+        ├── core/types.py      ←── StepOutcome, TurnResult, PendingTaskState
+        ├── core/checkpoint.py ←── 热重启检查点（history / 契约 / 证据 / 预算）
+        ├── core/hot_restart.py←── 核心代码签名、重启前校验、exec
         ├── core/exceptions.py ←── ZeroAgentError 层次
         │
         ├── llm/               ←── LLM 后端
@@ -95,6 +97,14 @@ LLM 返回 tool_calls → ToolRegistry.dispatch()
 插件按文件名字典序加载，单个失败只跳过自身。内置能力扩展同样走这套运行时，
 但由代码显式安装；`browser_tools` 是其中之一，由 `extensions.browser` 控制，
 把 `web_*` 工具从默认工具面里拆出去。
+
+加载之后并不固化：`AgentLoop` 在每个 turn 边界调用 `ZeroAgent.reload_workflow()`，
+按内容签名同步 config / 插件（含目录插件包内任意 `*.py`）/ `mcp.json` /
+`extensions.{enabled,home,browser}`。核心代码（`zero_agent/**/*.py`）变化时先做
+语法与子进程 import 校验，再写检查点并 `os.execv` 热重启，新进程从检查点
+恢复 history、working memory、task contract 与证据账本后续跑（预算 10 分钟 5 次）。
+权限门控的 `permissions.mode` 只影响「是否需要人类审批」：`full`（默认）自动
+放行 `confirm`，确定性 `block` 仍然生效。
 
 三类扩展点（语义不同，不可混用）：
 

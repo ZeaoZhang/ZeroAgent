@@ -33,21 +33,38 @@ def _signature_files(root: Path) -> list[Path]:
 
 
 def _compute_core_signature(root: Optional[Path] = None) -> str:
-    """Hash every core module's path, mtime and size."""
+    """Hash every core module's path, mtime and size.
 
+    用 ``os.scandir`` 一次遍历：目录项自带 stat，避免 ``rglob`` + ``Path.stat``
+    的二次系统调用。该函数每个 turn 边界都要跑一次，成本直接叠在每次交互上。
+    """
     base = (root or _default_root()).resolve()
     rows: list[str] = []
-    for path in _signature_files(base):
+    stack: list[str] = [str(base)]
+    while stack:
+        current = stack.pop()
         try:
-            stat = path.stat()
+            entries = list(os.scandir(current))
         except OSError:
             continue
-        try:
-            relative = path.relative_to(base)
-        except ValueError:
-            relative = path
-        rows.append(f"{relative}|{stat.st_mtime_ns}|{stat.st_size}")
-    return hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
+        for entry in entries:
+            try:
+                if entry.is_dir():
+                    if entry.name != "__pycache__":
+                        stack.append(entry.path)
+                    continue
+                if not entry.name.endswith(".py"):
+                    continue
+                stat = entry.stat()
+            except OSError:
+                continue
+            path = Path(entry.path)
+            try:
+                relative = path.relative_to(base)
+            except ValueError:
+                relative = path
+            rows.append(f"{relative}|{stat.st_mtime_ns}|{stat.st_size}")
+    return hashlib.sha256("\n".join(sorted(rows)).encode("utf-8")).hexdigest()
 
 
 # 进程导入时采样一次：这是「当前进程实际加载的代码」基线。

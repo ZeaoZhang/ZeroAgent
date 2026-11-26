@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
@@ -21,6 +22,11 @@ from zero_agent.core.types import EvidenceLedger, EvidenceRecord, TaskContract, 
 _logger = logging.getLogger("zero_agent.core.checkpoint")
 
 CHECKPOINT_VERSION = 1
+
+# 自动续跑的重启预算：同一任务在窗口内最多自动重启 N 次。此处的常量是两个
+# 前端（CLI / 桌面 bridge）唯一的判定来源，避免各自的窗口与阈值漂移。
+RESTART_BUDGET_WINDOW = 600.0
+RESTART_BUDGET_LIMIT = 5
 
 CONTINUATION_PROMPT = (
     "[System] 进程因核心代码热重启而重启。请基于已有对话、工具结果与证据继续原任务；"
@@ -113,6 +119,54 @@ def load(path: str | os.PathLike[str]) -> Optional[dict[str, Any]]:
     return data
 
 
+def recent_restarts(
+    data: dict[str, Any],
+    *,
+    now: Optional[float] = None,
+) -> list[float]:
+    """Return the restart timestamps inside the budget window.
+
+    Args:
+        data: 检查点负载.
+        now: 参考时刻，默认当前时间.
+
+    Returns:
+        窗口内的时间戳列表（升序，忽略非数值条目）.
+    """
+
+    current = time.time() if now is None else now
+    stamps = [
+        float(item)
+        for item in data.get("restart_history") or []
+        if isinstance(item, (int, float))
+        and current - float(item) < RESTART_BUDGET_WINDOW
+    ]
+    return sorted(stamps)
+
+
+def restart_budget_exhausted(
+    data: dict[str, Any],
+    *,
+    now: Optional[float] = None,
+) -> bool:
+    """Return whether a checkpoint must stop auto-resuming.
+
+    只有 ``running`` 的检查点会自动续跑，因此预算也只约束它们；``waiting``
+    的检查点在等用户答复，不计入重启循环。
+
+    Args:
+        data: 检查点负载.
+        now: 参考时刻，默认当前时间.
+
+    Returns:
+        True 表示窗口内已达到重启上限.
+    """
+
+    if data.get("status") != "running":
+        return False
+    return len(recent_restarts(data, now=now)) >= RESTART_BUDGET_LIMIT
+
+
 def list_checkpoints(
     sessions_dir: str | os.PathLike[str],
 ) -> list[tuple[Path, dict[str, Any]]]:
@@ -193,3 +247,65 @@ def ledger_from_payload(data: Any) -> EvidenceLedger:
         except TypeError:
             continue
     return EvidenceLedger(records=records)
+
+
+def normalize_history(history: Any) -> list[dict[str, Any]]:
+    """Serialize one history list losslessly, dropping what cannot be.
+
+    写检查点时用它落盘，恢复时用它清洗来路不明的文件内容。不能用
+    ``default=str`` 兜底：多模态内容（``content`` 是 block 列表）会被字符串化，
+    回灌给模型接口后直接报错。这里逐条做 JSON 往返，只有非 dict 条目或无法
+    序列化的条目才被丢弃。
+
+    Args:
+        history: ``client.history`` 原始列表.
+
+    Returns:
+        可 JSON 往返的消息列表.
+    """
+
+    if not isinstance(history, list):
+        return []
+    payload: list[dict[str, Any]] = []
+    for item in history:
+        if not isinstance(item, dict):
+            _logger.warning("检查点跳过了非字典历史条目: %r", type(item).__name__)
+            continue
+        try:
+            encoded = json.dumps(item, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            _logger.warning("检查点跳过了无法序列化的历史条目: %s", exc)
+            continue
+        payload.append(json.loads(encoded))
+    return payload
+
+
+def merge_pending_messages(
+    history: list[dict[str, Any]],
+    pending_messages: Any,
+) -> list[dict[str, Any]]:
+    """Append the messages that were in flight but not yet in history.
+
+    只补「尚未落进 history 的尾部」：若整段 pending 已经在 history 末尾（进程
+    在请求发出后、写检查点前崩溃）就什么都不加；若只有前几条已入历史，就按最长
+    重叠补剩下的，避免把整段对话重复一遍。
+
+    Args:
+        history: 检查点里的 history.
+        pending_messages: 检查点里的 pending_messages.
+
+    Returns:
+        合并后的 history（原地修改并返回）.
+    """
+
+    pending = [item for item in (pending_messages or []) if isinstance(item, dict)]
+    if not pending:
+        return history
+    overlap = 0
+    upper = min(len(pending), len(history))
+    for size in range(upper, 0, -1):
+        if history[-size:] == pending[:size]:
+            overlap = size
+            break
+    history.extend(pending[overlap:])
+    return history

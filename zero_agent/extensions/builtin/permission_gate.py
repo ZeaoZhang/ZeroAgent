@@ -14,6 +14,11 @@
 
 审批只覆盖「工具名 + 参数完全一致」的那一次调用（见设计文档第八节）。
 
+``permissions.mode: full`` 只免去人类参与：本扩展给出的 ``confirm`` 由运行时
+自动放行，而 ``block``（危险 shell、声明缺失、目标不可判定）仍然拒绝——它们是
+fail-closed 不变量，与是否有人审核无关。开关在运行时（
+``ExtensionRuntime.evaluate_tool_call``），本扩展不感知模式。
+
 路径判断使用 ``realpath + 平台大小写归一 + commonpath``（见 ``path_policy``），
 与文件工具实际写入的目标口径一致，避免大小写不敏感文件系统、相对路径和软链接
 造成的绕过。已知边界：带 execute 的工具内用其它语言/命令间接写文件仍可绕过，
@@ -327,14 +332,6 @@ def _content_summary(args: Dict[str, Any]) -> str:
     return "（无内容字段）"
 
 
-def _permission_mode(runtime: Any) -> str:
-    """Return the runtime gating mode, defaulting to full for bare runtimes."""
-
-    config = getattr(runtime, "config", None)
-    value = str(getattr(config, "permission_mode", "full") or "full").strip().lower()
-    return value if value in {"ask", "full"} else "ask"
-
-
 def _resolve_write_path(path: str, runtime: Any) -> str:
     """按文件工具的写入口径解析路径.
 
@@ -375,8 +372,6 @@ def setup(ctx: Any) -> None:
         Returns:
             None 放行；ExtensionVeto 拒绝；ApprovalRequired 请求审批.
         """
-        if _permission_mode(ctx.runtime) == "full":
-            return None
         args: Dict[str, Any] = call.args or {}
         workspace = _workspace(ctx.runtime)
         effects = _effects(call)

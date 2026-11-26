@@ -14,7 +14,7 @@ import shutil
 import sys
 import time as _time
 import uuid
-from typing import Any, Optional
+from typing import Optional
 
 from zero_agent.core import checkpoint as checkpoint_store
 from zero_agent.core import hot_restart
@@ -407,17 +407,6 @@ def _load_config(args: argparse.Namespace) -> AgentConfig:
     return config
 
 
-def _pending_waiting_question(pending: Any) -> str:
-    """Extract the user-facing question from a restored waiting state."""
-
-    data = getattr(pending, "waiting_data", None)
-    if not isinstance(data, dict):
-        return "Waiting for user input"
-    payload = data.get("data") if isinstance(data.get("data"), dict) else data
-    question = payload.get("question") if isinstance(payload, dict) else None
-    return str(question or "Waiting for user input")
-
-
 def _restore_restart_checkpoint(
     agent: ZeroAgent,
 ) -> tuple[Optional[str], Optional[str]]:
@@ -433,29 +422,24 @@ def _restore_restart_checkpoint(
     data = checkpoint_store.load(path)
     if not data:
         return None, None
-    recent_restarts = [
-        float(item)
-        for item in data.get("restart_history") or []
-        if isinstance(item, (int, float))
-        and _time.time() - float(item) < 600
-    ]
-    if data.get("status") == "running" and len(recent_restarts) >= 5:
+    if checkpoint_store.restart_budget_exhausted(data):
         print(
-            "\n[hot-restart] 10 分钟内已热重启 5 次，疑似重启循环；"
-            "已停止自动续跑，请检查核心代码后手动重试。",
+            f"\n[hot-restart] {int(checkpoint_store.RESTART_BUDGET_WINDOW // 60)} "
+            f"分钟内已热重启 {checkpoint_store.RESTART_BUDGET_LIMIT} 次，"
+            "疑似重启循环；已停止自动续跑，请检查核心代码后手动重试。",
             file=sys.stderr,
         )
         agent.clear_checkpoint()
         return None, None
     if not agent.restore_checkpoint(data):
         return None, None
-    pending = agent._pending_task_state
+    pending = agent.pending_task_state
     if (
         data.get("status") == "waiting"
         and pending is not None
         and pending.waiting_kind != "restart"
     ):
-        return None, _pending_waiting_question(pending)
+        return None, pending.waiting_prompt()[0]
     return agent.take_restart_prompt(), None
 
 
@@ -463,8 +447,8 @@ def _cli_hot_restart(agent: ZeroAgent, reason: str) -> None:
     """Save a checkpoint and exec a fresh interpreter for the same task."""
 
     path = ""
-    if agent._restart_checkpoint_armed and agent._last_checkpoint_path:
-        path = str(agent._last_checkpoint_path)
+    if agent.restart_checkpoint_armed and agent.last_checkpoint_path:
+        path = str(agent.last_checkpoint_path)
     if not path:
         saved = agent.save_checkpoint(status="running", restart=True)
         path = str(saved) if saved is not None else ""

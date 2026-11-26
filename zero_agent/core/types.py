@@ -66,6 +66,27 @@ class PendingTaskState:
     ]
     waiting_data: dict[str, Any] = field(default_factory=dict)
 
+    def waiting_prompt(self) -> tuple[str, list[str]]:
+        """Return ``(question, candidates)`` for the paused task.
+
+        ``waiting_data`` 的负载形状有两种历史写法（直接是问题字典，或包在
+        ``{"data": {...}}`` 里），两个前端都要展示同一条问题，因此归一逻辑
+        放在这里，避免各自解析导致文案漂移。
+
+        Returns:
+            问题文本与可选快捷选项（缺省空列表）.
+        """
+
+        data = self.waiting_data if isinstance(self.waiting_data, dict) else {}
+        payload = data.get("data") if isinstance(data.get("data"), dict) else data
+        if not isinstance(payload, dict):
+            payload = {}
+        question = str(payload.get("question") or "Waiting for user input")
+        candidates = payload.get("candidates")
+        if not isinstance(candidates, list):
+            candidates = []
+        return question, [str(candidate) for candidate in candidates]
+
 @dataclass(frozen=True)
 class CompletionCertificate:
     """Evidence-backed completion record populated by the completion evaluator."""

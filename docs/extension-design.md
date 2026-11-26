@@ -290,6 +290,27 @@ CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有
 
 ## 八、审批与恢复
 
+### 8.0 权限模式（`permissions.mode`）
+
+| 模式 | 人类参与 | `confirm` / `ApprovalRequired` | `block` / 插件 veto / 门控异常 |
+| --- | --- | --- | --- |
+| `ask` | 有 | 暂停任务，等用户批准 | 拒绝 |
+| `full`（默认） | 无 | **直接放行** | **仍然拒绝** |
+
+`full` 的语义是「不需要人类参与审核」，不是「关掉门控」：危险 shell、
+`effects` 声明缺失、写入目标不可判定、插件主动 veto、门控抛异常这些
+确定性拒绝是 fail-closed 不变量，与有没有人点「同意」无关。开关在
+`ExtensionRuntime.evaluate_tool_call`，`permission_gate` 只负责给出
+`confirm` / `block`，不感知模式。
+
+运行时切换：`/permissions [ask|full]`（只影响当前进程，不写回 YAML）。
+
+**威胁模型提醒**：`full` 下 agent 可以不经批准修改 `<home>/extensions/`，
+而插件热加载（第十五节）会在**同一个会话的下一轮**导入它。也就是说
+「模型写插件 → 进程内任意代码执行」这条链在默认配置下是通的。这是
+`full` 的已知代价；需要强制隔离时用 `extensions.sandbox`，或把
+`permissions.mode` 切回 `ask`。
+
 ### 8.1 触发场景
 
 - agent 修改 skill / 插件代码 / `mcp.json`。
@@ -362,6 +383,10 @@ CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有
 ## 九、安全边界（诚实说明）
 
 上一版曾承诺“写护栏不可绕过”，这不成立，予以撤回。实际分三层：
+
+默认 `permissions.mode: full`：下表中的「审批」只在 `ask` 模式成立。`full` 下
+策略层只剩确定性拒绝（危险 shell、声明缺失、目标不可判定），写入范围与受保护
+路径都不再暂停——要恢复人工把关就把模式切回 `ask`。
 
 | 层 | 手段 | 能挡住什么 | 挡不住什么 |
 | --- | --- | --- | --- |
@@ -548,9 +573,12 @@ extensions:
 | V5 | 插件注册同名工具后卸载 | 内置工具恢复 |
 | V6 | `mcp.json` 中单个 server 配置错误 | 其余 server 正常，启动成功 |
 | V7 | 未配置 MCP | 不导入 MCP SDK |
-| V8 | 修改 skill 文件 | 需人类同意；默认只对当次变更有效，`permission_gate` 另有路径级批量授权（同任务 + 同路径 + TTL 内不重复询问） |
+| V8 | 修改 skill 文件 | `ask` 下需人类同意，默认只对当次变更有效，`permission_gate` 另有路径级批量授权（同任务 + 同路径 + TTL 内不重复询问）；`full` 下直接放行 |
 | V9 | SOP 与 skill 同名同主题冲突 | 以 SOP 为准，skill 作为参考 |
 | V10 | 切换工具语言触发 registry 重建 | 插件注册被重新应用，工具不消失 |
+| V11 | 修改/新增/删除 `extensions/*.py` 或 `extensions/<pkg>/`（含包内任意 `*.py`） | 下一轮自动加载/重载/卸载，`setup` 不重复执行 |
+| V12 | 修改 `mcp.json` | 下一轮重建 MCP 客户端，工具集随配置变化 |
+| V13 | 修改 `zero_agent/**/*.py` | 先做语法 + 子进程 import 校验，写检查点后 `os.execv` 热重启并自动续跑；同任务 10 分钟内最多 5 次，超限标记 `hot_restart_loop` |
 
 ## 十四、风险与未决问题
 
@@ -561,9 +589,59 @@ extensions:
 | 门控误伤 | 门控过严会阻断正常任务 | 门控结果可观测（日志 + 事件），先宽后紧 |
 | 审批疲劳 | 过多确认会让用户点“同意”成习惯 | 按路径策略批量授权（`scope` + TTL + 任务绑定），只对高风险单次确认 |
 | MCP 工具过多 | `tools/list` 的结果全部注册进 registry，tools schema 会随 server 工具数线性膨胀（**当前未缓解**） | 仅配置实际需要的 server；后续可做按需展开 |
+| 写插件即执行 | `full`（默认）+ 每轮插件同步：模型写 `<home>/extensions/*.py` 后下一轮即被导入，等价进程内任意代码执行 | 需要人类把关时设 `permissions.mode: ask`；需要隔离时用 `extensions.sandbox`；不要把 `ZA_DESKTOP_BRIDGE_TOKEN` 之类凭据放进环境变量 |
+| 核心代码热重启无监督 | `os.execv` 后新进程若在启动阶段崩溃，没有看护进程会重新拉起，检查点留在磁盘上等人处理 | 重启前的 `validate_core`（语法 + 子进程 import）先挡掉大部分；预算 10 分钟 5 次防重启循环 |
+| 每次 turn 的签名成本 | `core_signature` 全量 stat `zero_agent/**/*.py`（本地约 137 文件、~120 ms），桌面多会话叠加 | 命中变化才重启；后续可换目录级 watch |
 
 未决问题：
 
 - 是否需要 `/ext` 之类的 REPL 命令查看已加载插件与冲突？（倾向需要，但不在首版）
 - 插件是否需要版本约束与依赖声明？（首版按纯 Python 处理，不做额外约定）
 - 是否支持项目级扩展（`.zeroagent/`）：目前先只做用户级 `~/.zeroagent/`，避免概念分裂。
+
+## 十五、热更新与热重启
+
+目标：运行中改 skill / SOP / 插件 / `mcp.json` / config / 核心 Python 代码，都不需要人工审批或手动重启进程。
+
+### 15.1 每轮同步（`reload_workflow`）
+
+`AgentLoop` 在每次 turn 边界调用 `ZeroAgent.reload_workflow()`：
+
+| 对象 | 判定 | 动作 |
+| --- | --- | --- |
+| `config.yaml` | mtime 变化 | 原子重载配置、重建 LLM client 与 registry，扩展运行时换绑新 config |
+| `extensions.enabled/home/browser` | 拓扑三元组变化 | 换 home、卸/装内置扩展（`browser` 变化强制重装 `browser_tools`）、按需重载全部插件 |
+| 插件 | 入口文件（单文件）或包目录内每个 `*.py` 的 `mtime_ns + size` 摘要变化 | 执行 teardown、撤销注册、清 `sys.modules` 与 `pyc`、重新 `setup` |
+| `mcp.json` | `mtime_ns + size` 变化 | 重跑 `mcp_client.setup`（关旧子进程、拉新 server） |
+| 核心代码 | `zero_agent/**/*.py` 全量摘要变化 | 校验 → 写检查点 → `os.execv` |
+
+只同步有变化的东西：签名未变时一次 turn 只做一轮 stat。`extensions.hot_reload: false` 时插件与 MCP 不参与，config 与核心代码仍生效。
+
+### 15.2 核心热重启
+
+1. `validate_core()`：先 `compile()` 每个核心模块（语法），再起一个短命子进程
+   `import zero_agent, zero_agent.core.agent, zero_agent.runners.cli`（import 期错误）。
+   失败则本签名记为 blocked，不再每轮重试，直到下一次文件变化。
+2. `save_checkpoint(status="running", restart=True)`：history、`pending_messages`、
+   handler working / history_info、task contract、evidence ledger、等待状态、
+   模式上下文（task/func 的续跑参数）、重启时间戳。
+3. CLI 直接 `os.execv`；桌面 bridge 把 exec 排到事件循环 0.3s 之后，先给前端
+   一条 `bridge-log`。
+4. 新进程启动时恢复：CLI 读 `ZA_RESUME_CHECKPOINT`，桌面扫描
+   `sessions/checkpoints/*.json`（`source=desktop`）——`running` 的自动续跑，
+   `waiting` 的恢复成待答问题。
+5. 预算：同一任务 10 分钟内最多 5 次自动重启（`checkpoint.RESTART_BUDGET_*`），
+   超限停止自动续跑并标记 `hot_restart_loop`，检查点删除。
+6. exec 失败（不支持的平台机制、权限问题）：桌面 bridge 用检查点重建会话
+   运行时并提示用户「发送任意消息即可继续」，不会留下指向已关闭 agent 的会话。
+
+### 15.3 检查点约定
+
+- 存放：`<sessions_dir>/checkpoints/<session_id>.json`，目录 `0700`、文件 `0600`，
+  写入走临时文件 + `fsync` + `os.replace`。
+- 版本：`version` 不匹配直接忽略。
+- history 逐条做 JSON 往返，序列化不了的条目丢弃并告警（不用 `default=str`
+  兜底，否则多模态内容会被字符串化后回灌给模型接口）。
+- `pending_messages`（已构造但未落进 history 的请求）按最长重叠合并，避免
+  重启后整段对话重复。
+- `/new`、会话删除、任务正常结束都会清检查点；只有热重启路径保留 `running` 检查点。
