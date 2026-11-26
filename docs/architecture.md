@@ -105,7 +105,10 @@ LLM 返回 tool_calls → ToolRegistry.dispatch()
 从检查点恢复 history、working memory、task contract 与证据账本后续跑（预算 10 分钟
 5 次），空闲时直接重启、不恢复对话。
 权限门控的 `permissions.mode` 决定是否执行这一层：`full`（默认）不执行任何
-`on_tool_call` 门控，`ask` 才启用审批与拦截。强制隔离只有 `extensions.sandbox`。
+`on_tool_call` 门控，`ask` 才启用审批与拦截。与模式无关的两层是：
+`extensions.sandbox`（`code_run` 的进程沙箱）和 `zero_agent/core/safety.py`
+（写入系统目录/凭据/用户重要数据与 `.git` 的硬拒绝）。仓库源码可写，
+自我升级链路因此不受影响。
 
 三类扩展点（语义不同，不可混用）：
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, Generator, Optional
 
 from zero_agent.core.config import AgentConfig
+from zero_agent.core.safety import write_denial
 from zero_agent.core.types import StepAction, StepOutcome
 from zero_agent.tools.registry import ToolRegistry
 from zero_agent.utils.files import expand_file_refs
@@ -483,6 +484,15 @@ def _make_file_write_handler(config: AgentConfig):
         action_str = {"prepend": "Prepending to", "append": "Appending to"}.get(mode, "Overwriting")
         yield f"[Action] {action_str} file: {os.path.basename(path)}\n"
 
+        denial = write_denial(path, config)
+        if denial:
+            yield f"[Status] ERR {denial}\n"
+            return StepOutcome(
+                {"status": "error", "msg": denial},
+                next_prompt="\n",
+                action=StepAction.CONTINUE,
+            )
+
         content = args.get("content")
         if not isinstance(content, str) or not content.strip():
             yield "[Status] ERR 失败: 缺少 content 参数\n"
@@ -530,6 +540,14 @@ def _make_file_patch_handler(config: AgentConfig):
     ) -> Generator[str, None, dict]:
         path = resolve_file_path(args.get("path", ""), config)
         yield f"[Action] Patching file: {path}\n"
+        denial = write_denial(path, config)
+        if denial:
+            yield f"[Status] ERR {denial}\n"
+            return StepOutcome(
+                {"status": "error", "msg": denial},
+                next_prompt="\n",
+                action=StepAction.CONTINUE,
+            )
         old_content = args.get("old_content", "")
         new_content = args.get("new_content", "")
         try:

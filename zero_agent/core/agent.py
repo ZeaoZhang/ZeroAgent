@@ -1418,8 +1418,11 @@ class ZeroAgent:
         ``permissions.mode`` 决定是否执行工具调用门控这一层：``full``（默认）下
         ``evaluate_tool_call`` 直接返回 ``allow``，**完全不执行**任何 ``on_tool_call``
         回调——危险 shell、effects 声明缺失、插件 veto、门控异常都不再生效；
-        ``ask`` 才启用审批三态与 fail-closed。真正的强制隔离只有
-        ``extensions.sandbox``（``code_run`` 的进程沙箱）。
+        ``ask`` 才启用审批三态与 fail-closed。
+
+        与模式无关的两层仍然生效：``extensions.sandbox``（``code_run`` 的进程
+        沙箱）与 :mod:`zero_agent.core.safety`（写入系统目录、凭据、用户重要数据
+        与 ``.git`` 的硬拒绝）。仓库源码与 workspace 可写，自我升级不受影响。
 
         安全类扩展或运行时本身安装失败时抛 :class:`ExtensionBootstrapError`，
         绝不在 ``ask`` 缺了门控来源的情况下继续启动。外部插件与能力类扩展的失败仍只

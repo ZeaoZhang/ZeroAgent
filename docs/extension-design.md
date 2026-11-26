@@ -305,12 +305,31 @@ CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有
 
 运行时切换：`/permissions [ask|full]`（只影响当前进程，不写回 YAML）。
 
-**威胁模型提醒**：`full` 下 agent 可以不经批准修改 `<home>/extensions/`，
-而插件热加载（第十五节）会在**同一个会话的下一轮**导入它。也就是说
-「模型写插件 → 进程内任意代码执行」这条链在默认配置下是通的，且
-`permission_gate` 完全不执行。这是 `full` 的已知代价；因此 `full` 下的
-唯一强隔离是 `extensions.sandbox`（`code_run` 的进程沙箱），需要人工把关时
-把 `permissions.mode` 切回 `ask`。
+**底线层（两种模式都生效，不弹审批）**：`zero_agent/core/safety.py` 在
+`file_write` / `file_patch` 的入口做一次写入判定，命中即返回错误，不进入门控、
+也没有「同意」选项。保护范围是**不可逆破坏**，不是行为管控：
+
+- 系统与工具链：`/System`、`/Library`、`/Applications`、`/usr`、`/bin`、`/sbin`、
+  `/etc`、`/private/var/{db,vm}`、`/dev`、`/boot`、`/Volumes`、`/opt/homebrew`、
+  `/usr/local`。
+- 凭据与安全配置：`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.kube`、`~/.docker`、
+  `~/.password-store`、`~/.config/gh`、`~/.netrc`、`~/.git-credentials`、
+  `~/Library/Keychains`。
+- 用户重要数据：`~/Documents`、`~/Desktop`、`~/Downloads`、`~/Pictures`、
+  `~/Movies`、`~/Music`、`~/Library/Mobile Documents`（iCloud Drive）。
+- 任何 `.git` 目录（hooks/config/refs 被改写等价于植入持久化后门）。
+
+仓库源码、workspace、临时目录都不在保护范围内，`file_write` 照常写：**自我升级
+不受影响**。用 `safety.protected_paths` 追加、`safety.allow_paths` 解禁（例如把
+`~/Downloads` 交给 agent 管）。`code_run` 在沙箱**未真正生效**时（`off`、平台
+不支持、探测失败）额外用 `shell_policy` 做静态兜底：格式化、写块设备、关机、
+fork 炸弹、workspace 之外的递归删除都被拒；沙箱生效时不做这一步，命令保持自由。
+
+**威胁模型提醒**：`full` 下 agent 可以不经批准修改 `<home>/extensions/` 与仓库
+源码，而插件热加载（第十五节）与核心热重启会在**同一个会话的下一轮**生效。
+也就是说「模型写插件/核心代码 → 进程内任意代码执行」这条链在默认配置下是通的，
+且 `permission_gate` 完全不执行。这是 `full` 的已知代价；需要人工把关时把
+`permissions.mode` 切回 `ask`，需要机器级隔离时用 `extensions.sandbox`。
 
 ### 8.1 触发场景
 
@@ -385,17 +404,18 @@ CLI 退出、桌面端删除/重置会话时显式调用，进程退出时另有
 
 上一版曾承诺“写护栏不可绕过”，这不成立，予以撤回。实际分三层：
 
-默认 `permissions.mode: full`：下表中的「审批」只在 `ask` 模式成立。`full` 下
-策略层整体不生效（`evaluate_tool_call` 直接放行），写入范围与受保护路径都不再
-暂停或拒绝；要恢复人工把关就把模式切回 `ask`。
+默认 `permissions.mode: full`：下表中的「审批」与「策略层」只在 `ask` 模式生效
+（`full` 下 `evaluate_tool_call` 直接放行）。但**底线层与沙箱层与模式无关**，
+永远生效。
 
 | 层 | 手段 | 能挡住什么 | 挡不住什么 |
 | --- | --- | --- | --- |
-| 策略层 | 工具调用门控 + 审批 | 模型通过标准工具越权 | 插件在进程内直接写文件 |
+| 策略层（`ask`） | 工具调用门控 + 审批 | 模型通过标准工具越权 | 插件在进程内直接写文件 |
+| 底线层（常开） | `zero_agent/core/safety.py`：`file_write`/`file_patch` 拒绝系统目录、凭据、用户重要数据与 `.git`；`code_run` 在沙箱未生效时退回 `shell_policy` 静态判定 | 不可逆的系统损坏与重要数据丢失 | `code_run` 里间接删除（`python -c`）；已被 `safety.allow_paths` 解禁的路径 |
 | 流程层 | 注册归属、审批指纹、日志 | 误操作与重复执行 | 恶意代码 |
-| 沙箱层（可选，已提供） | `extensions.sandbox` 包装 `code_run`，写入限制在 workspace 与临时目录 | 命令执行时的越界写盘 | 平台差异；Linux 需可用 bwrap；硬链接与白名单外的可写目录仍可绕；降级即失去保护 |
+| 沙箱层（可选，已提供） | `extensions.sandbox` 包装 `code_run`，写入限制在 workspace 与临时目录 | 命令执行时的越界写盘 | 平台差异；Linux 需可用 bwrap；硬链接与白名单外的可写目录仍可绕；降级即失去保护（此时由底线层静态判定兜底） |
 
-文档与提示词中描述的应是**协作规则**，不是强制隔离。需要强制隔离时，走第三层。
+文档与提示词中描述的应是**协作规则**，不是强制隔离。需要强制隔离时，走沙箱层。
 
 **沙箱层的已知局限**（务必写进威胁模型，不要当成强隔离）：
 
@@ -580,6 +600,8 @@ extensions:
 | V11 | 修改/新增/删除 `extensions/*.py` 或 `extensions/<pkg>/`（含包内任意 `*.py`） | 下一轮自动加载/重载/卸载，`setup` 不重复执行 |
 | V12 | 修改 `mcp.json` | 下一轮重建 MCP 客户端，工具集随配置变化 |
 | V13 | 修改 `zero_agent/**/*.py` | 先做语法 + 子进程 import 校验，写检查点后 `os.execv` 热重启并自动续跑；同任务 10 分钟内最多 5 次，超限标记 `hot_restart_loop` |
+| V14 | 写入 `~/Documents`、`/etc`、`~/.ssh`、任意 `.git` | 两种模式下都被拒（`safety.py` 底线，无「同意」选项）；写仓库源码、workspace、临时目录照常成功 |
+| V15 | `sandbox: off` 时执行 `mkfs` / `rm -rf ~/Documents` | 被 `shell_policy` 静态兜底拒绝；沙箱生效时不走这层，命令保持自由 |
 
 ## 十四、风险与未决问题
 
@@ -590,7 +612,7 @@ extensions:
 | 门控误伤 | 门控过严会阻断正常任务 | 门控结果可观测（日志 + 事件），先宽后紧 |
 | 审批疲劳 | 过多确认会让用户点“同意”成习惯 | 按路径策略批量授权（`scope` + TTL + 任务绑定），只对高风险单次确认 |
 | MCP 工具过多 | `tools/list` 的结果全部注册进 registry，tools schema 会随 server 工具数线性膨胀（**当前未缓解**） | 仅配置实际需要的 server；后续可做按需展开 |
-| 写插件即执行 | `full`（默认）+ 每轮插件同步：模型写 `<home>/extensions/*.py` 后下一轮即被导入，等价进程内任意代码执行（`full` 下 `permission_gate` 完全不执行，没有任何门控能拦） | 需要人类把关时设 `permissions.mode: ask`；需要隔离时用 `extensions.sandbox`；不要把 `ZA_DESKTOP_BRIDGE_TOKEN` 之类凭据放进环境变量 |
+| 写插件即执行 | `full`（默认）+ 每轮插件同步：模型写 `<home>/extensions/*.py` 后下一轮即被导入，等价进程内任意代码执行（`full` 下 `permission_gate` 完全不执行，没有任何门控能拦；`safety.py` 底线只拦系统/凭据/数据/`.git`，不拦仓库源码与插件） | 需要人类把关时设 `permissions.mode: ask`；需要隔离时用 `extensions.sandbox`；不要把 `ZA_DESKTOP_BRIDGE_TOKEN` 之类凭据放进环境变量 |
 | 核心代码热重启无监督 | `os.execv` 后新进程若在启动阶段崩溃，没有看护进程会重新拉起，检查点留在磁盘上等人处理 | 重启前的 `validate_core`（语法 + 子进程 import）先挡掉大部分；预算 10 分钟 5 次防重启循环 |
 | 每次 turn 的签名成本 | `core_signature` 全量 stat `zero_agent/**/*.py`（本地约 137 文件、~120 ms），桌面多会话叠加 | 命中变化才重启；后续可换目录级 watch |
 
@@ -628,6 +650,10 @@ extensions:
 - **失败的插件不会每轮重试。** 插件签名在尝试加载**之前**记录，`setup` 抛异常
   也留档：同一份坏代码只尝试一次，文件改动或 `/update workflow`（`force=True`）
   才重试。排错流程因此是「改文件 → 自动重试」或「改完 `/update workflow`」。
+- **底线层不挡自我升级。** 仓库源码、workspace、临时目录都不在
+  `zero_agent/core/safety.py` 的保护清单里，`file_write` 照常写核心代码；
+  被拒的只是系统目录、凭据、用户重要数据与 `.git` 元数据。git 操作走
+  `code_run`（沙箱内），因此“改代码 → 重启”与“推远端”两条路都保留。
 
 ### 15.2 核心热重启
 

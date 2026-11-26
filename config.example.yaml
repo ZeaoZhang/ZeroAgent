@@ -27,8 +27,9 @@ log_dir: null
 # ask  — high-risk calls and protected writes pause for human approval.
 # full — bypasses every tool-call gate: permission_gate confirm/block, the
 #        dangerous-shell and effects-declaration checks, plugin vetoes and gate
-#        errors. No on_tool_call callback runs at all; only
-#        `extensions.sandbox` isolates code execution.
+#        errors. No on_tool_call callback runs at all.
+# Neither mode can bypass the irreversible-damage floor below, or
+# `extensions.sandbox` for code_run.
 permissions:
   mode: full          # ask | full
 
@@ -65,6 +66,20 @@ extensions:
   # (hot_reload).
   # 注意：YAML 1.1 会把未加引号的 off/on 解析成布尔，建议写成 "off"。
   sandbox: "auto"
+
+# Irreversible-damage floor. Always on, no approval prompt, unaffected by
+# permissions.mode: writes to system dirs (/System, /usr, /etc, /opt/homebrew,
+# /Volumes, ...), credentials (~/.ssh, ~/.aws, ~/Library/Keychains, ...), user
+# data (~/Documents, ~/Desktop, ~/Downloads, ~/Pictures, ~/Movies, ~/Music,
+# iCloud Drive) and any `.git` directory are refused. The repo, workspace and
+# temp dirs stay fully writable, so the agent can still upgrade itself.
+# Defaults live in zero_agent/core/safety.py.
+safety:
+  # Extra protected roots (expanded with ~).
+  protected_paths: []
+  # Un-protect a default root, e.g. hand ~/Downloads to the agent:
+  # allow_paths: ["~/Downloads"]
+  allow_paths: []
 
 # Optional local LiteLLM model price/context-window cache.
 # litellm_model_cost_map: ./model_prices_and_context_window.json

@@ -228,6 +228,10 @@ class AgentConfig:
         permission_mode: 工具门控模式 "ask" | "full"；full 绕过全部扩展门控.
         extensions_hot_reload: 每轮自动同步 plugin / mcp.json 变化.
         extensions_core_restart: 核心 Python 代码变化后自动热重启.
+        safety_protected_paths: 追加到不可逆破坏底线的写入保护路径
+            (``safety.protected_paths``)；默认清单见 ``zero_agent.core.safety``.
+        safety_allow_paths: 从底线里解禁的路径（``safety.allow_paths``），
+            用于把某个数据目录交给 agent 管理.
     """
 
     llm_backends: dict[str, LLMBackendConfig] = field(default_factory=dict)
@@ -254,6 +258,8 @@ class AgentConfig:
     permission_mode: str = "full"
     extensions_hot_reload: bool = True
     extensions_core_restart: bool = True
+    safety_protected_paths: list[str] = field(default_factory=list)
+    safety_allow_paths: list[str] = field(default_factory=list)
 
     @property
     def resolved_language(self) -> str:
@@ -484,6 +490,9 @@ class AgentConfig:
         permissions_data = data.get("permissions") or {}
         if not isinstance(permissions_data, dict):
             permissions_data = {}
+        safety_data = data.get("safety") or {}
+        if not isinstance(safety_data, dict):
+            safety_data = {}
         backends: dict[str, LLMBackendConfig] = {}
         env_pattern = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
         for name, cfg in data.get("llm_backends", {}).items():
@@ -532,6 +541,12 @@ class AgentConfig:
             ),
             extensions_core_restart=_as_bool(
                 extensions_data.get("core_restart"), True,
+            ),
+            safety_protected_paths=_as_str_list(
+                safety_data.get("protected_paths"), "protected_paths",
+            ),
+            safety_allow_paths=_as_str_list(
+                safety_data.get("allow_paths"), "allow_paths",
             ),
         )
 
