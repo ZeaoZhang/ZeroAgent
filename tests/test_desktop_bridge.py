@@ -559,6 +559,7 @@ def test_sync_token_usage_maps_cache_stats_without_losing_context() -> None:
             "total_cache_miss_tokens": 20,
             "cache_hit_rate": 80.0,
             "cache_metrics_available": True,
+            "last_prompt_tokens": 321,
         }
 
     class FakeAgent:
@@ -576,7 +577,22 @@ def test_sync_token_usage_maps_cache_stats_without_losing_context() -> None:
     assert sess.token_usage["cacheHitRate"] == 80.0
     assert sess.token_usage["cacheMetricsAvailable"] is True
     assert sess.token_usage["limit"] == 12345
-    assert sess.token_usage["total"] > 0
+    assert sess.token_usage["total"] == 321
+
+
+def test_sync_token_usage_falls_back_to_history_estimate() -> None:
+    class FakeClient:
+        config = type("Config", (), {"context_window": 200000})()
+        history = [{"role": "user", "content": "hello"}]
+        system = ""
+        usage_stats = {"total_input_tokens": 1, "total_output_tokens": 2}
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    sess.agent = type("Runner", (), {"_agent": type("Agent", (), {"client": FakeClient()})()})()
+    manager._sync_token_usage(sess)
+
+    assert sess.token_usage["total"] == 12
 
 
 def test_sync_token_usage_marks_cache_metadata_unavailable() -> None:

@@ -323,16 +323,19 @@ class TestCheckpoint:
                 task_id="t1", user_request="original goal", mode=TaskMode.OPEN,
             )
             agent.client.history = [{"role": "user", "content": "original goal"}]
+            agent.handler.current_turn = 61
             agent.note_pending_messages([{"role": "user", "content": "pending"}])
             data = checkpoint_store.load(agent.save_checkpoint(status="running", restart=True))
+            assert data["turn"] == 61
 
             restored = self._agent(tmp_path)
             try:
                 captured: dict[str, object] = {}
+                loop_kwargs: dict[str, object] = {}
 
                 class FakeLoop:
                     def __init__(self, **kwargs):
-                        pass
+                        loop_kwargs.update(kwargs)
 
                     def run(self, **kwargs):
                         captured.update(kwargs)
@@ -348,6 +351,8 @@ class TestCheckpoint:
                 content = str(captured.get("initial_user_content"))
                 assert content.startswith(CONTINUATION_PROMPT)
                 assert "original goal" in content
+                # 续跑接着检查点的轮次编号，而不是从 Turn 1 重新开始
+                assert loop_kwargs.get("turn_offset") == 61
                 # 终态清理删除 running checkpoint
                 assert not checkpoint_store.checkpoint_path(
                     str(tmp_path / "sessions"), data["session_id"],
@@ -677,6 +682,12 @@ class TestDesktopResume:
         assert sess.status == "running"
         assert calls == [CONTINUATION_PROMPT]
         assert any(message["role"] == "system" for message in sess.messages)
+        # The resumed turn must publish a live partial; without one the UI only
+        # sees the transcript after the turn terminates.
+        assert sess.partial is not None
+        assert sess.partial["role"] == "assistant"
+        assert sess.partial["id"] == sess.msg_seq + 1
+        assert manager.messages(sess.id)["partial"]["id"] == sess.partial["id"]
 
     def test_waiting_question_is_restored_without_running(self, tmp_path: Path) -> None:
         from zero_agent.core.types import PendingTaskState, TaskContract, TaskMode

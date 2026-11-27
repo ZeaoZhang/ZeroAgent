@@ -237,6 +237,7 @@ def _build_config_yaml(
         f"    model: {model}",
         "    context_window: 30000",
         "    context_budget_tokens: null",
+        "    tool_output_max_chars: 4000",
         "    temperature: 1.0",
         "    stream: true",
     ]

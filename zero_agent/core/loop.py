@@ -48,6 +48,7 @@ class AgentLoop:
         max_turns: int = 80,
         verbose: bool = True,
         agent: Optional[ZeroAgent] = None,  # type: ignore[name-defined]  # TYPE_CHECKING
+        turn_offset: int = 0,
     ) -> None:
         """初始化 AgentLoop.
 
@@ -58,6 +59,8 @@ class AgentLoop:
             max_turns: 最大轮次限制.
             verbose: True 时输出详细工具调用信息.
             agent: 可选的 ZeroAgent 引用，用于配置热重载与扩展运行时.
+            turn_offset: 展示用轮次基数；热重启续跑时接续检查点里的轮次编号.
+                ``max_turns`` 预算仍按本次运行的真实轮次计算.
         """
         self.client = client
         self.handler = handler
@@ -66,6 +69,7 @@ class AgentLoop:
         self.verbose = verbose
         self.handler.loop = self
         self._agent = agent
+        self.turn_offset = max(0, int(turn_offset or 0))
         self.system_prompt_factory: Optional[Callable[[], str]] = None
 
     def run(
@@ -127,9 +131,11 @@ class AgentLoop:
         })
 
         try:
+            display_turn = self.turn_offset
             while turn < self.handler.max_turns:
                 turn += 1
-                yield {"turn": turn}
+                display_turn = self.turn_offset + turn
+                yield {"turn": display_turn}
 
                 if self._agent is not None:
                     reload_workflow = getattr(self._agent, "reload_workflow", None)
@@ -145,7 +151,7 @@ class AgentLoop:
                             terminal = TerminalEvent(
                                 status=TerminalStatus.CANCELLED,
                                 reason="hot_restart",
-                                turn=turn,
+                                turn=display_turn,
                             )
                             break
                         if report.get("config") or report.get("tools_changed"):
@@ -160,16 +166,17 @@ class AgentLoop:
                             self.client = self._agent.client
                             self.handler.client = self.client
 
+                self.handler.current_turn = display_turn
                 if self.verbose:
-                    yield f"\n\n**LLM Running (Turn {turn}) ...**\n\n"
+                    yield f"\n\n**LLM Running (Turn {display_turn}) ...**\n\n"
                 else:
-                    yield f"\nTurn {turn} ...\n"
+                    yield f"\nTurn {display_turn} ...\n"
 
                 if turn % 10 == 0:
                     self._clear_tool_cache()
 
                 self._notify("turn_start", {
-                    "turn": turn,
+                    "turn": display_turn,
                     "messages": messages,
                     "tools": self.tools_schema,
                     "model": self._model_name(),
@@ -180,7 +187,7 @@ class AgentLoop:
                     if self.client.system != prompt:
                         self.client.system = prompt
                 self._notify("llm_before", {
-                    "turn": turn,
+                    "turn": display_turn,
                     "messages": messages,
                     "tools": self.tools_schema,
                     "model": self._model_name(),
@@ -366,7 +373,7 @@ class AgentLoop:
                         })
 
                 self._notify("llm_after", {
-                    "turn": turn,
+                    "turn": display_turn,
                     "response": response,
                     "tool_calls": tool_calls,
                     "usage": self._usage_from_response(response),
@@ -394,7 +401,6 @@ class AgentLoop:
                         else:
                             yield f"{tool_name}({self._compact_args(tool_name, args)})\n\n"
 
-                    self.handler.current_turn = turn
                     if tool_name == "no_tool":
                         self.handler.completion_certificate = None
                     gen = self.handler.dispatch(
@@ -411,7 +417,7 @@ class AgentLoop:
                             status=TerminalStatus.PROTOCOL_ERROR,
                             reason="invalid_step_outcome",
                             data=outcome,
-                            turn=turn,
+                            turn=display_turn,
                         )
                         break
 
@@ -424,7 +430,7 @@ class AgentLoop:
                             reason="human_intervention",
                             text=str(getattr(response, "content", "") or ""),
                             data=outcome.data,
-                            turn=turn,
+                            turn=display_turn,
                         )
                         break
 
@@ -434,7 +440,7 @@ class AgentLoop:
                             reason=outcome.reason,
                             text=str(getattr(response, "content", "") or ""),
                             data=outcome.data,
-                            turn=turn,
+                            turn=display_turn,
                         )
                         break
 
@@ -445,7 +451,7 @@ class AgentLoop:
                                 status=TerminalStatus.PROTOCOL_ERROR,
                                 reason="invalid_step_outcome",
                                 data=outcome.data,
-                                turn=turn,
+                                turn=display_turn,
                             )
                         else:
                             turn_terminal = TerminalEvent(
@@ -453,7 +459,7 @@ class AgentLoop:
                                 reason="completion_certificate",
                                 text=certificate.final_text,
                                 data=outcome.data,
-                                turn=turn,
+                                turn=display_turn,
                                 certificate=certificate,
                             )
                         break
@@ -493,7 +499,7 @@ class AgentLoop:
                         "", turn_terminal,
                     )
                     self._notify("turn_end", {
-                        "turn": turn,
+                        "turn": display_turn,
                         "response": response,
                         "tool_calls": tool_calls,
                         "tool_results": tool_results,
@@ -509,13 +515,13 @@ class AgentLoop:
                     terminal = TerminalEvent(
                         status=TerminalStatus.PROTOCOL_ERROR,
                         reason="invalid_step_outcome",
-                        turn=turn,
+                        turn=display_turn,
                     )
                     self.handler.turn_end_callback(
                         response, tool_calls, tool_results, turn, "", terminal,
                     )
                     self._notify("turn_end", {
-                        "turn": turn,
+                        "turn": display_turn,
                         "response": response,
                         "tool_calls": tool_calls,
                         "tool_results": tool_results,
@@ -556,10 +562,10 @@ class AgentLoop:
                         status=TerminalStatus.BUDGET_EXHAUSTED,
                         reason="no_progress",
                         text="Stopped after three consecutive turns without new evidence.",
-                        turn=turn,
+                        turn=display_turn,
                     )
                     self._notify("turn_end", {
-                        "turn": turn,
+                        "turn": display_turn,
                         "response": response,
                         "tool_calls": tool_calls,
                         "tool_results": tool_results,
@@ -578,7 +584,7 @@ class AgentLoop:
                 messages = self._build_next_messages(next_prompt, tool_results)
 
                 self._notify("turn_end", {
-                    "turn": turn,
+                    "turn": display_turn,
                     "response": response,
                     "tool_calls": tool_calls,
                     "tool_results": tool_results,
@@ -593,7 +599,7 @@ class AgentLoop:
                 reason=exc.__class__.__name__,
                 text=str(getattr(response, "content", "") or ""),
                 data={"error": str(exc)},
-                turn=turn,
+                turn=display_turn,
             )
 
         if terminal is None:
@@ -601,7 +607,7 @@ class AgentLoop:
                 status=TerminalStatus.BUDGET_EXHAUSTED,
                 reason="max_turns",
                 text=str(getattr(response, "content", "") or ""),
-                turn=turn,
+                turn=display_turn,
             )
 
         self._notify("agent_end", {

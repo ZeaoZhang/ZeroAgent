@@ -134,6 +134,7 @@ _USAGE_COUNTER_ATTRS = (
     "_total_cached_tokens",
     "_total_requests",
     "_cache_metrics_available",
+    "_last_prompt_tokens",
 )
 
 _RUNTIME_CONFIG_FIELDS = (
@@ -404,6 +405,9 @@ class ZeroAgent:
         self._core_restart_blocked_sig = ""
         self._hot_restart_hook: Optional[Any] = None
         self._resume_handler_state: Optional[dict[str, Any]] = None
+        # Display turn continuation after a hot restart: the resumed run keeps
+        # numbering from the checkpoint instead of restarting at Turn 1.
+        self._resume_turn_offset = 0
         self._checkpoint_pending_messages: list[Any] = []
         self._checkpoint_created_at = 0.0
         self._restart_history: list[float] = []
@@ -735,6 +739,8 @@ class ZeroAgent:
 
         # 创建 AgentLoop
         tools_schema = self.registry.generate_openai_schema()
+        turn_offset = self._resume_turn_offset
+        self._resume_turn_offset = 0
         loop = AgentLoop(
             client=self.client,
             handler=self.handler,
@@ -742,6 +748,7 @@ class ZeroAgent:
             max_turns=(120 if self.handler.task_contract.mode is TaskMode.PLAN else self.config.max_turns),
             verbose=self.config.verbose,
             agent=self,
+            turn_offset=turn_offset,
         )
         self.loop = loop
 
@@ -1142,6 +1149,14 @@ class ZeroAgent:
         ]
         self._restart_checkpoint_armed = False
         self._checkpoint_created_at = float(data.get("created_at") or 0.0)
+        try:
+            saved_turn = max(0, int(data.get("turn") or 0))
+        except (TypeError, ValueError):
+            saved_turn = 0
+        resumes_same_round = (
+            str(data.get("status") or "") == "running" or waiting_kind == "restart"
+        )
+        self._resume_turn_offset = saved_turn if resumes_same_round else 0
         self._restart_prompt = (
             CONTINUATION_PROMPT if waiting_kind == "restart" else None
         )

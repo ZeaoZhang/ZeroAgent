@@ -1128,9 +1128,24 @@ class AgentManager:
                         and waiting_kind == "restart"
                     ):
                         sess.status = "running"
+                        sess.last_error = ""
+                        sess.terminal_status = ""
+                        sess.terminal_reason = ""
                         resume_note = "内核已热重启，任务从检查点继续。"
                         if not self._last_message_is(sess, "system", resume_note):
                             self.add_message(sess, "system", resume_note)
+                        # The resumed turn streams through the same
+                        # /session/{sid}/messages `partial` channel as a normal
+                        # turn. Without it, _drain_turn drops every chunk (it
+                        # only writes into an existing partial) and the UI shows
+                        # nothing until the terminal message lands at the end.
+                        sess.partial = {
+                            "id": sess.msg_seq + 1,
+                            "role": "assistant",
+                            "content": "",
+                            "ts": time.time(),
+                            "partial": True,
+                        }
                         should_resume = True
                     else:
                         sess.status = "waiting"
@@ -2033,13 +2048,22 @@ class AgentManager:
             return
         active = getattr(client, "_active", client)
         stats = getattr(client, "usage_stats", None) or getattr(active, "usage_stats", {}) or {}
-        history = getattr(active, "history", getattr(client, "history", [])) or []
-        system = getattr(active, "system", getattr(client, "system", "")) or ""
         try:
-            history_chars = len(json.dumps(history, ensure_ascii=False, default=str)) + len(str(system))
-            current_context = max(history_chars // 3, 0)
-        except Exception:
-            current_context = 0
+            last_prompt = int(stats.get("last_prompt_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            last_prompt = 0
+        if last_prompt > 0:
+            current_context = last_prompt
+        else:
+            # Fallback for sessions that have not reported usage yet: estimate
+            # from the surviving history without serializing it on every chunk.
+            history = getattr(active, "history", getattr(client, "history", [])) or []
+            system = getattr(active, "system", getattr(client, "system", "")) or ""
+            try:
+                history_chars = len(json.dumps(history, ensure_ascii=False, default=str)) + len(str(system))
+                current_context = max(history_chars // 3, 0)
+            except Exception:
+                current_context = 0
         limit = int(
             getattr(active, "_context_window", 0)
             or getattr(getattr(active, "config", None), "context_window", 0)

@@ -30,6 +30,7 @@ from zero_agent.llm.base import (
     MockResponse,
     extract_usage_metrics,
     normalize_stop_reason,
+    prompt_total_tokens,
     usage_has_cache_metrics,
 )
 from zero_agent.llm.converters import msgs_claude_to_openai
@@ -289,17 +290,21 @@ class LiteLLMSession:
         self.system = ""
         self.name = config.name or config.model
         self._context_window = config.context_window
+        # DeepSeek 模型有更大的上下文窗口；先抬高窗口，预算才能按最终窗口推导。
+        if "deepseek" in config.model.lower():
+            self._context_window = max(self._context_window, 70000)
         configured_budget = getattr(config, "context_budget_tokens", None)
         if configured_budget is not None:
             self._context_budget_tokens = max(1000, int(configured_budget))
         else:
-            # Keep enough recent context for tool-heavy tasks while preventing a
-            # large-window backend from replaying an unbounded transcript.
-            self._context_budget_tokens = min(
-                40000,
-                max(10000, self._context_window // 5),
-            )
+            # Use half the window so trimming starts well before the model limit
+            # while leaving room for the current turn and tool schemas.
+            self._context_budget_tokens = max(10000, int(self._context_window * 0.5))
         self._context_budget_configured = configured_budget is not None
+        self._tool_output_max_chars = max(
+            200,
+            int(getattr(config, "tool_output_max_chars", 4000) or 4000),
+        )
         self._log_dir = log_dir
         self._sessions_dir = sessions_dir
         self._session_log_path = session_log_path
@@ -319,11 +324,8 @@ class LiteLLMSession:
         self._total_cached_tokens: int = 0
         self._total_requests: int = 0
         self._cache_metrics_available: bool = False
-        self._trim_keep_rate = 0.3
-
-        # DeepSeek 模型有更大的上下文窗口
-        if "deepseek" in config.model.lower():
-            self._context_window = max(self._context_window, 70000)
+        self._last_prompt_tokens: int = 0
+        self._trim_keep_rate = 0.5
 
     @property
     def history(self) -> List[Dict[str, Any]]:
@@ -1185,18 +1187,29 @@ class LiteLLMSession:
             # deliberately lower _context_window at runtime.
             cap = self._context_window * 3
         else:
-            cap = self._context_budget_tokens * 4
+            # Measured mixed CJK/ASCII history runs ~3.2 chars per token; use 3
+            # so the character cap never exceeds the configured token budget.
+            cap = self._context_budget_tokens * 3
         target = int(cap * getattr(self, "_trim_keep_rate", 0.6))
 
         def cost() -> int:
             return sum(len(json.dumps(m, ensure_ascii=False)) for m in self.history)
 
-        self._compress_history_tags(self.history, compress_old_tags=False)
+        self._compress_history_tags(
+            self.history,
+            compress_old_tags=False,
+            max_len=self._tool_output_max_chars,
+        )
         print(f"[Debug] Current context: {cost()} chars, {len(self.history)} messages.")
         if cost() <= cap:
             return
 
-        self._compress_history_tags(self.history, keep_recent=4, force=True)
+        self._compress_history_tags(
+            self.history,
+            keep_recent=4,
+            force=True,
+            max_len=self._tool_output_max_chars,
+        )
         if cost() <= target:
             return
 
@@ -1339,7 +1352,7 @@ class LiteLLMSession:
     def _compress_history_tags(
         history: list[dict],
         keep_recent: int = 10,
-        max_len: int = 800,
+        max_len: int = 4000,
         force: bool = False,
         interval: int = 5,
         compress_old_tags: bool = True,
@@ -1814,6 +1827,9 @@ class LiteLLMSession:
             return
 
         metrics = extract_usage_metrics(usage)
+        # Raw Anthropic usage reports uncached input separately; LiteLLM's
+        # normalized Usage already folds cache read/creation into prompt_tokens.
+        self._last_prompt_tokens = prompt_total_tokens(usage, metrics)
         self._total_input_tokens += metrics["input_tokens"]
         self._total_output_tokens += metrics["output_tokens"]
         self._total_cache_read_tokens += metrics["cache_read_tokens"]
@@ -1854,6 +1870,7 @@ class LiteLLMSession:
             "total_cache_miss_tokens": self._total_cache_miss_tokens,
             "cache_hit_rate": self._total_cache_read_tokens / denominator * 100 if denominator else 0.0,
             "cache_metrics_available": self._cache_metrics_available,
+            "last_prompt_tokens": self._last_prompt_tokens,
         }
 
     def _write_llm_log(self, label: str, content: str) -> None:

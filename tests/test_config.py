@@ -47,6 +47,7 @@ llm_backends:
     vision_max_tokens: 512
     vision_detail: high
     vision_max_pixels: 900000
+    tool_output_max_chars: 1234
 """,
         encoding="utf-8",
     )
@@ -65,6 +66,8 @@ llm_backends:
     assert config.llm_backends["backup"].vision_max_tokens == 512
     assert config.llm_backends["backup"].vision_detail == "high"
     assert config.llm_backends["backup"].vision_max_pixels == 900000
+    assert config.llm_backends["backup"].tool_output_max_chars == 1234
+    assert config.llm_backends["primary"].tool_output_max_chars == 4000
 
 
 def test_configure_auto_yaml_loads_without_duplicate_backend_name(tmp_path) -> None:
@@ -88,6 +91,7 @@ def test_configure_auto_yaml_loads_without_duplicate_backend_name(tmp_path) -> N
     assert config.default_backend == "default"
     assert config.llm_backends["default"].name == "default"
     assert config.llm_backends["default"].provider == "openai"
+    assert config.llm_backends["default"].tool_output_max_chars == 4000
 
 
 def test_from_yaml_defaults_sessions_dir_under_workspace(tmp_path) -> None:

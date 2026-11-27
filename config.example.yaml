@@ -120,8 +120,10 @@ llm_backends:
 
     # Generation options.
     context_window: 30000
-    # Local history soft budget; null derives a conservative budget from the window.
+    # Local history soft budget; null derives 50% of context_window.
     context_budget_tokens: null
+    # Max chars kept per tool message / <tool_result> tag before truncation.
+    tool_output_max_chars: 4000
     max_tokens: null
     temperature: 1.0
     stream: true
@@ -168,6 +170,7 @@ llm_backends:
   #   model: gpt-4o
   #   context_window: 128000
   #   context_budget_tokens: null
+  #   tool_output_max_chars: 4000
   #   max_tokens: null
   #   temperature: 1.0
   #   stream: true

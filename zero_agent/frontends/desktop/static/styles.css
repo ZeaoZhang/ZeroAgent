@@ -583,7 +583,9 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
 /* ─── Messages ─────────────────────────────────────────────────────────── */
 #messages {
   flex: 1;
+  min-width: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 24px 20px 8px;
 }
 
@@ -836,6 +838,7 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
 .md {
   line-height: 1.72;
   letter-spacing: 0;
+  overflow-wrap: break-word;
 }
 .md p { margin: 0 0 10px; }
 .md p:last-child { margin-bottom: 0; }
@@ -875,8 +878,17 @@ button, input, textarea, select, .icon-btn, .btn, .send-btn {
 }
 .md a { color: var(--text); text-decoration: underline; }
 .md hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
+.md .md-table-wrap {
+  max-width: 100%;
+  margin: 8px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+}
 .md table { border-collapse: collapse; margin: 8px 0; }
-.md th, .md td { border: 1px solid var(--border); padding: 4px 8px; font-size: 12.5px; }
+.md .md-table-wrap > table { margin: 0; }
+.md th, .md td { border: 1px solid var(--border); padding: 4px 8px; font-size: 12.5px; overflow-wrap: break-word; min-width: 72px; }
+.md img { max-width: 100%; height: auto; }
 .md .katex-display { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
 
 /* Streaming cursor */

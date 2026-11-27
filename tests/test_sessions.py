@@ -384,6 +384,7 @@ def test_compress_history_tags_replaces_old_tags() -> None:
         messages,
         keep_recent=1,
         force=True,
+        max_len=800,
     )
 
     assert "<history>[...]</history>" in compressed[0]["content"]
@@ -397,7 +398,7 @@ def test_trim_history_preserves_old_prefix_until_budget_requires_compaction() ->
     session.history = [
         {"role": "user", "content": old_context},
         {"role": "assistant", "content": "previous answer"},
-        {"role": "tool", "tool_call_id": "call_1", "content": "y" * 2000},
+        {"role": "tool", "tool_call_id": "call_1", "content": "y" * 5000},
         {"role": "user", "content": "next question"},
     ]
 
@@ -410,7 +411,8 @@ def test_trim_history_preserves_old_prefix_until_budget_requires_compaction() ->
         assert session.history[0]["content"] == old_context
 
     assert first_prefix == old_context
-    assert len(bounded_tool) <= 800
+    assert len(bounded_tool) <= 4000
+    assert "...[Truncated]..." in bounded_tool
     assert session.history[2]["content"] == bounded_tool
 
 
@@ -834,7 +836,7 @@ def test_chat_writes_session_response_log(monkeypatch, tmp_path) -> None:
 def test_non_deepseek_session_uses_standard_history_trim_policy() -> None:
     session = _make_session()
 
-    assert session._trim_keep_rate == 0.3
+    assert session._trim_keep_rate == 0.5
 
 
 def test_large_context_backend_gets_bounded_history_budget() -> None:
@@ -847,8 +849,68 @@ def test_large_context_backend_gets_bounded_history_budget() -> None:
         context_window=200000,
     ))
 
-    assert session._context_budget_tokens == 40000
-    assert session._context_budget_tokens * 4 == 160000
+    assert session._context_budget_tokens == 100000
+    assert session._context_budget_tokens * 3 == 300000
+
+
+def test_deepseek_window_floor_applies_before_budget_derivation() -> None:
+    session = LiteLLMSession(LLMBackendConfig(
+        name="deepseek",
+        provider="openai",
+        api_key="sk-test",
+        api_base="https://api.deepseek.com/v1",
+        model="deepseek-flash",
+        context_window=30000,
+    ))
+
+    assert session._context_window == 70000
+    assert session._context_budget_tokens == 35000
+
+
+def test_explicit_context_budget_overrides_window_derivation() -> None:
+    session = LiteLLMSession(LLMBackendConfig(
+        name="bounded",
+        provider="openai",
+        api_key="sk-test",
+        api_base="https://api.openai.com/v1",
+        model="gpt-test",
+        context_window=200000,
+        context_budget_tokens=12345,
+    ))
+
+    assert session._context_budget_tokens == 12345
+
+
+def test_tool_output_max_chars_is_configurable() -> None:
+    session = LiteLLMSession(LLMBackendConfig(
+        name="short-tools",
+        provider="openai",
+        api_key="sk-test",
+        api_base="https://api.openai.com/v1",
+        model="gpt-test",
+        tool_output_max_chars=1000,
+    ))
+    session.history = [
+        {"role": "tool", "tool_call_id": "call_1", "content": "y" * 3000},
+    ]
+
+    session._trim_history()
+
+    assert len(session.history[0]["content"]) <= 1000
+    assert "...[Truncated]..." in session.history[0]["content"]
+
+
+def test_trim_history_triggers_at_budget_times_three_chars() -> None:
+    session = _make_session()  # window 30000 -> budget 15000 -> cap 45000 chars
+    session.history = [
+        {"role": "user" if index % 2 == 0 else "assistant", "content": "x" * 4000}
+        for index in range(12)
+    ]
+
+    session._trim_history()
+
+    # ~48400 chars: above budget*3 (45000), below the old budget*4 (60000).
+    assert len(session.history) < 12
 
 
 def test_new_task_compacts_legacy_completion_and_orphan_tool_call() -> None:
@@ -942,6 +1004,44 @@ def test_fractional_cache_metrics_remain_unavailable() -> None:
 
     assert not usage_has_cache_metrics(usage)
     assert extract_usage_metrics(usage)["cache_read_tokens"] == 0
+
+
+def test_record_usage_tracks_full_last_prompt_tokens() -> None:
+    session = _make_session()
+    session._record_usage({
+        "prompt_tokens": 100,
+        "completion_tokens": 5,
+        "prompt_tokens_details": {"cached_tokens": 80},
+    })
+    assert session.usage_stats["last_prompt_tokens"] == 100
+
+    session._record_usage({"input_tokens": 20, "cache_read_input_tokens": 80})
+    assert session.usage_stats["last_prompt_tokens"] == 100
+
+    session._record_usage(SimpleNamespace(
+        prompt_tokens=5100,
+        completion_tokens=10,
+        cache_read_input_tokens=80,
+        cache_creation_input_tokens=5000,
+    ))
+    assert session.usage_stats["last_prompt_tokens"] == 5100
+
+    session._record_usage(None, streamed_text="hello")
+    assert session.usage_stats["last_prompt_tokens"] == 5100
+
+
+def test_usage_counter_migration_preserves_last_prompt_tokens() -> None:
+    from zero_agent.core.agent import _copy_usage_counters, _zero_usage_counters
+
+    old = _make_session()
+    new = _make_session()
+    old._last_prompt_tokens = 4321
+
+    _copy_usage_counters(old, new)
+    assert new._last_prompt_tokens == 4321
+
+    _zero_usage_counters(new)
+    assert new._last_prompt_tokens == 0
 
 
 def test_close_response_log_serializes_with_late_write(tmp_path) -> None:

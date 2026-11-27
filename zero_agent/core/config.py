@@ -148,7 +148,8 @@ class LLMBackendConfig:
         api_base: API 基础 URL.
         model: 模型 ID.
         context_window: 上下文窗口大小.
-        context_budget_tokens: 本地历史裁剪的软 token 预算，未设置时按窗口推导.
+        context_budget_tokens: 本地历史裁剪的软 token 预算，未设置时按窗口 50% 推导.
+        tool_output_max_chars: 单条 tool 输出与 `<tool_result>` 标签保留的最大字符数.
         max_tokens: 单次响应最大 token 数.
         temperature: 采样温度 0-2.
         reasoning_effort: 推理力度 (none/minimal/low/medium/high/xhigh).
@@ -175,6 +176,7 @@ class LLMBackendConfig:
     model: str = ""
     context_window: int = 30000
     context_budget_tokens: Optional[int] = None
+    tool_output_max_chars: int = 4000
     max_tokens: Optional[int] = None
     temperature: float = 1.0
     reasoning_effort: Optional[str] = None

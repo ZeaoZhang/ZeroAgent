@@ -483,6 +483,31 @@ class TestAgentLoop:
         assert has_turn_dict
         assert has_status_str
 
+    def test_turn_offset_continues_numbering_after_resume(
+        self,
+        mock_handler: BaseHandler,
+    ) -> None:
+        """热重启续跑接着检查点编号，输出 Turn 62 而不是 Turn 1."""
+        _set_open_contract(mock_handler)
+        client = _make_mock_client([
+            _complete_response("Done.", []),
+        ])
+        loop = AgentLoop(
+            client=client,
+            handler=mock_handler,
+            tools_schema=[],
+            max_turns=5,
+            verbose=True,
+            turn_offset=61,
+        )
+
+        chunks = list(loop.run("sp", "task"))
+        markers = [c for c in chunks if isinstance(c, str) and "LLM Running (Turn" in c]
+        assert "**LLM Running (Turn 62) ...**" in markers[0]
+        turn_dicts = [c["turn"] for c in chunks if isinstance(c, dict) and "turn" in c]
+        assert turn_dicts[0] == 62
+        assert mock_handler.current_turn == 62
+
     def test_yield_structure_non_verbose(self, mock_handler: BaseHandler) -> None:
         """非 verbose 模式下 yield 的结构."""
         _set_open_contract(mock_handler)

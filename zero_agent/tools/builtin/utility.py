@@ -19,6 +19,7 @@ import json
 import os
 import re
 import socket
+import sys
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
@@ -28,6 +29,7 @@ import requests
 from zero_agent.core.config import AgentConfig
 from zero_agent.tools.registry import ToolRegistry
 from zero_agent.tools.builtin.file import resolve_file_path
+from zero_agent.utils.doc_extract import extract_pdf_quartz, parse_page_spec
 from zero_agent.utils.text import format_error
 
 _SKIP_DIRS = {
@@ -156,55 +158,41 @@ def _html_text(raw: str) -> str:
     return parser.text()
 
 
-def _page_indices(spec: Any, total: int) -> List[int]:
-    if total <= 0:
-        return []
-    if spec in (None, ""):
-        return list(range(min(total, 20)))
-    indices: List[int] = []
-    for part in str(spec).replace(" ", "").split(","):
-        if not part:
-            continue
-        if "-" in part:
-            start, end = part.split("-", 1)
-            try:
-                lo, hi = int(start), int(end)
-            except ValueError:
-                continue
-            indices.extend(range(max(1, lo) - 1, min(total, hi)))
-        else:
-            try:
-                index = int(part)
-            except ValueError:
-                continue
-            if 1 <= index <= total:
-                indices.append(index - 1)
-    return list(dict.fromkeys(indices))
-
-
 def _extract_pdf(path: str, pages: Any) -> tuple[str, dict]:
+    # 优先 pypdf（跨平台），不可用时回退 macOS 原生 Quartz（零依赖）
     try:
         from pypdf import PdfReader  # type: ignore
-    except ImportError as exc:
-        raise RuntimeError(
-            "PDF support requires pypdf; install zero-agent[docs]",
-        ) from exc
-    reader = PdfReader(path)
-    selected = _page_indices(pages, len(reader.pages))
-    parts = []
-    for index in selected:
-        text = reader.pages[index].extract_text() or ""
-        parts.append(f"--- page {index + 1} ---\n{text}")
-    return "\n\n".join(parts), {"pages": [i + 1 for i in selected], "total_pages": len(reader.pages)}
+    except ImportError:
+        PdfReader = None  # type: ignore
+
+    if PdfReader is not None:
+        reader = PdfReader(path)
+        selected = parse_page_spec(pages, len(reader.pages))
+        parts = []
+        for index in selected:
+            text = reader.pages[index].extract_text() or ""
+            parts.append(f"--- page {index + 1} ---\n{text}")
+        return "\n\n".join(parts), {
+            "pages": [i + 1 for i in selected],
+            "total_pages": len(reader.pages),
+            "backend": "pypdf",
+        }
+
+    if sys.platform == "darwin":
+        return extract_pdf_quartz(path, pages)
+
+    raise RuntimeError(
+        "PDF support requires pypdf; install zero-agent[docs]",
+    )
 
 
 def _extract_docx(path: str) -> tuple[str, dict]:
     try:
         from docx import Document  # type: ignore
-    except ImportError as exc:
-        raise RuntimeError(
-            "DOCX support requires python-docx; install zero-agent[docs]",
-        ) from exc
+    except ImportError:
+        from zero_agent.utils.doc_extract import extract_docx as _fallback_docx
+
+        return _fallback_docx(path)
     document = Document(path)
     parts = [p.text for p in document.paragraphs if p.text.strip()]
     for table in document.tables:
@@ -216,10 +204,10 @@ def _extract_docx(path: str) -> tuple[str, dict]:
 def _extract_xlsx(path: str, max_rows: int = 2000) -> tuple[str, dict]:
     try:
         import openpyxl  # type: ignore
-    except ImportError as exc:
-        raise RuntimeError(
-            "XLSX support requires openpyxl; install zero-agent[docs]",
-        ) from exc
+    except ImportError:
+        from zero_agent.utils.doc_extract import extract_xlsx as _fallback_xlsx
+
+        return _fallback_xlsx(path, max_rows)
     workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
     parts = []
     rows_seen = 0
@@ -239,10 +227,10 @@ def _extract_xlsx(path: str, max_rows: int = 2000) -> tuple[str, dict]:
 def _extract_pptx(path: str) -> tuple[str, dict]:
     try:
         from pptx import Presentation  # type: ignore
-    except ImportError as exc:
-        raise RuntimeError(
-            "PPTX support requires python-pptx; install zero-agent[docs]",
-        ) from exc
+    except ImportError:
+        from zero_agent.utils.doc_extract import extract_pptx as _fallback_pptx
+
+        return _fallback_pptx(path)
     presentation = Presentation(path)
     parts = []
     for index, slide in enumerate(presentation.slides, 1):

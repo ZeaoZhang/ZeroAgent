@@ -448,7 +448,21 @@ function sanitizeMarkdown(html) {
     }
   }
   for (const el of removals) el.remove();
+  wrapMarkdownTables(template.content);
   return template.innerHTML;
+}
+
+// A wide GFM table must scroll inside its own box, never widen the message
+// list (which would give the whole transcript a horizontal scrollbar).
+function wrapMarkdownTables(root) {
+  for (const table of Array.from(root.querySelectorAll('table'))) {
+    const parent = table.parentElement;
+    if (parent && parent.classList.contains('md-table-wrap')) continue;
+    const wrap = document.createElement('div');
+    wrap.className = 'md-table-wrap';
+    parent ? parent.insertBefore(wrap, table) : root.appendChild(wrap);
+    wrap.appendChild(table);
+  }
 }
 
 
@@ -947,11 +961,25 @@ function turnHeaderLabel(index, label) {
   return `Turn ${index} : ${label || 'response'}`;
 }
 
+// The runner numbers its own turns ("LLM Running (Turn 41) ...", "TURN 41:").
+// Those numbers survive a checkpoint resume inside the model transcript, so when
+// a segment carries one, it wins over the local fold counter.
+function explicitTurnIndex(text) {
+  const raw = String(text || '');
+  const match = raw.match(/LLM Running \(Turn\s+(\d+)\)/i)
+    || raw.match(/^\s*TURN\s+(\d+)\s*:/im);
+  if (!match) return 0;
+  const value = Number(match[1] || match[2] || 0);
+  return value > 0 ? value : 0;
+}
+
 function groupIntoTurns(segments, options = {}) {
-  let foldIndex = 0;
+  let foldIndex = Number(options.startIndex || 0) || 0;
   return (segments || []).map((seg) => {
     if (!shouldFoldSegment(seg.kind, seg.text)) return { type: 'plain', segment: seg };
-    const index = ++foldIndex;
+    const explicit = explicitTurnIndex(seg.text);
+    foldIndex = Math.max(foldIndex + 1, explicit);
+    const index = foldIndex;
     return {
       type: 'turn',
       index,
@@ -959,6 +987,26 @@ function groupIntoTurns(segments, options = {}) {
       segment: seg
     };
   });
+}
+
+// Turn numbers run per user round, not per assistant bubble. A hot restart
+// splits one round across several bubbles (partial flushed, then continuation),
+// so a bubble must start counting where the previous one stopped instead of
+// restarting at Turn 1.
+function assistantTurnStartIndex(sess, msg = null) {
+  if (!sess || !Array.isArray(sess.messages)) return 0;
+  let limit = sess.messages.length;
+  if (msg) {
+    const index = sess.messages.indexOf(msg);
+    if (index >= 0) limit = index;
+  }
+  let start = 0;
+  for (let i = limit - 1; i >= 0; i--) {
+    const prev = sess.messages[i];
+    if (!prev || prev.role === 'user') break;
+    if (prev.role === 'assistant') start = Math.max(start, Number(prev._turnIndex || 0));
+  }
+  return start;
 }
 
 function extractTagBody(text, tag) {
@@ -1100,7 +1148,9 @@ function renderStructuredMarkdownInto(container, text, options = {}) {
     )
     : text;
   const segments = splitStructuredSegments(visibleText);
+  const startIndex = Number(options.startIndex || 0) || 0;
   container.innerHTML = '';
+  container.dataset.turnIndex = String(startIndex);
   if (segments.length === 1 && !shouldFoldSegment(segments[0].kind, segments[0].text)) {
     const remaining = extractAndRenderSummary(container, visibleText);
     const visible = stripVisibleToolProtocol(remaining);
@@ -1108,7 +1158,8 @@ function renderStructuredMarkdownInto(container, text, options = {}) {
     if (canLinkFiles) appendOutputFileLinks(container, fileRefs);
     return;
   }
-  for (const item of groupIntoTurns(segments, options)) {
+  let lastIndex = startIndex;
+  for (const item of groupIntoTurns(segments, { ...options, startIndex })) {
     if (item.type === 'plain') {
       const plain = document.createElement('div');
       plain.className = 'md';
@@ -1118,8 +1169,10 @@ function renderStructuredMarkdownInto(container, text, options = {}) {
       container.appendChild(plain);
       continue;
     }
+    lastIndex = Math.max(lastIndex, Number(item.index || 0));
     renderTurnTreeInto(container, item);
   }
+  container.dataset.turnIndex = String(lastIndex);
   if (canLinkFiles) appendOutputFileLinks(container, fileRefs);
 }
 
@@ -2042,14 +2095,17 @@ function renderMessage(msg, append = true) {
     // Final full message (when reloading from state)
     const wrap = document.createElement('div');
     wrap.className = 'msg msg-assistant';
+    const turnStart = assistantTurnStartIndex(state.sessions.get(state.activeId), msg);
+    wrap.dataset.turnIndex = String(turnStart);
     if (msg.content) {
       const body = document.createElement('div');
       body.className = 'assistant-response md';
       ensureAssistantTaskElapsed(wrap, msg.taskStartedAt, msg.taskEndedAt);
       const cleanContent = (msg.content || '').replace(/\n*`{5}\n*\[Info\] Final response to user\.\n*`{5}\s*$/, '');
-      renderStructuredMarkdownInto(body, cleanContent);
+      renderStructuredMarkdownInto(body, cleanContent, { startIndex: turnStart });
       injectCopyButtons(body);
       wrap.appendChild(body);
+      wrap.dataset.turnIndex = body.dataset.turnIndex || String(turnStart);
     }
     if (msg.segments) {
       ensureAssistantTaskElapsed(wrap, msg.taskStartedAt, msg.taskEndedAt);
@@ -2063,6 +2119,7 @@ function renderMessage(msg, append = true) {
       ensureAssistantTaskElapsed(wrap, msg.taskStartedAt, msg.taskEndedAt);
       wrap.appendChild(body);
     }
+    msg._turnIndex = Number(wrap.dataset.turnIndex || turnStart);
     injectCopyButtons(wrap);
     messagesEl.appendChild(wrap);
   }
@@ -2270,6 +2327,8 @@ function renderAssistantDraft(sess, draft) {
   prepareMessagesForContent();
   const wrap = document.createElement('div');
   wrap.className = 'msg msg-assistant';
+  const turnStart = assistantTurnStartIndex(sess);
+  wrap.dataset.turnIndex = String(turnStart);
   if (draft.taskStartedAt) {
     wrap.dataset.taskStartedAt = String(draft.taskStartedAt);
     ensureAssistantTaskElapsed(wrap, draft.taskStartedAt, draft.taskEndedAt);
@@ -2278,7 +2337,7 @@ function renderAssistantDraft(sess, draft) {
     wrap.dataset.buf = draft.text;
     const body = document.createElement('div');
     body.className = 'assistant-response md';
-    renderStructuredMarkdownInto(body, draft.text);
+    renderStructuredMarkdownInto(body, draft.text, { startIndex: turnStart });
     injectCopyButtons(body);
     if (!draft.finalized) body.insertAdjacentHTML('beforeend', '<span class="cursor"></span>');
     wrap.appendChild(body);
@@ -2296,6 +2355,7 @@ function renderAssistantDraftInPlace(sess, draft) {
   prepareMessagesForContent();
   const runtime = getSessionRuntime(sess);
   const wrap = getLiveAssistantWrap(sess);
+  const turnStart = assistantTurnStartIndex(sess);
   if (draft.taskStartedAt || runtime.taskStartedAt) {
     const startedAt = draft.taskStartedAt || runtime.taskStartedAt;
     wrap.dataset.taskStartedAt = String(startedAt);
@@ -2311,7 +2371,7 @@ function renderAssistantDraftInPlace(sess, draft) {
     if (firstTurn) wrap.insertBefore(body, firstTurn);
     else wrap.appendChild(body);
   }
-  renderStructuredMarkdownInto(body, draft.text || '');
+  renderStructuredMarkdownInto(body, draft.text || '', { startIndex: turnStart });
   injectCopyButtons(body);
   body.insertAdjacentHTML('beforeend', '<span class="cursor"></span>');
   if (isNearBottom()) scrollToBottom(false);
@@ -2336,7 +2396,7 @@ function appendAssistantChunk(sess, text) {
   }
   wrap.dataset.buf = draft.text;
   ensureAssistantTaskElapsed(wrap, draft.taskStartedAt || runtime.taskStartedAt);
-  renderStructuredMarkdownInto(body, draft.text);
+  renderStructuredMarkdownInto(body, draft.text, { startIndex: assistantTurnStartIndex(sess) });
   body.insertAdjacentHTML('beforeend', '<span class="cursor"></span>');
   if (isNearBottom()) scrollToBottom(false);
 }

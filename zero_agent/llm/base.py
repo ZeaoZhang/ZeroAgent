@@ -372,3 +372,18 @@ def extract_usage_metrics(usage: Any) -> dict[str, int]:
     else:
         result["cache_miss_tokens"] = _usage_int(miss_value)
     return result
+
+
+def prompt_total_tokens(usage: Any, metrics: dict[str, int]) -> int:
+    """Return the full prompt token count for a request.
+
+    Raw Anthropic payloads report ``input_tokens`` as the uncached portion,
+    while LiteLLM's normalized ``Usage`` already folds cache read/creation
+    into ``prompt_tokens``. Add the cache buckets only for the exclusive
+    shape so the cache-creation prefix is never counted twice.
+    """
+    _, input_path = _first_usage_value_with_path(usage, _INPUT_USAGE_ALIASES)
+    total = metrics["input_tokens"]
+    if input_path == ("input_tokens",):
+        total += metrics["cache_read_tokens"] + metrics["cache_creation_tokens"]
+    return total

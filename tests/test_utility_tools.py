@@ -60,6 +60,91 @@ def test_read_doc_text_csv_and_html(tmp_path: Path) -> None:
     assert "ignore" not in html_result["content"]
 
 
+def _write_zip(path: Path, members: dict[str, str]) -> None:
+    import zipfile
+
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+
+
+def test_parse_page_spec_open_ended_range() -> None:
+    from zero_agent.utils.doc_extract import parse_page_spec
+
+    assert parse_page_spec("1-", 5) == [0, 1, 2, 3, 4]
+
+
+def test_read_doc_docx_fallback_without_python_docx(tmp_path: Path, monkeypatch) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "docx", None)
+    path = tmp_path / "a.docx"
+    _write_zip(path, {
+        "word/document.xml": (
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            "<w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p></w:body></w:document>"
+        ),
+    })
+
+    text, meta = utility._extract_docx(str(path))
+
+    assert "Hello" in text
+    assert meta["backend"] == "zipfile"
+
+
+def test_read_doc_xlsx_fallback_pads_sparse_columns(tmp_path: Path, monkeypatch) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "openpyxl", None)
+    path = tmp_path / "a.xlsx"
+    _write_zip(path, {
+        "xl/worksheets/sheet1.xml": (
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetData><row r="1">'
+            '<c r="A1" t="inlineStr"><is><t>left</t></is></c>'
+            '<c r="C1" t="inlineStr"><is><t>right</t></is></c>'
+            "</row></sheetData></worksheet>"
+        ),
+    })
+
+    text, meta = utility._extract_xlsx(str(path))
+
+    assert text.splitlines()[0] == "left\t\tright"
+    assert meta["backend"] == "zipfile"
+
+
+def test_read_doc_pptx_fallback_without_python_pptx(tmp_path: Path, monkeypatch) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pptx", None)
+    path = tmp_path / "a.pptx"
+    _write_zip(path, {
+        "ppt/slides/slide1.xml": (
+            '<sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+            "<a:t>Slide text</a:t></sld>"
+        ),
+    })
+
+    text, meta = utility._extract_pptx(str(path))
+
+    assert "Slide text" in text
+    assert meta["backend"] == "zipfile"
+
+
+def test_extract_pdf_without_backend_raises_actionable_error(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pypdf", None)
+    monkeypatch.setitem(sys.modules, "Quartz", None)
+    path = tmp_path / "a.pdf"
+    path.write_bytes(b"%PDF-1.4")
+
+    with pytest.raises(RuntimeError, match="pypdf|Quartz"):
+        utility._extract_pdf(str(path), None)
+
+
 def test_fetch_returns_json_and_blocks_private_by_default(
     tmp_path: Path, monkeypatch,
 ) -> None:
