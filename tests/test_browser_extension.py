@@ -76,6 +76,7 @@ def test_on_registers_browser_tools_with_owner(tmp_path: Path, monkeypatch) -> N
         "file_write",
         "find",
         "read_doc",
+        "session_history",
         "fetch",
         "web_search",
         "update_working_checkpoint",

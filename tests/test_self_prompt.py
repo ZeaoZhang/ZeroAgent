@@ -95,3 +95,17 @@ def test_system_prompt_contains_the_block(tmp_path: Path) -> None:
         assert "os.execv" in prompt
     finally:
         agent.close()
+
+
+def test_block_routes_session_history_to_sqlite_tool(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    text = self_prompt.build(config, "zh")
+
+    from zero_agent.utils.files import display_path, project_root
+
+    sessions_db = display_path(
+        str(tmp_path / "sessions" / "sessions.sqlite3"), project_root(),
+    )
+    assert sessions_db in text
+    assert "session_history" in text

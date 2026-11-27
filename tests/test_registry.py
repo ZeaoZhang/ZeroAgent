@@ -175,6 +175,7 @@ class TestToolRegistry:
             "file_write",
             "find",
             "read_doc",
+            "session_history",
             "fetch",
             "web_search",
             "update_working_checkpoint",

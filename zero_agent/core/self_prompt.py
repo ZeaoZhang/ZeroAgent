@@ -64,6 +64,8 @@ def build(config: Any, lang: str = "zh") -> str:
     memory = _resolve(getattr(config, "memory_dir", "")) or "./memory"
     sops = display_path(os.path.join(memory, "sops"), project)
     core_root = display_path(str(Path(hot_restart.__file__).resolve().parents[1]), project)
+    sessions_dir = _resolve(getattr(config, "sessions_dir", "")) or "./workspace/sessions"
+    sessions_db = display_path(os.path.join(sessions_dir, "sessions.sqlite3"), project)
     sandbox = str(getattr(config, "sandbox_mode", "auto") or "auto")
     mode = str(getattr(config, "permission_mode", "full") or "full")
     enabled = bool(getattr(config, "extensions_enabled", True))
@@ -93,6 +95,9 @@ def build(config: Any, lang: str = "zh") -> str:
             "tools/gates/prompt blocks (reload on file change; a failing setup is skipped until "
             "the file changes or /update workflow).\n"
             f"- MCP: {mcp_json} (reconnects next turn).\n"
+            f"- Session history: {sessions_db} is SQLite (tables sessions/messages; "
+            "messages.content holds the full transcript). Query it with the "
+            "session_history tool (list/read/search) instead of exporting txt or guessing paths.\n"
             f"- Core code: {core_root}/**/*.py — compile + import checked, then a checkpoint and "
             "os.execv hot restart resumes the task (max 5 restarts per 10 min). Run tests before "
             "restarting.\n"
@@ -116,6 +121,8 @@ def build(config: Any, lang: str = "zh") -> str:
         f"- 插件：{plugins}/<name>.py 或 <name>/__init__.py 里的 setup(ctx)，用于注册工具/门控/"
         "提示词块（文件变化才重载；setup 报错只跳过该插件，直到文件改动或 /update workflow）。\n"
         f"- MCP：{mcp_json}（下一轮重连）。\n"
+        f"- 会话历史：{sessions_db} 是 SQLite（sessions/messages 表，messages.content 存完整转录）；"
+        "用 session_history 工具直接查询（list/read/search），不要导出 txt 再读，也不要猜路径。\n"
         f"- 核心代码：{core_root}/**/*.py —— 先做语法 + 子进程 import 校验，再写检查点并 "
         "os.execv 热重启续跑（同一任务 10 分钟最多 5 次）。改完先跑测试再重启。\n"
         f"- 权限：{mode}；{_mode_note_zh(config)}。\n"
