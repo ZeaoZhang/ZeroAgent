@@ -1865,14 +1865,17 @@ def test_run_agent_turn_protocol_error_is_error_with_reason() -> None:
     assert sess.terminal_status == "protocol_error"
 
 
-def test_run_agent_turn_cancelled_clears_partial_without_assistant_completion() -> None:
-    sess = _run_terminal("cancelled", "user_cancelled", "partial")
+def test_run_agent_turn_cancelled_keeps_streamed_output() -> None:
+    """热重启/取消中止回合时，用户已看到的流式输出必须留在转录里."""
+    sess = _run_terminal("cancelled", "hot_restart", "partial answer")
 
     assert sess.status == "cancelled"
     assert sess.partial is None
     assert sess.terminal_status == "cancelled"
-    assert sess.terminal_reason == "user_cancelled"
-    assert all(message["role"] != "assistant" for message in sess.messages)
+    assert sess.terminal_reason == "hot_restart"
+    kept = [m for m in sess.messages if m["role"] == "assistant"]
+    assert len(kept) == 1
+    assert kept[0]["content"] == "partial"
 
 
 def test_emit_session_state_includes_terminal_details(monkeypatch) -> None:
@@ -2754,7 +2757,31 @@ def test_channel_status_requires_an_allow_list_for_every_channel(monkeypatch, tm
 
 
 @pytest.mark.asyncio
-async def test_memory_profile_endpoints_round_trip():
+async def test_memory_profile_endpoints_round_trip(monkeypatch, tmp_path):
+    # Keep the run hermetic: the agent's memory dir may be read-only sandboxed.
+    # Setting ZA_MEMORY_DIR is not enough here, because the project-level
+    # config.yaml takes precedence over the environment. Patch the bridge's
+    # config loader instead so the endpoint writes into tmp_path.
+    import dataclasses
+
+    base_config = dataclasses.replace(
+        desktop_bridge.load_default_config(),
+        memory_dir=str(tmp_path / "memory"),
+    )
+    # This module builds its AgentManager singleton at import time, so patching
+    # the class (or `_load_base_config`) has no effect on the instance the
+    # request handlers already hold. Rebind the live instance's runtime dirs
+    # instead, which is what `_profile_memory_manager()` actually reads.
+    monkeypatch.setattr(
+        desktop_bridge.manager,
+        "memory_dir",
+        base_config.memory_dir,
+    )
+    monkeypatch.setattr(
+        desktop_bridge.manager,
+        "workspace_dir",
+        str(tmp_path / "workspace"),
+    )
     client = await _open_test_client()
     try:
         response = await client.get(
@@ -2915,3 +2942,59 @@ def test_frontend_shows_server_error_instead_of_model_outage() -> None:
     block = app_js[start:start + 900]
     assert "error?.data?.error" in block
     assert "服务端错误（HTTP ${status}）" in block
+
+
+def test_restart_without_checkpoint_reports_interrupted_turn() -> None:
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "do the thing")
+    manager._mark_turn_active(sess, True)
+
+    restarted = desktop_bridge.AgentManager()
+
+    kinds = [m.get("kind") for m in restarted.sessions[sess.id].messages]
+    assert "turn_interrupted" in kinds
+
+
+def test_restart_with_resumable_checkpoint_skips_resend_notice() -> None:
+    from zero_agent.core import checkpoint as checkpoint_store
+
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "do the thing")
+    manager._mark_turn_active(sess, True)
+    checkpoint_store.save(
+        manager.sessions_dir,
+        sess.id,
+        {
+            "version": checkpoint_store.CHECKPOINT_VERSION,
+            "session_id": sess.id,
+            "source": "desktop",
+            "status": "running",
+        },
+    )
+
+    restarted = desktop_bridge.AgentManager()
+
+    kinds = [m.get("kind") for m in restarted.sessions[sess.id].messages]
+    assert "turn_interrupted" not in kinds
+
+
+def test_hot_restart_flushes_in_flight_partial_before_exec() -> None:
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session()
+    manager.add_message(sess, "user", "hello")
+    sess.partial = {
+        "id": sess.msg_seq + 1,
+        "role": "assistant",
+        "content": "streamed so far",
+        "partial": True,
+    }
+
+    manager._flush_partial_assistant(sess)
+
+    assert sess.partial is None
+    assert sess.messages[-1]["role"] == "assistant"
+    assert sess.messages[-1]["content"] == "streamed so far"
+    stored = manager.session_store.load_state()["sessions"][sess.id]["messages"]
+    assert stored[-1]["content"] == "streamed so far"

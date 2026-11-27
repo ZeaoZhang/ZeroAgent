@@ -645,6 +645,30 @@ class AgentManager:
             if raise_on_error:
                 raise
 
+    def _flush_partial_assistant(self, sess: Session) -> None:
+        """Persist the streamed text of an in-flight turn, best effort.
+
+        Hot restart aborts the runner and execs a new process shortly after, so
+        the cancelled terminal usually never reaches ``_drain_turn``; without
+        this flush the text the user was reading disappears from the UI.
+        """
+        partial_text = str((sess.partial or {}).get("content") or "")
+        sess.partial = None
+        if partial_text.strip():
+            with contextlib.suppress(Exception):
+                self.add_message(sess, "assistant", partial_text)
+
+    @staticmethod
+    def _last_message_is(sess: Session, role: str, content: str) -> bool:
+        """Return whether the newest message already is this system notice."""
+        if not sess.messages:
+            return False
+        last = sess.messages[-1]
+        return (
+            str(last.get("role") or "") == role
+            and str(last.get("content") or "") == content
+        )
+
     def _mark_turn_active(self, sess: Session, active: bool) -> None:
         """Track whether a turn is in flight, so restarts do not lie."""
         key = f"{_ACTIVE_TURN_KEY_PREFIX}{sess.id}"
@@ -752,11 +776,27 @@ class AgentManager:
                     sess.terminal_reason = "bridge_restart"
                     if sess.plan_status in {"planning", "executing"}:
                         sess.plan_status = "failed"
-                    self.add_message(
-                        sess, "system",
-                        "上次任务在服务重启时中断，请重新发送。",
-                        kind="turn_interrupted",
-                    )
+                    # When a checkpoint survives, resume_restarted_sessions will
+                    # continue the task; the "please resend" note would then
+                    # contradict the resume note right below it.
+                    resumable = False
+                    try:
+                        cp = checkpoint_store.load(
+                            checkpoint_store.checkpoint_path(self.sessions_dir, sess.id)
+                        )
+                        resumable = (
+                            bool(cp)
+                            and cp.get("source") == "desktop"
+                            and cp.get("status") in {"running", "waiting"}
+                        )
+                    except Exception:
+                        resumable = False
+                    if not resumable:
+                        self.add_message(
+                            sess, "system",
+                            "上次任务在服务重启时中断，请重新发送。",
+                            kind="turn_interrupted",
+                        )
                     self.session_store.delete_app_state(active_key)
             except Exception as exc:
                 print(f"restore interrupted turns failed: {exc}", file=sys.stderr)
@@ -863,6 +903,10 @@ class AgentManager:
                     if za is None:
                         continue
                     if sess.status == "running":
+                        # exec happens 0.3s after abort(): the cancelled terminal
+                        # never reaches _drain_turn, so persist what the user has
+                        # already seen before the process is replaced.
+                        self._flush_partial_assistant(sess)
                         if not za.restart_checkpoint_armed:
                             with contextlib.suppress(Exception):
                                 za.save_checkpoint(
@@ -1037,11 +1081,9 @@ class AgentManager:
                         and waiting_kind == "restart"
                     ):
                         sess.status = "running"
-                        self.add_message(
-                            sess,
-                            "system",
-                            "内核已热重启，任务从检查点继续。",
-                        )
+                        resume_note = "内核已热重启，任务从检查点继续。"
+                        if not self._last_message_is(sess, "system", resume_note):
+                            self.add_message(sess, "system", resume_note)
                         should_resume = True
                     else:
                         sess.status = "waiting"
@@ -2189,6 +2231,11 @@ class AgentManager:
             elif terminal_status == "cancelled":
                 sess.status = "cancelled"
                 sess.last_error = ""
+                # A hot restart (or user cancel) aborts an in-flight turn; the
+                # user already saw the streamed text, so keep it instead of
+                # making the transcript look like messages vanished.
+                if partial_text.strip():
+                    self.add_message(sess, "assistant", partial_text)
                 if plan_contract:
                     sess.plan_status = "cancelled"
             else:
