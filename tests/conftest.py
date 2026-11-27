@@ -116,6 +116,99 @@ def isolated_extension_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolate_project_runtime_dirs(tmp_path, monkeypatch):
+    """Keep every test out of the developer's real runtime directories.
+
+    - ``desktop_bridge`` builds its AgentManager lazily; drop any instance so a
+      test can only build one from its own patched config.
+    - ``continue_cmd`` writes ``model_responses_<pid>.txt`` into its sessions
+      dir; a module reload inside test_bots used to reset it to the real one.
+    - ``workspace_cmd`` keeps ``temp/workspaces.json`` under ``project_root()``.
+    """
+    import dataclasses
+
+    from zero_agent.bots.shared import continue_cmd
+    from zero_agent.frontends import desktop_bridge
+    from zero_agent.frontends.commands import workspace_cmd
+
+    # Do not create the directory: tests assert tmp_path stays empty, and the
+    # writers create their sessions dir on demand.
+    continue_cmd.set_sessions_dir(str(tmp_path / "continue-sessions"))
+    monkeypatch.setattr(
+        workspace_cmd, "project_root", lambda: tmp_path / "project",
+    )
+    # The bridge singleton is built on first use (e.g. emit_session_state), so
+    # point its config loader at tmp as well even in tests that do not touch it.
+    isolated = dataclasses.replace(
+        desktop_bridge.load_default_config(),
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    monkeypatch.setattr(desktop_bridge, "load_default_config", lambda: isolated)
+    type(desktop_bridge.manager)._instance = None
+
+
+@pytest.fixture(autouse=True)
+def redirect_real_response_log(monkeypatch, tmp_path):
+    """Keep response logs out of the developer's real workspace/sessions.
+
+    Many AgentConfig fixtures use the ``./workspace/sessions`` default; the
+    historical logs they produced are what littered the project directory and
+    made ``/continue`` list pytest runs. Redirect such writes to tmp instead of
+    failing, because the log payload itself is what the test exercises.
+    """
+    import os
+    from pathlib import Path as _Path
+
+    from zero_agent.llm import sessions as llm_sessions
+
+    real_sessions = (
+        _Path(__file__).resolve().parents[1] / "workspace" / "sessions"
+    ).resolve()
+    original = llm_sessions.LiteLLMSession._write_model_response_log
+
+    def guarded(self, messages, mock):
+        base = self._session_log_path or self._sessions_dir
+        if base:
+            resolved = _Path(str(base)).expanduser().resolve()
+            if resolved.name != "model_responses_%d.txt" % os.getpid():
+                resolved = resolved / ("model_responses_%d.txt" % os.getpid())
+            if real_sessions == resolved.parent or real_sessions in resolved.parents:
+                redirected = tmp_path / "llm-logs"
+                redirected.mkdir(parents=True, exist_ok=True)
+                self._session_log_path = None
+                self._sessions_dir = str(redirected)
+        return original(self, messages, mock)
+
+    monkeypatch.setattr(
+        llm_sessions.LiteLLMSession, "_write_model_response_log", guarded,
+    )
+
+
+@pytest.fixture(autouse=True)
+def guard_real_session_store(monkeypatch):
+    """Fail a test that opens the developer's real session store."""
+    from pathlib import Path as _Path
+
+    from zero_agent.frontends import session_store as store_mod
+
+    real_workspace = (_Path(__file__).resolve().parents[1] / "workspace").resolve()
+    original = store_mod.SessionStore.__init__
+
+    def guarded(self, path, *args, **kwargs):
+        resolved = _Path(str(path)).expanduser().resolve()
+        if resolved == real_workspace or real_workspace in resolved.parents:
+            raise AssertionError(
+                "test opened the developer's real workspace/sessions store; "
+                "isolate the manager's sessions_dir"
+            )
+        return original(self, path, *args, **kwargs)
+
+    monkeypatch.setattr(store_mod.SessionStore, "__init__", guarded)
+
+
+@pytest.fixture(autouse=True)
 def guard_real_user_profile(monkeypatch):
     """测试不得写开发者的真实 ``memory/user_profile.md``.
 

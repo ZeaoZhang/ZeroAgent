@@ -258,6 +258,7 @@ def test_repository_has_no_removed_name_fragments() -> None:
         "sessions",
         "temp",
         "target",
+        "workspace",
         "zero_agent.egg-info",
     }
     text_suffixes = {
@@ -368,15 +369,56 @@ def test_vendor_and_asset_files_ship_with_the_wheel() -> None:
     assert "user_profile.md" in assets
 
 
+def _stage_build_tree(destination: Path) -> Path:
+    """Copy the minimal build inputs so ``pip wheel`` never writes to ROOT.
+
+    The checkout can live on a read-only (or otherwise unwritable) path, in
+    which case an in-place ``pip wheel .`` aborts while creating ``build/``.
+    Staging the packaging inputs into ``tmp_path`` keeps the test hermetic and
+    still exercises a real wheel build.
+    """
+    import shutil
+
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in ("pyproject.toml", "README.md", "LICENSE"):
+        source = ROOT / name
+        if source.is_file():
+            shutil.copy2(source, destination / name)
+
+    shutil.copytree(
+        ROOT / "zero_agent",
+        destination / "zero_agent",
+        ignore=shutil.ignore_patterns(
+            "__pycache__",
+            "*.pyc",
+            "*.pyo",
+            "node_modules",
+            "src-tauri",
+        ),
+    )
+    return destination
+
+
 def test_wheel_contains_runtime_modules_and_vendor_assets(tmp_path) -> None:
     """The built wheel must import cleanly, not just install its modules."""
     import subprocess
     import sys
     import zipfile
 
+    import os
+
+    staging = _stage_build_tree(tmp_path / "build-tree")
     wheel_dir = tmp_path / "wheels"
     wheel_dir.mkdir()
-    subprocess.run(
+    # Keep pip/rust caches inside tmp; otherwise the build writes the user's
+    # ~/Library/Caches/pip and ~/.rustup.
+    build_env = dict(os.environ)
+    build_env.update({
+        "PIP_CACHE_DIR": str(tmp_path / "pip-cache"),
+        "RUSTUP_HOME": str(tmp_path / "rustup"),
+        "CARGO_HOME": str(tmp_path / "cargo"),
+    })
+    result = subprocess.run(
         [
             sys.executable,
             "-m",
@@ -388,12 +430,28 @@ def test_wheel_contains_runtime_modules_and_vendor_assets(tmp_path) -> None:
             "-w",
             str(wheel_dir),
         ],
-        cwd=str(ROOT),
-        check=True,
+        cwd=str(staging),
+        env=build_env,
+        check=False,
         capture_output=True,
         text=True,
         timeout=600,
     )
+    if result.returncode != 0:
+        output = f"{result.stdout or ''}\n{result.stderr or ''}"
+        environment_markers = (
+            "No module named setuptools",
+            "No module named 'setuptools'",
+            "Failed to establish a new connection",
+            "Network is unreachable",
+            "Temporary failure in name resolution",
+            "ProxyError",
+            "Read timed out",
+        )
+        if any(marker in output for marker in environment_markers):
+            detail = (output.strip().splitlines() or [""])[-1][:300]
+            pytest.skip(f"wheel build not possible in this environment: {detail}")
+        raise AssertionError(f"pip wheel failed:\n{output[-4000:]}")
     wheels = sorted(wheel_dir.glob("zero_agent-*.whl"))
     assert wheels, "pip wheel produced no wheel"
 

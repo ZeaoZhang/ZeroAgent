@@ -28,7 +28,7 @@ from zero_agent.tools.registry import ToolDefinition, ToolRegistry
 
 
 @pytest.fixture
-def multi_backend_config() -> AgentConfig:
+def multi_backend_config(tmp_path) -> AgentConfig:
     """创建多后端配置用于测试."""
     return AgentConfig(
         llm_backends={
@@ -49,8 +49,10 @@ def multi_backend_config() -> AgentConfig:
         },
         default_backend="backend_a",
         max_turns=10,
-        workspace_dir="/tmp/test-workspace",
-        memory_dir="/tmp/test-memory",
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        # Without this the response log lands in the real workspace/sessions.
+        sessions_dir=str(tmp_path / "sessions"),
     )
 
 
