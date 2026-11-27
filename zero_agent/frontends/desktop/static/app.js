@@ -4133,7 +4133,9 @@ function applyBridgeSessionSnapshot(sess, bSess, pollRes) {
     runtime.lastPolledMessageId = Math.max(0, ...(sess.messages || []).map(m => Number(m.id) || 0));
     if (pollRes.partial) {
       upsertPolledMessage(sess, pollRes.partial, { partial: true });
-    } else if (runtime.assistantDraft) {
+    } else if (runtime.assistantDraft && pollRes.status !== 'running') {
+      // A running turn may not have a partial yet right after a restart; do
+      // not erase the text the user is already reading.
       clearAssistantDraft(sess);
     }
     if (pollRes.tokenUsage) sess.tokenUsage = mergeTokenUsage(sess.tokenUsage, pollRes.tokenUsage);

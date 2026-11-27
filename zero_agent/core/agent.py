@@ -1733,21 +1733,30 @@ class ZeroAgent:
                 report["core_restart"] = "blocked"
                 report["core_restart_error"] = error
             else:
-                resumable = bool(self._is_running_task or self._pending_task_state)
-                path = (
-                    self.save_checkpoint(status="running", restart=True)
-                    if resumable
-                    else None
-                )
-                if resumable and path is None:
-                    report["core_restart"] = "blocked"
-                    report["core_restart_error"] = "checkpoint_failed"
+                last_restart = float(self._restart_history[-1]) if self._restart_history else 0.0
+                if (
+                    last_restart
+                    and time.time() - last_restart < checkpoint_store.RESTART_COOLDOWN
+                ):
+                    # Just restarted: keep running the loaded code instead of
+                    # aborting this task again on the very next boundary.
+                    report["core_restart"] = "cooldown"
                 else:
-                    self._core_signature = signature
-                    report["core_restart"] = "requested"
-                    if path is not None:
-                        report["checkpoint_path"] = str(path)
-                    self._hot_restart_hook("core_changed")
+                    resumable = bool(self._is_running_task or self._pending_task_state)
+                    path = (
+                        self.save_checkpoint(status="running", restart=True)
+                        if resumable
+                        else None
+                    )
+                    if resumable and path is None:
+                        report["core_restart"] = "blocked"
+                        report["core_restart_error"] = "checkpoint_failed"
+                    else:
+                        self._core_signature = signature
+                        report["core_restart"] = "requested"
+                        if path is not None:
+                            report["checkpoint_path"] = str(path)
+                        self._hot_restart_hook("core_changed")
         elif allow_core_restart:
             # 未启用重启、没有 hook 或本次签名已被判定为 blocked：
             # 刷新基线，避免每个 turn 重复校验同一份代码。

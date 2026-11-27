@@ -113,3 +113,33 @@ def isolated_extension_home(tmp_path, monkeypatch):
         lambda: home,
     )
     return home
+
+
+@pytest.fixture(autouse=True)
+def guard_real_user_profile(monkeypatch):
+    """测试不得写开发者的真实 ``memory/user_profile.md``.
+
+    桌面 bridge 在模块导入时就创建了单例 ``manager``；只 monkeypatch
+    ``load_default_config`` 对它无效，写接口会落到真实 memory 目录，把用户
+    画像整份替换成测试里的样例文本（“喜欢黑咖啡”）。这里在写入口直接拦住，
+    让漏隔离的测试立刻失败并指出正确写法。
+    """
+    from pathlib import Path as _Path
+
+    from zero_agent.memory import manager as memory_manager
+
+    real_memory_dir = (_Path(__file__).resolve().parents[1] / "memory").resolve()
+    original = memory_manager.MemoryManager.write_user_profile
+
+    def guarded(self, text):
+        if _Path(self.memory_dir).resolve() == real_memory_dir:
+            raise AssertionError(
+                "test tried to overwrite the developer's real memory/user_profile.md; "
+                "construct MemoryManager(memory_dir=tmp_path) or rebind the live "
+                "bridge manager's memory_dir"
+            )
+        return original(self, text)
+
+    monkeypatch.setattr(
+        memory_manager.MemoryManager, "write_user_profile", guarded,
+    )

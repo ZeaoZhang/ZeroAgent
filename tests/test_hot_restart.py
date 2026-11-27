@@ -1025,3 +1025,33 @@ class TestHotRestartLifecycle:
 
         assert desktop_bridge.manager.bridge_token == "tok-123"
         assert "ZA_DESKTOP_BRIDGE_TOKEN" not in os.environ
+
+
+class TestRestartCooldown:
+    def test_recent_restart_skips_immediate_second_restart(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """agent 编辑核心文件不应在每个 turn 边界都打断自己."""
+        import time as _time
+
+        agent = TestCheckpoint()._agent(tmp_path)
+        try:
+            agent._is_running_task = True
+            calls: list[str] = []
+            agent.set_hot_restart_hook(lambda reason: calls.append(reason))
+            agent._core_signature = "old"
+            agent._restart_history = [_time.time()]
+            monkeypatch.setattr(hot_restart, "core_signature", lambda root=None: "changed")
+            monkeypatch.setattr(hot_restart, "validate_core", lambda root=None: (True, ""))
+
+            report = agent.reload_workflow()
+
+            assert report["core_restart"] == "cooldown"
+            assert calls == []
+            # 冷却结束后的边界仍然允许重启
+            agent._restart_history = [_time.time() - 120]
+            report = agent.reload_workflow()
+            assert report["core_restart"] == "requested"
+            assert calls == ["core_changed"]
+        finally:
+            agent.close()

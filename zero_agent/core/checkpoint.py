@@ -28,6 +28,11 @@ CHECKPOINT_VERSION = 1
 RESTART_BUDGET_WINDOW = 600.0
 RESTART_BUDGET_LIMIT = 5
 
+# 热重启冷却：进程刚重启后的这个窗口内不再因核心代码变化重启。agent 在任务
+# 中途编辑 zero_agent/**/*.py 时，签名每个 turn 边界都会变；没有冷却就会在
+# 几十秒内连续 abort + 重启，把正在流式输出的回复切成碎片。
+RESTART_COOLDOWN = 45.0
+
 CONTINUATION_PROMPT = (
     "[System] 进程因核心代码热重启而重启。请基于已有对话、工具结果与证据继续原任务；"
     "不要重做已完成或有副作用的调用；先确认当前状态再继续。"
