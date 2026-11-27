@@ -38,10 +38,15 @@ def test_block_lists_real_extension_paths(tmp_path: Path) -> None:
 
     text = self_prompt.build(config, "zh")
 
-    assert f"{tmp_path / 'home'}/skills" in text
-    assert f"{tmp_path / 'home'}/extensions" in text
-    assert f"{tmp_path / 'home'}/mcp.json" in text
-    assert f"{tmp_path / 'mem'}/sops" in text
+    from zero_agent.utils.files import display_path, project_root
+
+    root = project_root()
+    home = display_path(str(tmp_path / "home"), root)
+    mem = display_path(str(tmp_path / "mem"), root)
+    assert f"{home}/skills" in text
+    assert f"{home}/extensions" in text
+    assert f"{home}/mcp.json" in text
+    assert f"{mem}/sops" in text
     assert "zero_agent" in text and "/**/*.py" in text
     assert "setup(ctx)" in text
 
@@ -82,7 +87,10 @@ def test_system_prompt_contains_the_block(tmp_path: Path) -> None:
         prompt = agent._build_system_prompt()
 
         assert "<self_modification>" in prompt
-        assert f"{tmp_path / 'home'}/extensions" in prompt
+        from zero_agent.utils.files import display_path, project_root
+
+        home = display_path(str(tmp_path / "home"), project_root())
+        assert f"{home}/extensions" in prompt
         assert "权限：full" in prompt
         assert "os.execv" in prompt
     finally:

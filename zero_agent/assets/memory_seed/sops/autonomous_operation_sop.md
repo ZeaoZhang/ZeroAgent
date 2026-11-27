@@ -1,7 +1,7 @@
 # 自主行动 SOP
 
-⚠️ **路径警告**：autonomous_reports 在 temp/ 下，用`./autonomous_reports/`访问，**不是**`../memory/autonomous_reports/`或`../autonomous_reports/`！TODO在cwd下。
-报告存于 `./autonomous_reports/`，文件名 `RXX_简短描述.md`（XX从 history.txt 推断自增）。
+⚠️ **路径警告**：helper 的路径常量绑定 **项目根目录**（不是 cwd）——已验证 `autonomous_operation_helper.py`：TODO = `<project>/temp/TODO.txt`；报告 = `<project>/temp/autonomous_reports/`（history.txt 也在其中）。cwd 通常是 `<project>/workspace`，故相对路径为 `../temp/TODO.txt`、`../temp/autonomous_reports/`；**`./autonomous_reports/`、`workspace/temp/autonomous_reports/`、`../memory/autonomous_reports/` 都不存在**。另注意 `workspace/temp/TODO.txt` 是 helper 不读的历史副本，别在那里打勾。**最稳妥：以 `set_todo()` / `complete_task()` 返回的绝对路径为准，别凭记忆拼相对路径。**
+报告存于 `<project>/temp/autonomous_reports/`，文件名 `RXX_简短描述.md`（XX 从 history.txt 推断自增，`complete_task` 会自动编号并移动）。
 
 授权你进行自主行动，只要不对环境造成副作用都可进行。
 

@@ -58,12 +58,20 @@ class TestMemoryManager:
             ctx = mgr.get_global_memory_context()
             memory_dir = os.path.join(tmp, "memory")
             l1_path = os.path.join(memory_dir, "global_mem_insight.txt")
-            assert f"cwd = {os.path.join(tmp, 'workspace')} (./)" in ctx
-            assert f"[Memory] ({memory_dir})" in ctx
+            # 产品会按 display_path 规则缩写路径（项目内→<project>/…，家目录→~/…），
+            # 因此期望值也用同一函数构造，避免测试依赖 TMPDIR 是否落在项目根内。
+            from zero_agent.utils.files import display_path, project_root
+
+            project = project_root()
+            assert (
+                f"cwd = {display_path(os.path.join(tmp, 'workspace'), project)} (./)"
+                in ctx
+            )
+            assert f"[Memory] ({display_path(memory_dir, project)})" in ctx
             assert (
                 ZA_ASSETS / "insight_fixed_structure.txt"
             ).read_text(encoding="utf-8") in ctx
-            assert f"{l1_path}:" in ctx
+            assert f"{display_path(l1_path, project)}:" in ctx
 
             insight = (
                 Path(tmp) / "memory" / "global_mem_insight.txt"

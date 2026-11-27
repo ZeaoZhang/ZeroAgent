@@ -69,6 +69,46 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"[install] python: {bin_dir / 'python3.11'}", result.stdout)
 
+    def test_install_survives_unavailable_process_listing(self) -> None:
+        """`ps` can be denied by sandboxes/seatbelt profiles (exit 126).
+
+        Under `set -Eeuo pipefail` a bare `ps -axo ... | awk` used to abort the
+        whole installer, so `--dry-run --stop-only` died before doing anything.
+        """
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temp_dir = Path(temporary_directory)
+            repo_root, _, install_script = self.make_script_fixture(temp_dir)
+
+            bin_dir = temp_dir / "bin"
+            bin_dir.mkdir()
+            write_fake_python(bin_dir / "python3.11", "3.11", "26.0.1")
+            fake_ps = bin_dir / "ps"
+            fake_ps.write_text("#!/bin/sh\nexit 126\n", encoding="utf-8")
+            fake_ps.chmod(0o755)
+
+            environment = os.environ | {
+                "BRIDGE_PORT": "54168",
+                "HOME": temporary_directory,
+                "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
+                "PYTHON": "",
+            }
+            result = subprocess.run(
+                ["/bin/bash", str(install_script), "--dry-run", "--stop-only"],
+                cwd=repo_root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("unable to list processes", result.stderr)
+        # ps 不可用时视为没有相关进程，安装流程继续而非中止
+        self.assertIn(
+            "[install] no running ZeroAgent desktop/bridge processes to stop",
+            result.stdout,
+        )
+
     def test_install_rejects_supported_python_with_unsupported_pip(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temp_dir = Path(temporary_directory)

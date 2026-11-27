@@ -51,6 +51,19 @@ def get_history(n: int = 20) -> str:
     return "".join(lines[:n])
 
 
+def _normalize_taskname(taskname: str) -> str:
+    """归一化任务名，用于报告文件名。
+    剥离 agent 可能已自带的前缀编号（如 "R3_x" / "R3 主题"）与 .md 后缀，
+    避免出现 "R3_R3_xxx.md" 这类重复编号文件名；再清理非法文件名字符。
+    """
+    _nm = (taskname or "").strip()
+    _nm = re.sub(r'^R\d+\s*[_\-—：:、.\s]+', '', _nm, flags=re.IGNORECASE)  # 剥离 R 编号前缀
+    _nm = re.sub(r'\.md$', '', _nm, flags=re.IGNORECASE)                    # 剥离 .md 后缀
+    _nm = re.sub(r'[<>:"/\\|?*]', '_', _nm)                                 # 清理非法字符
+    _nm = re.sub(r'\s+', ' ', _nm).strip(" _-")
+    return _nm or "untitled"
+
+
 def set_todo(*args, **kwargs) -> str:
     """返回 TODO.txt 的真实绝对路径，供 agent/子agent 自行读写。"""
     return f'路径: {str(_TODO_FILE)}'
@@ -84,8 +97,9 @@ def complete_task(taskname: str, historyline: str, report_path: str) -> str:
 
     # ── 1. 移动报告 ──
     rnum = _next_report_number()
-    # 清理 taskname 中的非法文件名字符
-    safe_name = re.sub(r'[<>:"/\\|?*]', '_', taskname).strip()
+    # 归一化 taskname：剥离 agent 可能已自带的前缀编号（如 "R3_x" / "R3 主题"）与 .md 后缀，
+    # 避免出现 "R3_R3_xxx.md" 这类重复编号文件名；再清理非法文件名字符
+    safe_name = _normalize_taskname(taskname)
     dest_name = f"R{rnum}_{safe_name}.md"
     dest_path = _REPORTS_DIR / dest_name
 

@@ -166,8 +166,25 @@ write_desktop_settings() {
   } > "${SETTINGS_PATH}"
 }
 
+# Emit a `ps` snapshot with the requested column format ($1) without aborting
+# the whole script when process listing is unavailable. Restricted environments
+# (sandboxes, containers, hardened macOS seatbelt profiles) can fail `ps` with
+# "Operation not permitted"; under `set -Eeuo pipefail` that used to kill the
+# installer mid-flight. An empty snapshot is treated as "nothing running".
+ps_snapshot() {
+  local format="${1:?ps format required}"
+  local output
+  if ! output="$(ps -axo "${format}" 2>/dev/null)"; then
+    # stderr on purpose: stdout of this function is piped into awk.
+    printf '[install] warning: unable to list processes (ps -axo %s failed); assuming none are running\n' \
+      "${format}" >&2
+    return 0
+  fi
+  printf '%s\n' "${output}"
+}
+
 match_pids() {
-  ps -axo pid=,command= | awk \
+  ps_snapshot pid=,command= | awk \
     -v self="$$" \
     -v app_path="${APP_PATH}/Contents/MacOS/zero-agent-desktop" \
     -v root="${REPO_ROOT}" '
@@ -194,7 +211,7 @@ match_pids() {
 
 list_matching_processes() {
   local rows
-  rows="$(ps -axo pid=,ppid=,command= | awk \
+  rows="$(ps_snapshot pid=,ppid=,command= | awk \
     -v app_path="${APP_PATH}/Contents/MacOS/zero-agent-desktop" \
     -v root="${REPO_ROOT}" '
       {
