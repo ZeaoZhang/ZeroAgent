@@ -86,8 +86,12 @@ DATA_ROOTS: tuple[str, ...] = (
     "~/Library/Mobile Documents",
 )
 
-#: git 元数据目录名：hooks / config / refs 被写等于植入持久化后门或篡改历史.
+#: git 元数据目录名。.git 目录本身必须可写（git 要写 index/objects/refs/logs/
+#: COMMIT_EDITMSG），因此只拦能"植入持久化行为"或"篡改鉴权/历史"的条目：
+#: hooks 可放可执行脚本，config 可改 core.hooksPath / alias / sslVerify 等。
+#: refs/objects/logs/index/HEAD 都是正常 git 操作产物，不拦。
 _GIT_METADATA_DIR = ".git"
+_GIT_SENSITIVE_ENTRIES = frozenset({"hooks", "config"})
 
 
 def _normalize(path: Any) -> str:
@@ -150,10 +154,19 @@ def _git_metadata_hit(target: str) -> str:
     """返回命中的 ``.git`` 路径（若 *target* 落在某仓库的 .git 内）."""
 
     parts = target.split(os.sep)
-    if _GIT_METADATA_DIR in parts:
-        index = parts.index(_GIT_METADATA_DIR)
-        return os.sep.join(parts[: index + 1])
-    return ""
+    if _GIT_METADATA_DIR not in parts:
+        return ""
+    index = parts.index(_GIT_METADATA_DIR)
+    # 只拦真正能"植入持久化行为"的条目：hooks 里放可执行脚本，config /
+    # config.worktree 能改 core.hooksPath、core.fsmonitor 等。index、objects、
+    # logs、refs、HEAD、COMMIT_EDITMSG 等是 add/commit/fetch 的必需写入目标，
+    # 放行它们，代码里跑 git 才不会被自己的安全层挡死。
+    if len(parts) <= index + 1:
+        return ""
+    entry = parts[index + 1]
+    if entry.lower() not in _GIT_SENSITIVE_ENTRIES:
+        return ""
+    return os.sep.join(parts[: index + 2])
 
 
 def write_denial(path: str, config: Any = None) -> str:
@@ -178,8 +191,9 @@ def write_denial(path: str, config: Any = None) -> str:
     git_hit = _git_metadata_hit(target)
     if git_hit:
         return (
-            f"拒绝写入 git 元数据 {git_hit}：hooks/config/refs 被改写等同于"
-            "植入持久化后门或篡改历史。用 code_run 里的 git 命令代替。"
+            f"拒绝写入 git 元数据 {git_hit}：hooks 里放可执行脚本、config 里改 "
+            "core.hooksPath 都等于植入持久化后门。普通 git 操作请用 code_run 里的 "
+            "git 命令（index/objects/refs/logs 可写）。"
         )
 
     for root in protected_roots(config):

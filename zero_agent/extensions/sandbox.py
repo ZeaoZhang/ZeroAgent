@@ -27,7 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 VALID_MODES = ("off", "auto", "macos", "linux")
 DEFAULT_MODE = "auto"
@@ -62,7 +62,7 @@ def resolve_mode(config: object) -> str:
     return DEFAULT_MODE
 
 
-def _normalize_root(root: str) -> Optional[str]:
+def _normalize_root(root: str) -> str | None:
     """校验并规范化写入根.
 
     只接受绝对路径，且不含会破坏 profile 语法的字符。
@@ -165,12 +165,52 @@ def _linux_available() -> bool:
     )
 
 
-def _safe_tempdir() -> Optional[str]:
+def _safe_tempdir() -> str | None:
     """获取可用的临时目录，失败时返回 None."""
     try:
         return tempfile.gettempdir()
     except Exception:  # noqa: BLE001
         return None
+
+
+def _git_metadata_dir(base: str, max_depth: int = 32) -> str | None:
+    """从 base 向上查找 git 元数据目录.
+
+    沙箱默认只放行 workspace，导致 ``git add``/``git commit`` 无法写
+    ``.git/index`` 等文件。这里把所属仓库的 ``.git`` 目录交给调用方并入
+    可写根；``.git/hooks``、``.git/config`` 仍由 safety 层拦截.
+
+    Args:
+        base: 起始目录（通常是写入根）.
+        max_depth: 最多向上查找的层数.
+
+    Returns:
+        ``.git`` 目录的真实路径；未找到时返回 None.
+    """
+    current = base
+    for _ in range(max_depth):
+        candidate = os.path.join(current, ".git")
+        if os.path.isdir(candidate):
+            return os.path.realpath(candidate)
+        if os.path.isfile(candidate):
+            # worktree / submodule：.git 是文本文件，指向真实 git 目录
+            try:
+                with open(candidate, "r", encoding="utf-8", errors="ignore") as handle:
+                    text = handle.read(4096)
+            except OSError:
+                return None
+            for line in text.splitlines():
+                if line.startswith("gitdir:"):
+                    target = line.split(":", 1)[1].strip()
+                    if not os.path.isabs(target):
+                        target = os.path.join(current, target)
+                    return os.path.realpath(target)
+            return None
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+    return None
 
 
 def writable_roots(root: str, extra_roots: Iterable[str] = ()) -> List[str]:
@@ -196,6 +236,10 @@ def writable_roots(root: str, extra_roots: Iterable[str] = ()) -> List[str]:
         normalized = _normalize_root(str(candidate))
         if normalized is not None:
             writable.append(normalized)
+    for base in list(writable):
+        git_dir = _git_metadata_dir(base)
+        if git_dir is not None:
+            writable.append(git_dir)
     for extra in (_safe_tempdir(), "/tmp"):
         if not extra or not os.path.isdir(extra):
             continue
@@ -215,7 +259,21 @@ def _macos_profile(root: str, extra_roots: Iterable[str] = ()) -> str:
     """
     writable = writable_roots(root, extra_roots)
     rules = "\n".join(f'  (subpath "{_escape(path)}")' for path in writable)
-    return (
+    # ``.git`` 整体放行是为了让 ``git add``/``git commit`` 能写 index、
+    # objects、refs；但 ``hooks``（可执行脚本）与 ``config``（可注入
+    # core.hooksPath 等配置）必须收紧回来。sandbox 规则后者优先，
+    # 因此把这些 deny 放在 allow 之后.
+    guarded = "\n".join(
+        line
+        for path in writable
+        if os.path.basename(path) == ".git"
+        for line in (
+            f'  (subpath "{_escape(os.path.join(path, "hooks"))}")',
+            f'  (literal "{_escape(os.path.join(path, "config"))}")',
+            f'  (literal "{_escape(os.path.join(path, "config.lock"))}")',
+        )
+    )
+    profile = (
         "(version 1)\n"
         "(allow default)\n"
         "(deny file-write*)\n"
@@ -225,10 +283,13 @@ def _macos_profile(root: str, extra_roots: Iterable[str] = ()) -> str:
         '  (literal "/dev/stdout")\n'
         '  (literal "/dev/stderr"))\n'
     )
+    if guarded:
+        profile += f"(deny file-write*\n{guarded})\n"
+    return profile
 
 
 def will_apply(
-    root: Optional[str],
+    root: str | None,
     mode: str,
     extra_roots: Iterable[str] = (),
 ) -> bool:
@@ -250,7 +311,10 @@ def will_apply(
         return False
     try:
         _cmd, applied, _reason = wrap_command(
-            ["/usr/bin/true"], root, mode, extra_roots,
+            ["/usr/bin/true"],
+            root,
+            mode,
+            extra_roots,
         )
     except Exception:  # noqa: BLE001 - 探测失败按不可用处理
         return False
@@ -259,7 +323,7 @@ def will_apply(
 
 def wrap_command(
     cmd: List[str],
-    root: Optional[str],
+    root: str | None,
     mode: str,
     extra_roots: Iterable[str] = (),
 ) -> Tuple[List[str], bool, str]:
@@ -317,8 +381,10 @@ def wrap_command(
                 # 逐目录再绑定为可写（含临时目录）：不能只用 --tmpfs /tmp，
                 # 那会把 python 模式落在临时目录里的脚本遮住
                 *binds,
-                "--dev", "/dev",
-                "--proc", "/proc",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
                 "--unshare-pid",
                 "--die-with-parent",
                 "--",
