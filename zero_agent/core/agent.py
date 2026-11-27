@@ -411,6 +411,10 @@ class ZeroAgent:
         self._last_checkpoint_path: Optional[str] = None
         self._restart_prompt: Optional[str] = None
         self.checkpoint_context: dict[str, Any] = {}
+        # Set when the caller restored a previous conversation (desktop session
+        # reload or history import). The next task must keep that context
+        # instead of compacting it away as "old task transcripts".
+        self._skip_new_task_compaction_once = False
 
         # 4. 记忆管理器
         self.memory = MemoryManager(
@@ -658,7 +662,12 @@ class ZeroAgent:
         else:
             prepare_history = getattr(self.client, "prepare_for_new_task", None)
             if callable(prepare_history):
-                prepare_history()
+                if self._skip_new_task_compaction_once:
+                    # Freshly restored conversation: compaction would delete
+                    # the very history the user asked us to continue.
+                    self._skip_new_task_compaction_once = False
+                else:
+                    prepare_history()
 
         if (
             pending_state is None

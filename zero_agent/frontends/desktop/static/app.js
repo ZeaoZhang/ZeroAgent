@@ -882,10 +882,20 @@ function startTaskTimer(sess, startedAt = getNowMs()) {
 }
 
 function stopTaskTimer(sess) {
-  if (isActiveSession(sess)) updateTaskRuntimeBadges();
   const runtime = getSessionRuntime(sess);
+  if (isActiveSession(sess)) {
+    // Freeze the live badge: converting it to "Done ✓ …" stops the ticking
+    // that used to continue after a stop or a finished turn.
+    document.querySelectorAll('.task-elapsed[data-started-at]').forEach((badge) => {
+      const startedAt = Number(badge.dataset.startedAt || 0);
+      if (!startedAt) return;
+      badge.textContent = formatTaskElapsed(getNowMs() - startedAt, true);
+      badge.removeAttribute('data-started-at');
+      badge.setAttribute('data-ended', '1');
+    });
+  }
   clearTaskTimer(sess);
-  runtime.taskStartedAt = 0;
+  if (runtime) runtime.taskStartedAt = 0;
 }
 
 function taskElapsedBadge(startedAt, endedAt) {
@@ -1926,8 +1936,26 @@ function renderMessages() {
     if (hasDraft) renderAssistantDraft(sess, runtime.assistantDraft);
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
+  renderQueuedPrompts(sess);
   renderPlanStatus(sess);
   state._prevRenderedId = state.activeId;
+}
+
+// Prompts sent while a turn is running are queued server-side; show them so
+// typing does not look like it vanished.
+function renderQueuedPrompts(sess) {
+  messagesEl.querySelectorAll('.msg-queued').forEach((node) => node.remove());
+  const queued = Array.isArray(sess?.pendingTurns) ? sess.pendingTurns : [];
+  if (!queued.length) return;
+  prepareMessagesForContent();
+  for (const item of queued) {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg msg-user msg-queued';
+    wrap.dataset.queueId = item.queueId || '';
+    wrap.innerHTML = `<div class="bubble"><span class="queued-flag">排队中…</span>${escapeHtml(item.content || '')}</div>`;
+    messagesEl.appendChild(wrap);
+  }
+  messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 function prepareMessagesForContent() {
@@ -2115,18 +2143,27 @@ function handleNotification(msg) {
       if (isActiveSession(sess)) renderPlanStatus(sess);
     }
 
+    if (Array.isArray(msg.pendingTurns)) {
+      sess.pendingTurns = msg.pendingTurns;
+      if (isActiveSession(sess)) renderMessages();
+    }
     const runtime = getSessionRuntime(sess);
     if ((msg.state === 'running' || msg.status === 'running') && !runtime.polling) {
       runtime.busy = true;
       runtime.forcePollOnce = true;
       setBusy(true, 'Thinking…', sess);
       pollSessionMessages(sess);
-    } else if (msg.state === 'idle' || msg.state === 'error' || msg.status === 'idle') {
-      // Session finished in background — do a final poll to pick up remaining messages
-      if (!runtime.polling && runtime.busy) {
+    } else if (['idle', 'error', 'cancelled', 'interrupted'].includes(msg.state || msg.status)) {
+      // Session finished in background — do a final poll to pick up remaining
+      // messages, and clear the live timer/draft so nothing keeps ticking.
+      const wasBusy = runtime.busy;
+      setBusy(false, null, sess);
+      stopTaskTimer(sess);
+      if (!runtime.polling && (wasBusy || runtime.forcePollOnce || msg.state === 'cancelled')) {
         runtime.forcePollOnce = true;
         pollSessionMessages(sess);
       }
+      void refreshSessionFromBridge(sess);
     }
     // Update tab dot regardless
     renderSessionList();
@@ -2408,6 +2445,29 @@ function finalizeStreamingTurn(sess) {
   runtime.currentTurnEl = null;
 }
 
+function flushPendingFormalAssistant(sess) {
+  const runtime = sess ? getSessionRuntime(sess) : null;
+  const pending = runtime?.pendingFormalAssistantMessages || [];
+  if (!pending.length) return;
+  runtime.pendingFormalAssistantMessages = [];
+  let appended = false;
+  for (const entry of pending) {
+    const msg = entry.message || entry;
+    if (!msg || msg.role !== 'assistant') continue;
+    const id = Number(msg.id || 0);
+    const existing = id ? sess.messages.find((m) => m.role === 'assistant' && Number(m.id || 0) === id) : null;
+    if (existing) {
+      if (msg.content) existing.content = msg.content;
+      if (msg.segments) existing.segments = msg.segments;
+      continue;
+    }
+    if (!msg.content && !(msg.segments && msg.segments.length)) continue;
+    sess.messages.push({ ...msg, finalized: true });
+    appended = true;
+  }
+  if (appended && isActiveSession(sess)) renderMessages();
+}
+
 function finalizeAssistantReply(sess) {
   const endedAt = getNowMs();
   finalizeStreamingTurn(sess);
@@ -2423,9 +2483,20 @@ function finalizeAssistantReply(sess) {
     const draftToken = Number(draft.turnToken || ensureActiveTurn(runtime));
     completedTurnToken = draftToken;
     const formalMessages = runtime.pendingFormalAssistantMessages || [];
-    const formalIndex = formalMessages.findIndex((entry) => (
+    let formalIndex = formalMessages.findIndex((entry) => (
       formalEntryMatchesDraft(entry, draft, draftToken, runtime)
     ));
+    if (
+      formalIndex === -1
+      && formalMessages.length
+      && !String(draft.text || '').trim()
+      && !(draft.segments || []).some((seg) => seg.kind !== 'LLM_RUNNING' && String(seg.text || '').trim())
+    ) {
+      // The draft never received streamed text (restart/resync drift): bind it
+      // to the newest formal message instead of finalizing an empty bubble.
+      // A draft that already has content must keep its own binding.
+      formalIndex = formalMessages.length - 1;
+    }
     if (formalIndex !== -1) {
       const entry = formalMessages.splice(formalIndex, 1)[0];
       const formal = entry.message || entry;
@@ -2459,7 +2530,11 @@ function finalizeAssistantReply(sess) {
       text: seg.text || '',
       collapsed: !!seg.collapsed
     }));
-    if (msg.content || msg.segments?.length) {
+    const hasPlainText = !!(msg.content && msg.content.trim());
+    const hasTurnContent = (msg.segments || []).some(
+      (seg) => seg.kind !== 'LLM_RUNNING' && String(seg.text || '').trim(),
+    );
+    if (hasPlainText || hasTurnContent) {
       sess.messages.push(msg);
       renderedMessageCount += 1;
       const finalizedBridgeMessageId = Number(msg.id || 0);
@@ -2675,6 +2750,35 @@ async function retrySessionPolling(sess) {
   await pollSessionMessages(sess);
 }
 
+// Reload one session's authoritative transcript. Incremental id bookkeeping
+// can skip the terminal assistant message (a streamed partial already advanced
+// lastPolledMessageId), which used to leave an empty bubble and hide the answer.
+async function refreshSessionFromBridge(sess) {
+  if (!sess) return;
+  const res = await window.zeroAgent
+    .rpc('session/poll', { sessionId: sess.bridgeSessionId || sess.id, afterId: 0, limit: 9999 })
+    .catch(() => null);
+  const result = res?.result || res || {};
+  if (!Array.isArray(result.messages)) return;
+  sess.messages = result.messages;
+  if (Array.isArray(result.pendingTurns)) sess.pendingTurns = result.pendingTurns;
+  if (result.tokenUsage) sess.tokenUsage = mergeTokenUsage(sess.tokenUsage, result.tokenUsage);
+  const runtime = getSessionRuntime(sess);
+  runtime.seenBridgeMessageIds = new Set(
+    result.messages.filter((m) => m.id).map((m) => Number(m.id)),
+  );
+  runtime.lastPolledMessageId = Math.max(0, ...result.messages.map((m) => Number(m.id) || 0));
+  runtime.assistantDraft = null;
+  runtime.pendingFormalAssistantMessages = [];
+  runtime.pendingAssistantMessages = [];
+  runtime.busy = result.status === 'running';
+  if (!runtime.busy) stopTaskTimer(sess);
+  if (isActiveSession(sess)) {
+    renderMessages();
+    updateModelStatus();
+  }
+}
+
 async function pollSessionMessages(sess) {
   if (!sess) return;
   const runtime = getSessionRuntime(sess);
@@ -2687,11 +2791,16 @@ async function pollSessionMessages(sess) {
       if (res?.error) throw new Error(res.error.message || res.error);
       const result = res.result || res;
       for (const msg of (result.messages || [])) upsertPolledMessage(sess, msg, { partial: false });
+      if (Array.isArray(result.pendingTurns)) sess.pendingTurns = result.pendingTurns;
+      if (isActiveSession(sess)) renderQueuedPrompts(sess);
       if (result.partial) upsertPolledMessage(sess, result.partial, { partial: true });
       const busy = result.status === 'running' || !!result.partial;
       setBusy(busy, busy ? 'Thinking…' : null, sess);
       if (!busy) {
+        stopTaskTimer(sess);
         finalizeAssistantReply(sess);
+        flushPendingFormalAssistant(sess);
+        await refreshSessionFromBridge(sess);
         break;
       }
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -2842,12 +2951,18 @@ async function cancelPrompt() {
     const res = await window.zeroAgent.rpc('session/cancel', { sessionId: sess?.bridgeSessionId || state.activeId });
     if (res.error) throw new Error(res.error.message || res.error);
     const payload = res?.result || res || {};
-    for (const queueId of payload.cancelledQueueIds || []) {
-      const id = String(queueId);
+    const cancelledIds = new Set((payload.cancelledQueueIds || []).map(String));
+    for (const id of cancelledIds) {
       runtime.cancelledQueueIds.add(id);
       runtime.queuedPromptIds.delete(id);
     }
+    if (Array.isArray(sess?.pendingTurns)) {
+      sess.pendingTurns = sess.pendingTurns.filter((item) => !cancelledIds.has(String(item.queueId || '')));
+    }
+    stopTaskTimer(sess);
+    if (runtime.assistantDraft) clearAssistantDraft(sess);
     setBusy(false, null, sess);
+    await refreshSessionFromBridge(sess);
     return true;
   } catch (e) {
     showSystem('Stop failed: ' + (e.message || e));
@@ -3029,7 +3144,9 @@ async function restoreResumeIndex(index, commandName) {
   }
   renderSessionList();
   renderMessages();
-  showSystem(result.message || `Restored session #${index}.`);
+  // The backend already appended the restore summary as a system message;
+  // showing it again here duplicated the same notice twice.
+  addDiagnostic('info', 'Session restored', result.message || `Restored session #${index}.`);
 }
 
 async function handleResumeCommand(arg) {
@@ -4126,6 +4243,7 @@ function applyBridgeSessionSnapshot(sess, bSess, pollRes) {
   }
   if (pollRes && !pollRes.error) {
     if (Array.isArray(pollRes.messages)) sess.messages = pollRes.messages;
+    if (Array.isArray(pollRes.pendingTurns)) sess.pendingTurns = pollRes.pendingTurns;
     const runtime = getSessionRuntime(sess);
     runtime.seenBridgeMessageIds = new Set(
       (sess.messages || []).filter(m => m.id).map(m => Number(m.id)),
@@ -4141,6 +4259,7 @@ function applyBridgeSessionSnapshot(sess, bSess, pollRes) {
     if (pollRes.tokenUsage) sess.tokenUsage = mergeTokenUsage(sess.tokenUsage, pollRes.tokenUsage);
     if (pollRes.updatedAt) sess.updatedAt = Number(pollRes.updatedAt) || sess.updatedAt;
     const running = pollRes.status === 'running';
+    if (!running) stopTaskTimer(sess);
     setBusy(running, running ? 'Agent is responding…' : null, sess);
     if (running && !runtime.polling) pollSessionMessages(sess);
   }

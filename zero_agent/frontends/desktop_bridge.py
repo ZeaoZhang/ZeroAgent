@@ -848,6 +848,9 @@ class AgentManager:
                 ]
                 if history:
                     agent.client.history = history
+                    # The first message after a reload continues that
+                    # conversation; do not compact it away.
+                    agent._skip_new_task_compaction_once = True
                 sess.restore_history = False
             effective_path = getattr(getattr(agent, "client", None), "log_path", None)
             if effective_path:
@@ -1215,6 +1218,21 @@ class AgentManager:
             print(f"get model profiles failed: {e}", file=sys.stderr)
         return []
 
+    @staticmethod
+    def _pending_turns_payload(sess: Session) -> list[dict]:
+        """Serialize prompts queued behind the running turn for the UI."""
+        out = []
+        for item in sess.pending_turns:
+            text = str(item.get("display_content") or item.get("prompt") or "").strip()
+            if not text:
+                continue
+            out.append({
+                "queueId": str(item.get("queue_id") or ""),
+                "content": text,
+                "imageIds": list(item.get("image_ids") or []),
+            })
+        return out
+
     def snapshot(self, sess: Session, include_messages: bool = True) -> dict:
         with self.lock:
             out = {
@@ -1235,6 +1253,7 @@ class AgentManager:
                 "planPath": sess.plan_path,
                 "planStatus": sess.plan_status,
                 "planTask": sess.plan_task,
+                "pendingTurns": self._pending_turns_payload(sess),
             }
             if include_messages:
                 out["messages"] = copy.deepcopy(sess.messages)
@@ -1696,6 +1715,10 @@ class AgentManager:
             if callable(snapshot_history):
                 history_snapshot = snapshot_history()
         summary, full = continue_cmd.restore(runner, path)
+        runner_agent = getattr(runner, "_agent", runner)
+        if full and hasattr(runner_agent, "_skip_new_task_compaction_once"):
+            # continue_cmd restored a real history: keep it on the next task.
+            runner_agent._skip_new_task_compaction_once = True
         ui_messages = continue_cmd.extract_ui_messages(path)
 
         with self.lock:
@@ -2336,6 +2359,7 @@ class AgentManager:
                 "lastError": sess.last_error,
                 "terminalStatus": sess.terminal_status,
                 "reason": sess.terminal_reason,
+                "pendingTurns": self._pending_turns_payload(sess),
             }
 
     def cancel(self, sid: str) -> dict:
@@ -2343,6 +2367,9 @@ class AgentManager:
             sess = self.sessions.get(sid)
             if not sess:
                 raise web.HTTPNotFound(text=json.dumps({"error": f"session not found: {sid}"}, ensure_ascii=False), content_type="application/json")
+            # Persist what the user already saw before dropping the draft;
+            # otherwise a stop makes streamed output disappear from the UI.
+            self._flush_partial_assistant(sess)
             if sess.agent and hasattr(sess.agent, "abort"):
                 with contextlib.suppress(Exception):
                     sess.agent.abort()
@@ -2355,7 +2382,23 @@ class AgentManager:
                 for item in sess.pending_turns
                 if item.get("queue_id")
             ]
+            # Prompts queued behind the cancelled turn were never executed:
+            # keep them in the transcript as cancelled user input instead of
+            # silently deleting what the user typed.
+            cancelled_items = list(sess.pending_turns)
             sess.pending_turns.clear()
+            for item in cancelled_items:
+                text = str(
+                    item.get("display_content") or item.get("prompt") or ""
+                ).strip()
+                if text:
+                    self.add_message(
+                        sess,
+                        "user",
+                        text,
+                        kind="queued_cancelled",
+                        queue_id=str(item.get("queue_id") or ""),
+                    )
             self._persist_pending_turns(sess)
             self._mark_turn_active(sess, False)
             sess.agent_turn_token = ""
@@ -2713,6 +2756,7 @@ def emit_session_state(sess: Session, state_name: str):
             "planPath": sess.plan_path,
             "planStatus": sess.plan_status,
             "planTask": sess.plan_task,
+            "pendingTurns": manager._pending_turns_payload(sess),
         }
     hub.emit(payload)
 
