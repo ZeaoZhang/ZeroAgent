@@ -1857,3 +1857,49 @@ def _exhaust(gen):
             next(gen)
     except StopIteration as e:
         return e.value
+
+
+def test_restored_history_is_not_compacted_on_first_task(tmp_path, monkeypatch) -> None:
+    config = AgentConfig(
+        llm_backends={"default": LLMBackendConfig(
+            name="default",
+            provider="openai",
+            api_key="test-key",
+            api_base="https://api.openai.com/v1",
+            model="test-model",
+            stream=False,
+        )},
+        default_backend="default",
+        workspace_dir=str(tmp_path / "workspace"),
+        memory_dir=str(tmp_path / "memory"),
+        sessions_dir=str(tmp_path / "sessions"),
+    )
+    agent = ZeroAgent(config=config)
+    agent.client.history = [
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+    ]
+    sent = []
+
+    def fake_sync(messages, _tools):
+        sent.append(messages)
+        if False:
+            yield ""
+        return MockResponse(content="new answer")
+
+    monkeypatch.setattr(agent.client, "_sync_chat", fake_sync)
+    calls = {"prepare": 0}
+    real_prepare = agent.client.prepare_for_new_task
+
+    def spy_prepare():
+        calls["prepare"] += 1
+        real_prepare()
+
+    monkeypatch.setattr(agent.client, "prepare_for_new_task", spy_prepare)
+    agent._skip_new_task_compaction_once = True
+
+    terminal = _exhaust(agent.run("new question", system_prompt="current system"))
+
+    assert terminal.status is TerminalStatus.COMPLETED
+    assert calls["prepare"] == 0
+    assert {"role": "user", "content": "old question"} in sent[0]

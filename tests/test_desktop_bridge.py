@@ -2998,3 +2998,65 @@ def test_hot_restart_flushes_in_flight_partial_before_exec() -> None:
     assert sess.messages[-1]["content"] == "streamed so far"
     stored = manager.session_store.load_state()["sessions"][sess.id]["messages"]
     assert stored[-1]["content"] == "streamed so far"
+
+
+def test_cancel_keeps_partial_output_and_queued_prompt() -> None:
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session(cwd=manager.workspace_dir)
+    manager.add_message(sess, "user", "run")
+    sess.status = "running"
+    sess.partial = {
+        "id": sess.msg_seq + 1,
+        "role": "assistant",
+        "content": "streamed",
+        "partial": True,
+    }
+    sess.pending_turns = [{
+        "queue_id": "q1",
+        "prompt": "排队测试",
+        "display_content": "排队测试",
+        "image_ids": [],
+    }]
+
+    result = manager.cancel(sess.id)
+
+    assert result["cancelledQueueIds"] == ["q1"]
+    assert sess.pending_turns == []
+    assistant = [m for m in sess.messages if m["role"] == "assistant"][-1]
+    assert assistant["content"] == "streamed"
+    queued = [m for m in sess.messages if m.get("kind") == "queued_cancelled"]
+    assert len(queued) == 1
+    assert queued[0]["content"] == "排队测试"
+    stored = manager.session_store.load_state()["sessions"][sess.id]["messages"]
+    assert any(m.get("kind") == "queued_cancelled" for m in stored)
+
+
+def test_pending_turns_surface_in_snapshot_poll_and_state(monkeypatch) -> None:
+    manager = desktop_bridge.AgentManager()
+    sess = manager.create_session(cwd=manager.workspace_dir)
+    manager.add_message(sess, "user", "hi")
+    sess.status = "running"
+    sess.pending_turns = [{
+        "queue_id": "q1",
+        "prompt": "p",
+        "display_content": "排队中文本",
+        "image_ids": [],
+    }]
+
+    assert manager.snapshot(sess)["pendingTurns"][0]["content"] == "排队中文本"
+    assert manager.messages(sess.id)["pendingTurns"][0]["queueId"] == "q1"
+    emitted: list[dict] = []
+    monkeypatch.setattr(desktop_bridge.hub, "emit", emitted.append)
+    desktop_bridge.emit_session_state(sess, "running")
+    assert emitted[-1]["pendingTurns"][0]["content"] == "排队中文本"
+
+
+def test_frontend_keeps_queued_prompts_and_refreshes_terminal_turn() -> None:
+    app_js = (
+        Path(desktop_bridge.__file__).parent / "desktop" / "static" / "app.js"
+    ).read_text(encoding="utf-8")
+    assert "function renderQueuedPrompts" in app_js
+    assert "async function refreshSessionFromBridge" in app_js
+    poll_start = app_js.index("async function pollSessionMessages")
+    assert "refreshSessionFromBridge" in app_js[poll_start:poll_start + 2500]
+    assert "queuedPromptIds" in app_js

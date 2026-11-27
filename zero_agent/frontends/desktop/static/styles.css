@@ -2071,3 +2071,18 @@ mark.search-highlight.active { background: #ff9800; color: #fff; }
   background: var(--surface);
   color: var(--fg);
 }
+
+/* Prompts queued behind the running turn */
+.msg-queued {
+  opacity: 0.65;
+}
+
+.msg-queued .queued-flag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 6px;
+  border: 1px dashed currentColor;
+  border-radius: 8px;
+  font-size: 0.78em;
+  opacity: 0.8;
+}
