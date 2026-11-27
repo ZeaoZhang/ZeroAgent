@@ -2627,7 +2627,42 @@ def log_bridge_event(text: str) -> None:
         pass
 
 
-manager = AgentManager()
+class _LazyAgentManager:
+    """Create the AgentManager singleton on first use.
+
+    Importing this module must stay free of side effects: constructing the
+    manager eagerly opened (and, on first run, created) the real session store
+    under the project's ``workspace/sessions`` — every test that merely
+    imported the bridge wrote the developer's runtime directory.
+    """
+
+    _instance: Optional[AgentManager] = None
+
+    def _manager(self) -> AgentManager:
+        if type(self)._instance is None:
+            type(self)._instance = AgentManager()
+        return type(self)._instance  # type: ignore[return-value]
+
+    @property
+    def __dict__(self):  # type: ignore[override]
+        # Tests (and monkeypatch) mutate manager attributes; expose the real
+        # instance dict so attribute lookups/undo behave like AgentManager.
+        return self._manager().__dict__
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._manager(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_instance":
+            type(self)._instance = value
+            return
+        setattr(self._manager(), name, value)
+
+    def __delattr__(self, name: str) -> None:
+        delattr(self._manager(), name)
+
+
+manager: AgentManager = _LazyAgentManager()  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------

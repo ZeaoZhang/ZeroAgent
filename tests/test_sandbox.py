@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -193,24 +194,28 @@ class TestMacosIsolation:
             pytest.skip("home 目录不可写")
         work = Path(tempfile.mkdtemp())
         outside = Path(tempfile.mkdtemp(dir=str(home)))
-        target = outside / "blocked.txt"
-        script = f"echo x > {target}"
+        try:
+            target = outside / "blocked.txt"
+            script = f"echo x > {target}"
 
-        # 对照：没有沙箱时可以写成功
-        baseline = _run(["bash", "-c", script])
-        assert baseline.returncode == 0
-        assert target.is_file()
+            # 对照：没有沙箱时可以写成功
+            baseline = _run(["bash", "-c", script])
+            assert baseline.returncode == 0
+            assert target.is_file()
 
-        # 沙箱内同一位置必须失败
-        sandbox_target = outside / "blocked-sandboxed.txt"
-        cmd, applied, reason = sandbox.wrap_command(
-            ["bash", "-c", f"echo x > {sandbox_target}"], str(work), "macos"
-        )
-        assert applied, reason
-        result = _run(cmd, cwd=str(work))
+            # 沙箱内同一位置必须失败
+            sandbox_target = outside / "blocked-sandboxed.txt"
+            cmd, applied, reason = sandbox.wrap_command(
+                ["bash", "-c", f"echo x > {sandbox_target}"], str(work), "macos"
+            )
+            assert applied, reason
+            result = _run(cmd, cwd=str(work))
 
-        assert result.returncode != 0
-        assert not sandbox_target.exists()
+            assert result.returncode != 0
+            assert not sandbox_target.exists()
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+            shutil.rmtree(work, ignore_errors=True)
 
     def test_code_run_works_inside_sandbox(self) -> None:
         work = Path(tempfile.mkdtemp())
@@ -234,19 +239,23 @@ class TestMacosIsolation:
             pytest.skip("home 目录不可写")
         work = Path(tempfile.mkdtemp())
         outside = Path(tempfile.mkdtemp(dir=str(home)))
-        target = outside / "cwd-bypass.txt"
+        try:
+            target = outside / "cwd-bypass.txt"
 
-        result = _consume(code_run(
-            f"echo x > {target}",
-            code_type="bash",
-            cwd="/",
-            sandbox_mode="macos",
-            sandbox_root=str(work),
-            timeout=30,
-        ))
+            result = _consume(code_run(
+                f"echo x > {target}",
+                code_type="bash",
+                cwd="/",
+                sandbox_mode="macos",
+                sandbox_root=str(work),
+                timeout=30,
+            ))
 
-        # 无论命令成功与否，目标文件都不能被写出来
-        assert not target.exists()
+            # 无论命令成功与否，目标文件都不能被写出来
+            assert not target.exists()
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+            shutil.rmtree(work, ignore_errors=True)
 
 
 class TestExplicitSandboxFailClosed:
