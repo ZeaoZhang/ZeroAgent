@@ -89,9 +89,14 @@ def test_prompt_uses_tilde_instead_of_absolute_home(
 
     text = self_prompt.build(config, "zh")
 
-    assert "~/.zeroagent/skills" in text
-    assert "~/.zeroagent/extensions" in text
-    assert "~/.zeroagent/mcp.json" in text
+    # home 可能位于项目根内，此时 display_path 会优先输出 <project>/…；
+    # 用同一规则构造期望，既保证“不暴露绝对路径”，也不绑定具体前缀。
+    from zero_agent.utils.files import display_path, project_root
+
+    home = display_path(str(tmp_path), project_root())
+    assert f"{home}/.zeroagent/skills" in text
+    assert f"{home}/.zeroagent/extensions" in text
+    assert f"{home}/.zeroagent/mcp.json" in text
     assert str(tmp_path) not in text
 
 

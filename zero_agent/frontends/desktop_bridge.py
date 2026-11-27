@@ -177,8 +177,44 @@ def load_bridge_security(host: str, port: int) -> BridgeSecurity:
     ))
 
 
+def _ancestor_pids() -> Optional[set]:
+    """Return the PIDs of this process and all of its ancestors.
+
+    ``None`` means the ancestry could not be determined (no psutil, or the
+    platform refuses to expose the parent chain).
+    """
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return None
+    try:
+        proc = psutil.Process(os.getpid())
+        pids = {proc.pid}
+        pids.update(parent.pid for parent in proc.parents())
+    except Exception:
+        return None
+    return pids
+
+
 def desktop_parent_is_alive(expected_parent_pid: int, *, current_parent_pid: Optional[int] = None) -> bool:
-    return expected_parent_pid > 1 and (current_parent_pid if current_parent_pid is not None else os.getppid()) == expected_parent_pid
+    """Whether the desktop shell that launched us is still running.
+
+    The desktop process is an *ancestor* of this process, not necessarily the
+    direct parent: when the bridge is started from a terminal, pytest or any
+    other wrapper spawned by the desktop app, ``os.getppid()`` points at the
+    wrapper. Comparing a single ppid therefore made those processes conclude
+    they were orphaned and SIGTERM themselves a second after startup
+    (exit code 143 with no traceback). Walk the whole ancestor chain instead,
+    and stay conservative when the chain is unknown.
+    """
+    if expected_parent_pid <= 1:
+        return False
+    if current_parent_pid is not None:
+        return current_parent_pid == expected_parent_pid
+    ancestors = _ancestor_pids()
+    if ancestors is None:
+        return os.getppid() == expected_parent_pid
+    return expected_parent_pid in ancestors
 
 
 def _windows_parent_handle(parent_pid: int):
@@ -205,7 +241,15 @@ def desktop_parent_pid() -> Optional[int]:
         parent_pid = int(value)
     except ValueError:
         return None
-    return parent_pid if parent_pid > 1 else None
+    if parent_pid <= 1:
+        return None
+    ancestors = _ancestor_pids()
+    if ancestors is not None and parent_pid not in ancestors:
+        # The variable leaked into an unrelated process (e.g. a subprocess of the
+        # desktop shell). Arming the monitor here would make that process kill
+        # itself as soon as it looks at its own parent chain.
+        return None
+    return parent_pid
 
 
 async def monitor_desktop_parent(parent_pid: int) -> None:

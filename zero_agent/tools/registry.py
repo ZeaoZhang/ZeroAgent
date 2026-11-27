@@ -322,6 +322,7 @@ class ToolRegistry:
             ("zero_agent.tools.builtin.file", "register_file_tools"),
             ("zero_agent.tools.builtin.utility", "register_utility_tools"),
             ("zero_agent.tools.builtin.memory", "register_memory_tools"),
+            ("zero_agent.tools.builtin.history", "register_history_tools"),
             ("zero_agent.tools.builtin.user", "register_user_tools"),
             ("zero_agent.tools.builtin.vision", "register_vision_tools"),
         ]
@@ -343,6 +344,7 @@ class ToolRegistry:
             "file_write",
             "find",
             "read_doc",
+            "session_history",
             "fetch",
             "web_search",
             "update_working_checkpoint",

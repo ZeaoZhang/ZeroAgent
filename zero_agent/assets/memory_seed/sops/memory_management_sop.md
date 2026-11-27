@@ -95,3 +95,14 @@ L4: [Memory]/L4_raw_sessions/ (历史会话层 - scheduler反射自动收集，�
             │
             └─ NO → 判定为『通用常识』或『冗余信息』: 严禁存储，直接丢弃
 ```
+
+
+---
+## 桌面会话原始记录（SQLite，别靠导出 txt）
+- 存储：`<sessions_dir>/sessions.sqlite3`（默认 `<project>/workspace/sessions/sessions.sqlite3`），不在 `memory/L4_raw_sessions/`。
+- 表结构：`sessions(id,title,cwd,updated_at,msg_seq,...)`；`messages(session_id,message_id,role,content,timestamp,metadata_json)`，`messages.content` 就是完整转录（含工具输出）。
+- 用法：直接调内置工具 `session_history`：
+  - `action=list` 列出最近会话（拿 session_id 与消息数）
+  - `action=read` 传 `session_id`（可 `after_id`/`limit`/`full`）读取原文
+  - `action=search` 用 `query` 跨会话搜索
+- 禁止：先 export 成 txt 再读、猜 `model_responses_*.txt` 路径、去 workspace 里乱翻；桌面会话日志文件名是 `model_responses_session_<sid>.txt`，SQLite 才是权威来源。
